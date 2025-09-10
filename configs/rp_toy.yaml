@@ -1,0 +1,32 @@
+train: false
+test: false
+test_baseline: true
+model_type: gnn # not supported yet
+
+env:
+  timesteps: 300
+  batch_size: 60  # size of a batch in seconds
+  num_envs: 1
+  sumo_seed: 4220
+  sumocfg: configs/small_net.sumocfg
+  use_gui: False
+  verbose: False
+  reward_params:
+    reward_type: default
+    
+baseline:
+  type: random
+
+train_pars:
+  total_iters: 40 # total_iters = desired number of episodes / batch_size, used only for training
+
+test_pars:
+  num_tests: 50
+
+logs:
+  taxi_reservations_logger:
+    log_taxis: false
+    log_reservations: false
+    show_graph: false
+  rewards_logger:
+    log_rewards: false

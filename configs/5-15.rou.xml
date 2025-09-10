@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<routes xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/routes_file.xsd">
+
+  <!-- Taxi type: capacity 2, with taxi device -->
+  <vType id="taxi" vClass="taxi" color="green" personCapacity="2">
+    <param key="has.taxi.device" value="true"/>
+    <param key="device.taxi.pickUpDuration" value="0"/>
+    <param key="device.taxi.dropOffDuration" value="10"/>
+    <param key="device.taxi.parking" value="true"/>
+  </vType>
+
+  <!-- 5 taxis -->
+  <trip id="t0" type="taxi" depart="0" from="3940" to="-3103"/>
+  <trip id="t1" type="taxi" depart="0" from="2936" to="-3922"/>
+  <trip id="t2" type="taxi" depart="0" from="43"   to="-4747"/>
+  <trip id="t3" type="taxi" depart="0" from="4534" to="3372"/>
+  <trip id="t4" type="taxi" depart="0" from="4297" to="-1026"/>
+
+  <!-- Riders: 3 waves of 5 riders each (0–180s, 180–360s, 360–540s) -->
+  <!-- Wave 1 (0–180s) -->
+  <person id="p0"  depart="0">
+    <ride lines="taxi" from="-4716" parkingArea="pa-3236" to="-3236"/>
+  </person>
+  <person id="p1"  depart="30">
+    <ride lines="taxi" from="43"    parkingArea="pa3192"   to="3192"/>
+  </person>
+  <person id="p2"  depart="60">
+    <ride lines="taxi" from="-2623" parkingArea="pa-4167"  to="-4167"/>
+  </person>
+  <person id="p3"  depart="90">
+    <ride lines="taxi" from="2396"  parkingArea="pa-1606"  to="-1606"/>
+  </person>
+  <person id="p4"  depart="120">
+    <ride lines="taxi" from="3060"  parkingArea="pa4319"   to="4319"/>
+  </person>
+
+  <!-- Wave 2 (180–360s) -->
+  <person id="p5"  depart="180">
+    <ride lines="taxi" from="-4358" parkingArea="pa-1725"  to="-1725"/>
+  </person>
+  <person id="p6"  depart="210">
+    <ride lines="taxi" from="4173"  parkingArea="pa2243"   to="2243"/>
+  </person>
+  <person id="p7"  depart="240">
+    <ride lines="taxi" from="2151"  parkingArea="pa-2664"  to="-2664"/>
+  </person>
+  <person id="p8"  depart="270">
+    <ride lines="taxi" from="-4889" parkingArea="pa4718"   to="4718"/>
+  </person>
+  <person id="p9"  depart="300">
+    <ride lines="taxi" from="1606"  parkingArea="pa-2199"  to="-2199"/>
+  </person>
+
+  <!-- Wave 3 (360–540s) -->
+  <person id="p10" depart="360">
+    <ride lines="taxi" from="-219"  parkingArea="pa3507"   to="3507"/>
+  </person>
+  <person id="p11" depart="390">
+    <ride lines="taxi" from="-5070" parkingArea="pa3531"   to="3531"/>
+  </person>
+  <person id="p12" depart="420">
+    <ride lines="taxi" from="-4493" parkingArea="pa2331"   to="2331"/>
+  </person>
+  <person id="p13" depart="450">
+    <ride lines="taxi" from="-3922" parkingArea="pa92"     to="92"/>
+  </person>
+  <person id="p14" depart="480">
+    <ride lines="taxi" from="-2182" parkingArea="pa1777"   to="1777"/>
+  </person>
+
+</routes>

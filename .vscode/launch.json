@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "gnn-rl",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "train.py",                      // or scripts/train_gnn_ppo.py
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "args": ["-c", "configs/rp_toy.yaml"],
+      "python": "C:\\Users\\bochenin\\Anaconda3\\envs\\smas_pyg\\python.exe",
+      "env": {
+        "SUMO_HOME": "C:\\Program Files (x86)\\Eclipse\\Sumo",        // set this for SUMO tools
+        "PYTHONPATH": "${workspaceFolder}"        // so `rt_gnn_rl` imports resolve
+      },
+      "justMyCode": true
+    }
+  ]
+}
