@@ -7,16 +7,16 @@ from .gnn_backbone import DummyBackbone, EgoGraphEncoder
 
 
 class _BatchView:
-    """Minimal view that provides .batch (node -> graph id)."""
+    """Lightweight container exposing a .batch vector mapping nodes to graph indices."""
     def __init__(self, batch_vec: torch.Tensor):
         self.batch = batch_vec
 
     
 class _DummyEgoEncoder(nn.Module):
     """
-    Wraps DummyBackbone to mimic the (h, batch) interface of EgoGraphEncoder.
-    encode_graphs(x_list, ei_list, extra) -> (h [sum_nodes, H], batch_view)
+    Adapter around DummyBackbone providing the (h, batch) interface expected by the policy code.
     """
+
     def __init__(self, in_dim: int, hidden: int):
         super().__init__()
         self.mlp = DummyBackbone(in_dim, hidden)
@@ -37,7 +37,8 @@ class _DummyEgoEncoder(nn.Module):
 
 class _SAGEEgoEncoder(nn.Module):
     """
-    Thin adapter around your EgoGraphEncoder to expose encode_graphs(...).
+    Adapter around EgoGraphEncoder that exposes a unified encode_graphs(...) API
+    for the actor–critic.
     """
     def __init__(self, in_dim: int, hidden: int, **gnn_kwargs):
         super().__init__()

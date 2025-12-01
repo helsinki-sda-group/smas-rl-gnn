@@ -1,9 +1,14 @@
-# rt_gnn_rl/graphs/builders.py (or wherever you import it from)
+"""
+Graph construction utilities for batched ego-graphs.
+
+build_padded_ego_batch(...) converts per-robot candidate lists into a fixed-shape
+batch of ego-graphs (robot + candidate tasks) suitable for GNN-based policies.
+"""
 from __future__ import annotations
 from typing import Callable, Sequence, Any, List, Tuple, Optional, Dict
 import numpy as np
 
-# Task protocol: we only read fields used by feature_fn; pass through object
+# Only the fields required by feature_fn are accessed; all other fields are passed through unchanged.
 def build_padded_ego_batch(
     *,
     robots: Sequence[Optional[str]],
@@ -86,7 +91,7 @@ def build_padded_ego_batch(
         try:
             x[i, 0, :] = feature_fn(rid, None, "robot")
         except Exception:
-            # fallback: zeros with bias 1 in the last slot if you used that convention
+            # fallback: zeros with bias 1 in the last slot
             pass
         node_mask[i, 0] = 1
 
@@ -115,7 +120,7 @@ def build_padded_ego_batch(
             cand_idx[i, local_slot] = node_id
             cand_mask[i, local_slot] = 1
 
-            # keep the external id for controller use
+            # Store external task identifiers for downstream controller mapping.
             try:
                 cand_task_ids[i][local_slot] = str(getattr(t, "id", None)) or None
             except Exception:
@@ -141,7 +146,6 @@ def build_padded_ego_batch(
         edge_mask=edge_mask,
         cand_idx=cand_idx,
         cand_mask=cand_mask,
-        # If you later add globals back, include here:
         # global_stats=(global_stats_fn() if global_stats_fn else np.zeros((G,), np.float32)),
     )
     return obs, cand_task_ids

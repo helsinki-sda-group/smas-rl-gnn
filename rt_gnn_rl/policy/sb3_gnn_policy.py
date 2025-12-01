@@ -5,21 +5,23 @@ from gymnasium import spaces
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
-from .actor_critic import EgoActorCritic  # your pluggable GNN A2C
+from .actor_critic import EgoActorCritic  # pluggable GNN-based actor–critic
 
 
 class DictPassthroughExtractor(BaseFeaturesExtractor):
     """
-    Capture the raw dict obs for the policy, but return a dummy feature
-    so SB3's ActorCriticPolicy plumbing stays happy.
+    Captures the raw dictionary observation for the policy and returns a
+    dummy feature tensor to satisfy the interface expected by SB3's
+    ActorCriticPolicy.
     """
+
     def __init__(self, observation_space: spaces.Dict):
-        # features_dim must be > 0; we never use it
+        # features_dim must be > 0
         super().__init__(observation_space, features_dim=1)
         self.last_obs: Optional[Dict[str, th.Tensor]] = None
 
     def forward(self, obs: Dict[str, th.Tensor]) -> th.Tensor:
-        self.last_obs = obs  # obs already on torch tensors with batch dim
+        self.last_obs = obs   # observation tensors already include a batch dimension
         any_tensor = next(iter(obs.values()))
         B = any_tensor.shape[0]
         return th.ones((B, 1), device=any_tensor.device, dtype=any_tensor.dtype)
@@ -33,8 +35,8 @@ class RTGNNPolicy(ActorCriticPolicy):
       - Env action_space is MultiDiscrete with nvec = [K_max+1] * R
         (last slot is explicit NO-OP per robot).
       - EgoActorCritic keeps producing logits of shape [R, K_max] (no change).
-      - We append a learnable NO-OP logit (one scalar parameter) as the (K_max)-th column.
-      - We also append a mask=1 column for NO-OP so sampling is always safe.
+      - Single learnable NO-OP logit (one scalar parameter) is added as the (K_max)-th column.
+      - A corresponding mask entry is appended to ensure the NO-OP option is always valid.
     """
     def __init__(
         self,
@@ -46,7 +48,7 @@ class RTGNNPolicy(ActorCriticPolicy):
         critic_aggregation: str = "joint_mean",
         **kwargs,
     ):
-        # Use our passthrough extractor
+        # Use the passthrough extractor to preserve the raw dict observation
         super().__init__(*args, features_extractor_class=DictPassthroughExtractor, **kwargs)
         self.k_max = k_max               # logits from GNN
         self.k_out = k_max + 1           # +1 explicit NO-OP per robot (matches env action space)
@@ -83,8 +85,7 @@ class RTGNNPolicy(ActorCriticPolicy):
             **gnn_kwargs,
         )
 
-        # One learnable logit for NO-OP (shared across robots and batch; simple & effective).
-        # If you prefer per-robot bias: make it nn.Parameter(th.zeros(1,)) and expand, or register [R].
+        # # Single learnable NO-OP logit shared across robots and batch.
         self.noop_logit = nn.Parameter(th.tensor(0.0))
 
     # --- helpers -------------------------------------------------------------
@@ -112,7 +113,7 @@ class RTGNNPolicy(ActorCriticPolicy):
             if value_b.dim() == 0:       # scalar (joint_* critic)
                 v_b = value_b
             elif value_b.dim() == 1:     # [R] (per_robot critic) -> choose an aggregation
-                v_b = value_b.mean()     # or .sum() depending on your reward convention
+                v_b = value_b.mean()     # or .sum() depending on reward convention
             else:
                 v_b = value_b.squeeze()
             values_list.append(v_b)
@@ -128,11 +129,11 @@ class RTGNNPolicy(ActorCriticPolicy):
         returns: logits_full: [B,R,K_max+1], mask_full: [B,R,K_max+1] (bool)
         """
         B, R, _K = logits.shape
-        # NO-OP logit: same scalar for all robots/batch (simple baseline)
+        # NO-OP logit is a shared scalar parameter used for all robots and all batch elements
         noop_col = self.noop_logit.expand(B, R, 1)
         logits_full = th.cat([logits, noop_col], dim=-1)  # [B,R,K_max+1]
 
-        # Mask: original candidate mask plus a '1' column for NO-OP
+        # Construct the mask by appending an always-valid entry for the NO-OP slot
         if mask_k.dtype != th.bool:
             mask_k = mask_k.bool()
         ones = th.ones((B, R, 1), dtype=th.bool, device=mask_k.device)
@@ -141,9 +142,13 @@ class RTGNNPolicy(ActorCriticPolicy):
 
     def _dist_from_logits(self, logits: th.Tensor, mask: th.Tensor):
         """
-        Build SB3's action distribution.
-        logits: [B,R,K_out], mask: [B,R,K_out] (bool). We flatten per MultiDiscrete.
+        Construct the SB3 action distribution.
+        Inputs:
+            logits: [B, R, K_out]
+            mask:   [B, R, K_out] (bool)
+        The logits are flattened along the last two dimensions to match MultiDiscrete semantics.
         """
+
         logits = logits.masked_fill(~mask, -1e9)
         B = logits.size(0)
         logits_flat = logits.reshape(B, -1)                 # [B, R*K_out]
@@ -152,7 +157,7 @@ class RTGNNPolicy(ActorCriticPolicy):
     # --- main SB3 hooks ------------------------------------------------------
 
     def forward(self, obs: Any, deterministic: bool = False):
-        # Let SB3 put obs through our extractor so we can grab the dict with batch dim
+        # Pass the observation through the features extractor to obtain the dict with batch dimension
         _ = self.extract_features(obs, features_extractor=self.features_extractor)
 
         obs_dict_b = cast(Dict[str, th.Tensor], self.features_extractor.last_obs)
@@ -170,9 +175,11 @@ class RTGNNPolicy(ActorCriticPolicy):
 
     def evaluate_actions(self, obs: Any, actions: th.Tensor):
         """
-        Used by SB3 during training to compute log_prob/entropy/values.
-        Must mirror `forward`'s distribution.
+        Evaluation method used by SB3 during training to compute log-probabilities,
+        entropy, and value estimates. Must be consistent with `forward()` and the
+        distribution used during action sampling.
         """
+
         _ = self.extract_features(obs, features_extractor=self.features_extractor)
         obs_dict_b = cast(Dict[str, th.Tensor], self.features_extractor.last_obs)
         assert obs_dict_b is not None

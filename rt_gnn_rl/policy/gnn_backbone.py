@@ -33,7 +33,7 @@ class EgoGraphEncoder(nn.Module):
         Args:
             x_list:  list of [n_i, F] node feature tensors
             edge_index_list: list of [2, e_i] edge index tensors per graph
-            _batch_list: unused (kept for signature compatibility)
+            _batch_list: unused placeholder that preserves compatibility with the unified encoder API.
 
         Returns:
             h:     [sum_i n_i, hidden] node embeddings

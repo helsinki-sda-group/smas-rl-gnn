@@ -15,7 +15,6 @@ class Task:
     toEdge: str
     state: int
     reservationTime: float
-    # NEW derived attributes
     estTravelTime: float = 0.0           # sec, pickup→dropoff
     pickupDeadline: float = 0.0          # sec, release + max_wait_delay_s
     dropoffDeadline: float = 0.0         # sec, release + estTravelTime + max_travel_delay_s
@@ -26,16 +25,16 @@ class Task:
 
 class RLControllerAdapter:
     """
-    Minimal RL-friendly adapter over TraCI's Taxi interface.
+    RL adapter over TraCI's Taxi interface.
 
     Key features:
       • Candidate selection is restricted by a "vicinity" threshold (meters) using road-network distance.
-      • Rewards are computed per-robot in the style of your MultiTaskAllocationEnv:
+      • Rewards are computed per-robot as in MultiTaskAllocationEnv:
           r_i = capacity_i + (-1 step) + (- abandoned_i) + (- wait_at_pickups_i) + completion_i
         where completion_i = pickups_i or dropoffs_i per tick (configurable).
     """
 
-    # Reservation state flags (best-effort defaults; SUMO uses bit flags).
+    # Reservation state flags 
     STATE_REQUESTED = 1
     STATE_ASSIGNED = 4
     STATE_PICKED_UP = 8
@@ -48,18 +47,15 @@ class RLControllerAdapter:
         k_max: int = 8,
         vicinity_m: float = 2_000.0,
         max_steps: Optional[int] = None,
-        # NEW:
         min_episode_steps: int = 0,            # warmup; don't allow done before this many steps
-        idle_patience_steps:int = 60,       # how long whole-fleet idle must persist
+        idle_patience_steps:int = 600,       # how long whole-fleet idle must persist
         respect_sumo_end:bool = False,      # stop at SUMO <time end="...">
         serve_to_empty: bool = True,           # end only when nothing left to do
         require_seen_reservation: bool = True, # don't allow done until we've seen at least one reservation
-        default_capacity: int = 5,
         completion_mode: str = "dropoff",
         reset_fn: Optional[Callable[[], None]] = None,
-        # NEW constants for deadlines/capacity logic
-        max_wait_delay_s: float = 600.0,        # 10 minutes
-        max_travel_delay_s: float = 900.0,      # 15 minutes allowed slack
+        max_wait_delay_s: float = 600.0,        # allowed waiting time until pickup
+        max_travel_delay_s: float = 900.0,      # how late the robot is allowed to deliever to dropoff
         max_robot_capacity: int = 5,
         logger: Optional["RidepoolLogger"]=None,
     ) -> None:
@@ -68,16 +64,23 @@ class RLControllerAdapter:
             sumo: the TraCI handle/module (usually `traci`).
             k_max: cap on candidates per robot.
             vicinity_m: maximum road-network distance (meters) robot→task pickup to be a valid candidate.
-            max_steps: optional episode cap.
-            default_capacity: used if capacity can't be read from SUMO for a vehicle.
+            max_steps: hard episode max length.
+            min_episode_steps: minimum episode length.
+            idle_patience_steps: end if whole fleet is idle for that long
+            respect_sumo_end: stop at SUMO <time end="...">
+            serve_to_empty: to end the episode, there should be no pending reservations, active assignments or passengers travelling
+            require_seen_reservation: episode cannot be marked as done unless at least one reservation was seen
             completion_mode: "pickup" → reward counted at pickup, "dropoff" → reward counted at dropoff (default).
             reset_fn: optional callable to (re)start/reset SUMO when env.reset() calls adapter.reset().
+            max_wait_delay_s: allowed waiting time until pickup. If this is violated, the task becomes obsolete.
+            max_travel_delay_s: how late the robot is allowed to deliever to dropoff. No explicit penalty for that in the current implementation. 
+            max_robot_capacity:
+            logger: RidepoolLogger instance.
         """
         self.sumo = sumo
         self.k_max = int(k_max)
         self.vicinity_m = float(vicinity_m)
         self.max_steps = max_steps
-        self.default_capacity = int(default_capacity)
         self.completion_mode = completion_mode.lower().strip()
         assert self.completion_mode in {"pickup", "dropoff"}, "completion_mode must be 'pickup' or 'dropoff'"
         self.reset_fn = reset_fn
@@ -142,8 +145,8 @@ class RLControllerAdapter:
 
     def _person_to_res_index(self, res_index: dict[str, object]) -> dict[str, str]:
         """
-        Map personId -> reservationId. We add both the raw person id and the
-        stripped version (without any leading 'p') to be robust.
+        Map personId -> reservationId. Both the raw person id and the
+        stripped version (without any leading 'p') are keeped.
         """
         m = {}
         for rid, r in res_index.items():
@@ -214,7 +217,7 @@ class RLControllerAdapter:
         already_picked: set[str],
     ) -> list[str]:
         """
-        Build a [id,id,...] sequence using your greedy POI selection with the
+        Build a [id,id,...] sequence using greedy POI selection with the
         constraint "dropoff after pickup unless already picked".
         """
         # build POIs = (res_id, edge_id, kind)
@@ -229,7 +232,7 @@ class RLControllerAdapter:
             if r_id not in already_picked:
                 poi.append((r_id, self._edge_for_pickup(r), "pickup"))
 
-        # helper: which POIs may be scheduled next, given what's already scheduled
+        # which POIs may be scheduled next, given what's already scheduled
         def getCandPoi(poi_all, scheduled):
             cand = []
             for p in poi_all:
@@ -395,7 +398,7 @@ class RLControllerAdapter:
             is_obsolete = waiting_time > self.max_wait_delay_s and st < self.STATE_PICKED_UP
             is_assigned = (rid in assigned_ids)
 
-            # we keep REQUESTED and ASSIGNED in the pool (you can choose to exclude ASSIGNED from candidates later)
+            # the task remains in the candidate pool until it is physically picked up
             if st == self.STATE_PICKED_UP:
                 continue  # not a "waiting" task for candidates
 
@@ -416,7 +419,7 @@ class RLControllerAdapter:
         return tasks
 
     def _estimate_travel_time(self, from_edge: str, to_edge: str) -> float:
-        """Best-effort ETA (sec) from pickup to dropoff using SUMO routing."""
+        """ ETA (sec) from pickup to dropoff using SUMO routing."""
         if not from_edge or not to_edge:
             return 0.0
         try:
@@ -425,7 +428,8 @@ class RLControllerAdapter:
                 return float(getattr(r, "travelTime"))
         except Exception:
             pass
-        # crude fallback: distance / 10 m/s (~36 km/h)
+        # Fallback estimate: travel_time ≈ distance / 10 m/s (≈36 km/h) if SUMO routing is unavailable.
+
         dist = self._road_distance(from_edge, to_edge)
         return float(dist / 10.0) if np.isfinite(dist) else 0.0
 
@@ -473,7 +477,6 @@ class RLControllerAdapter:
 
         K = self.k_max if K is None else int(K)
         tasks = self._last_tasks
-        # filter tasks here if desired:
         tasks = [t for t in tasks if not t.is_obsolete and not t.is_assigned]  # <- keep only viable tasks
         self._last_tasks = tasks  # keep consistent indices
 
@@ -585,7 +588,7 @@ class RLControllerAdapter:
                 idx = int(self._rng.integers(0, len(best)))
                 winners[res_id] = best[idx]
 
-            # Conflict log (use the actual winner we chose)
+            # Conflict log (the actual winner is used)
             if self.logger:
                 self.logger.log_conflict(
                     self._now(), res_id, rids, [rem_cap[r] for r in rids], winners[res_id]
@@ -792,7 +795,7 @@ class RLControllerAdapter:
             kept = [r for r in seq if (not alive or r in alive)]
             self._shadow_plan_by_robot[rid] = kept
 
-    # Helper: do we have any work left right now?
+    # Helper: is there any work left right now?
     def _no_work_left(self) -> bool:
         # any live reservations?
         try:
@@ -890,7 +893,7 @@ class RLControllerAdapter:
 
     def _compute_rewards_per_robot(self) -> Tuple[Dict[str, float], Dict[str, Dict[str, float]]]:
         """
-        Build per-robot rewards matching your MultiTaskAllocationEnv semantics.
+        Build per-robot rewards.
         Returns (rewards, terms_per_robot) where terms contain each component for debugging.
         """
         robots = self._last_robot_ids or self.get_robots()
@@ -926,7 +929,7 @@ class RLControllerAdapter:
             removed = prev_ass - cur_ass
             # Exclude those that were actually picked up this tick (moved from assigned → customers)
             removed_not_picked = {x for x in removed if x not in picked_up_ids_by_robot[rid]}
-            # Count as abandoned only if we have never seen them onboard and they didn't complete earlier
+            # Count as abandoned only if they were never onboard and they didn't complete earlier
             abandoned = {x for x in removed_not_picked if (x not in self._ever_picked_up and x not in self._ever_dropped_off)}
             abandoned_count_by_robot[rid] = len(abandoned)
 
@@ -1100,7 +1103,7 @@ class RLControllerAdapter:
             return bool(st & self.STATE_PICKED_UP)
 
         for rid in robots:
-            onboard = len(self._get_current_customers(rid))  # person ids string, we just need count
+            onboard = len(self._get_current_customers(rid))  
             plan = self._shadow_plan_by_robot.get(rid, [])
             if onboard == 0:
                 if plan:

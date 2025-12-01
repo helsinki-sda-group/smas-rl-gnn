@@ -12,6 +12,7 @@ TASK_FEATURE_NAMES: List[str] = [
     "pickup_loc_x", "pickup_loc_y", "drop_loc_x", "drop_loc_y",
     "is_obsolete", "is_assigned",
 ]
+# robot node and task node should have the same dimensionality, so robot features are padded with zeros
 F = 9
 
 def make_feature_fn(ctrl: RLControllerAdapter):
@@ -116,11 +117,6 @@ def make_feature_fn(ctrl: RLControllerAdapter):
 
             out[7] = 1.0 if bool(getattr(t, "is_obsolete", False)) else 0.0
             out[8] = 1.0 if bool(getattr(t, "is_assigned", False)) else 0.0
-
-            # (optional) if you later add robot→task distance, use the same guard+cast pattern:
-            # if _valid_robot_id(rid):
-            #     rid_s = cast(str, rid)
-            #     ... TraCI calls with rid_s ...
 
             return out
 

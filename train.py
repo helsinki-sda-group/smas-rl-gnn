@@ -20,8 +20,8 @@ R = 5           # number of robots (taxis) expected. # should match to taxis.rou
 K_max = 3        # candidates per robot
 N_max = 16        # max nodes per ego-graph (robot + tasks in its neighborhood)
 E_max = 64        # max edges per ego-graph
-F = 9            # node feature dimension (match your feature_fn!)
-G = 0             # global stats dim (match your global_stats_fn!)
+F = 9            # node feature dimension (robot node and task node should have the same dimensionality, padding is applied)
+G = 0             # global stats dim 
 
 traci = start_sumo(SUMO_CFG, use_gui=False,
                    extra_args=["--seed", "42", "--device.taxi.dispatch-algorithm", "traci"])
@@ -41,20 +41,20 @@ controller = RLControllerAdapter(
     reset_fn=make_reset_fn(SUMO_CFG, use_gui=False,
                            extra_args=["--seed", "42", "--device.taxi.dispatch-algorithm", "traci"]),
     k_max=K_max,
-    vicinity_m=1000.0,
-    default_capacity=2,     # should match to taxis.rou.xml
-    completion_mode="dropoff",
+    vicinity_m=1000.0,      # vicinity in meters
+    completion_mode="dropoff", # task is marked as completed at dropoff
     max_steps=10000,
     min_episode_steps = 700,
-    serve_to_empty=True,
-    require_seen_reservation=True,
-    max_wait_delay_s=600.0,
-    max_travel_delay_s=900.0,
-    max_robot_capacity=2,
+    serve_to_empty=True,    # end only when nothing left to do
+    require_seen_reservation=True, # don't allow done until we've seen at least one reservation
+    max_wait_delay_s=600.0,     # allowed waiting time until pickup 
+    max_travel_delay_s=900.0,  # no explicit penalty for that now (!)
+    max_robot_capacity=2, # should match to taxis.rou.xml
     logger=rp_logger,
 )
 feature_fn = make_feature_fn(controller)
 
+# not implemented yet, will raise error for G > 0
 def global_stats_fn(world_state):
     # Return np.ndarray(G,), e.g. mean wait, fleet utilization, time-of-day …
     ...
@@ -70,7 +70,7 @@ env = RidepoolRTEnv(
 )
 env = Monitor(env)
 
-# 4) SB3 PPO with your GNN policy
+# 4) SB3 PPO with custom GNN policy
 policy_kwargs = dict(in_dim=F, hidden=128, k_max=K_max)
 model = PPO(
     RTGNNPolicy,

@@ -7,11 +7,15 @@ from rt_gnn_rl.graphs import build_padded_ego_batch  # implemented below
 
 class RidepoolRTEnv(gym.Env):
     """
-    Thin adapter around your SUMO controller/adapter.
-    obs: dict of padded ego-graphs
-    action: MultiDiscrete([K_max+1]*R) — pick a candidate slot per robot.
-    - last slot is reserved for no-op action
-    - macro-decisions every `decision_dt` sim seconds (no-op in between)
+    Gymnasium environment wrapping the RLControllerAdapter and SUMO Taxi simulation.
+
+    Observation:
+        Dict of padded ego-graphs (one per robot) produced by build_padded_ego_batch.
+    Action:
+        MultiDiscrete([K_max+1] * R) – candidate slot per robot, with the last slot
+        reserved for a no-op action.
+    Control frequency:
+        Macro-decisions every `decision_dt` simulation seconds (no-op in between).
     """
     metadata = {"render_modes": []}
 
@@ -48,7 +52,6 @@ class RidepoolRTEnv(gym.Env):
             "edge_mask":    spaces.MultiBinary((self.R, self.E_max)),
             "cand_idx":     spaces.Box(0, self.N_max - 1, (self.R, self.K_max), dtype=np.int64),
             "cand_mask":    spaces.MultiBinary((self.R, self.K_max)),
-            # If you ever add globals back, re-enable:
             # "global_stats": spaces.Box(-np.inf, np.inf, (self.G,), dtype=np.float32),
         })
 
@@ -68,7 +71,7 @@ class RidepoolRTEnv(gym.Env):
         # Trim robots to R; never append Nones
         robots = robots[: self.R]
 
-        # Ensure we have cand_lists for each of the first R robots
+        # Ensure there are cand_lists for each of the first R robots
         if len(cand_lists) < self.R:
             cand_lists += [[] for _ in range(self.R - len(cand_lists))]
         cand_lists = cand_lists[: self.R]
@@ -91,7 +94,7 @@ class RidepoolRTEnv(gym.Env):
             feature_fn=self.feature_fn,
             # global_stats_fn=self.global_stats_fn,  # currently unused
         )
-        # Save the exact ids we used for slots this step (for action mapping)
+        # Save the exact ids used for slots this step (for action mapping)
         self._last_cand_task_ids = cand_task_ids
         return obs
 
