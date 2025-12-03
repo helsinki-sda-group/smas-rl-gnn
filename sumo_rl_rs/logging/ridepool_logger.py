@@ -72,7 +72,7 @@ class RidepoolLogger:
         self._open_csv("dispatch.csv", ["time","taxi","prev_seq","base_ids","seq","seq_pd","raw_currentCustomers","notes"])
         self._open_csv("conflicts.csv", ["time","res_id","taxi_candidates","remaining_caps","winner"])
         self._open_csv("candidates.csv", ["time","taxi","cand_slots","cand_res_ids","cand_persons","cand_pd_seq"])
-        self._open_csv("rewards.csv", ["time","taxi","reward","capacity","step","abandoned","wait_at_pickups","completion"])
+        self._open_csv("rewards.csv", ["time","taxi","reward","capacity","step","abandoned","wait_at_pickups","completion", "nonserved"])
         self._open_csv("fleet_counts.csv", ["time","idle","en_route","occupied","pickup_occupied"])
         self._open_csv("episode_totals.csv", ["episode","sum_reward","n_pickups","n_dropoffs","duration"])
         # reset timeseries
@@ -106,9 +106,9 @@ class RidepoolLogger:
         # auto-start episode if not started
         if self.ep_dir is None:
             self.start_episode(self.cfg.episode_index)
-        # if file not opened yet, open with requested header
-        if fname not in self._writers:
-            self._open_csv(fname, header)
+        if fname in self._writers:
+            return
+        self._open_csv(fname, header)
 
     def _open_csv(self, fname: str, header: List[str]) -> None:
         """

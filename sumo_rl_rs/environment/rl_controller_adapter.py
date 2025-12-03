@@ -962,7 +962,7 @@ class RLControllerAdapter:
         except Exception:
             n_res = 0
 
-        backlog_penalty = -0.1 * n_res   # tune coefficient
+        backlog_penalty = -n_res   # tune coefficient
 
         # Completion reward per robot
         completion_by_robot: Dict[str, float] = {}
@@ -973,20 +973,23 @@ class RLControllerAdapter:
             for rid in robots:
                 completion_by_robot[rid] = float(len(dropped_ids_by_robot[rid]))
 
+        step_penalty = step_penalty * 0.1
+        backlog_penalty = backlog_penalty * 0.05
+
         # Compose rewards
         per_robot: Dict[str, float] = {}
         terms: Dict[str, Dict[str, float]] = {}
         for rid in robots:
-            cap = capacity_reward_by_robot[rid]
-            abandoned = float(abandoned_count_by_robot[rid])
-            waitr = wait_reward_by_robot[rid]
-            comp = completion_by_robot[rid]
-            r = cap + step_penalty + (-abandoned) + waitr + comp + backlog_penalty
+            cap = capacity_reward_by_robot[rid] * 0.5
+            abandoned = float(abandoned_count_by_robot[rid]) * (-3)
+            waitr = wait_reward_by_robot[rid] / 30
+            comp = max(0, completion_by_robot[rid]) * 10
+            r = cap + step_penalty + abandoned + waitr + comp + backlog_penalty
             per_robot[rid] = float(r)
             terms[rid] = {
                 "capacity": cap,
                 "step": step_penalty,
-                "abandoned": -abandoned,        # penalty actually added
+                "abandoned": abandoned,        # penalty actually added
                 "wait_at_pickups": waitr,       # negative seconds
                 "completion": comp,             # pickups or dropoffs per tick,
                 "nonserved": backlog_penalty    # fine for non-serving requests
