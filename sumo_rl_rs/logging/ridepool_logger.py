@@ -208,7 +208,7 @@ class RidepoolLogger:
         ))
 
     def log_rewards(self, t: float, taxi: str, reward: float, terms: Dict[str, float]):
-        self._ensure_csv("rewards.csv", ["time","taxi","reward","capacity","step","abandoned","wait_at_pickups","completion"])
+        self._ensure_csv("rewards.csv", ["time","taxi","reward","capacity","step","abandoned","wait_at_pickups","completion", "nonserved"])
         self._write("rewards.csv", dict(
             time=float(t), taxi=str(taxi), reward=float(reward),
             capacity=float(terms.get("capacity", 0.0)),
@@ -216,6 +216,7 @@ class RidepoolLogger:
             abandoned=float(terms.get("abandoned", 0.0)),
             wait_at_pickups=float(terms.get("wait_at_pickups", 0.0)),
             completion=float(terms.get("completion", 0.0)),
+            completion=float(terms.get("nonserved", 0.0)),
         ))
 
     def log_fleet_counts(self, t: float, idle: int, en_route: int, occupied: int, pickup_occupied: int):

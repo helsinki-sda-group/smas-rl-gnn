@@ -947,10 +947,22 @@ class RLControllerAdapter:
         for rid in robots:
             cap = self._get_vehicle_capacity(rid)
             onboard = len(cur_customers_by_robot[rid])
-            capacity_reward_by_robot[rid] = float(cap - onboard)
+            # capacity_reward_by_robot[rid] = float(cap - onboard)
+            # to encourage occupancy
+            capacity_reward_by_robot[rid] = float(onboard)
 
         # Step penalty: constant -1 per robot
         step_penalty = -1.0
+
+        # penalty for unserved reservations
+        # Number of live reservations in the system
+        try:
+            alive_res = list(self.sumo.person.getTaxiReservations(0))
+            n_res = len(alive_res)
+        except Exception:
+            n_res = 0
+
+        backlog_penalty = -0.1 * n_res   # tune coefficient
 
         # Completion reward per robot
         completion_by_robot: Dict[str, float] = {}
@@ -969,14 +981,15 @@ class RLControllerAdapter:
             abandoned = float(abandoned_count_by_robot[rid])
             waitr = wait_reward_by_robot[rid]
             comp = completion_by_robot[rid]
-            r = cap + step_penalty + (-abandoned) + waitr + comp
+            r = cap + step_penalty + (-abandoned) + waitr + comp + backlog_penalty
             per_robot[rid] = float(r)
             terms[rid] = {
                 "capacity": cap,
                 "step": step_penalty,
                 "abandoned": -abandoned,        # penalty actually added
                 "wait_at_pickups": waitr,       # negative seconds
-                "completion": comp,             # pickups or dropoffs per tick
+                "completion": comp,             # pickups or dropoffs per tick,
+                "nonserved": backlog_penalty    # fine for non-serving requests
             }
 
         # Update previous snapshots
