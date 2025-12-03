@@ -56,10 +56,8 @@ def make_feature_fn(ctrl: RLControllerAdapter):
         if not edge_id:
             return 0.0, 0.0
         try:
-            shape = ctrl.sumo.edge.getShape(edge_id)
-            if shape:
-                x, y = shape[0]
-                return float(x), float(y)
+            x, y = ctrl.sumo.simulation.convert2D(edge_id, 0.0)
+            return float(x), float(y)
         except Exception:
             pass
         return 0.0, 0.0
@@ -78,15 +76,17 @@ def make_feature_fn(ctrl: RLControllerAdapter):
         out = np.zeros((F,), dtype=np.float32)
         now = ctrl._now()
 
+        # robot features are [ robot_x_coordinate, robot_y_coordinate, free_capacity, 0, 0, 0, 0, 0, 0 ]
+        # example: [2.0107662e+03 2.4869739e+03 2.0000000e+00 0. 0. 0. 0. 0. 0.]
+
         if node_type == "robot":
             rid = _normalize_rid(obj_a)
             if not _valid_robot_id(rid):
                 return out  # all zeros for padded/missing taxis
 
-            # after the guard, narrow to str for the checker:
             rid_s = cast(str, rid)
 
-            rx, ry = _robot_xy(rid_s)          # OK: _robot_xy accepts Optional[str], str is fine
+            rx, ry = _robot_xy(rid_s)         
             out[0], out[1] = rx, ry
 
             try:
@@ -100,6 +100,16 @@ def make_feature_fn(ctrl: RLControllerAdapter):
             out[2] = float(max(0, cap - onboard))
             return out
 
+        # task features are:
+        # [
+        #     reservationTime,
+        #     waitingTime,
+        #     estTravelTime,
+        #     pickup_x, pickup_y,
+        #     drop_x, drop_y,
+        #     is_obsolete,
+        #     is_assigned
+        # ]
         elif node_type == "task":
             _ = _normalize_rid(obj_a)
             t = _resolve_task(obj_b)
@@ -109,6 +119,12 @@ def make_feature_fn(ctrl: RLControllerAdapter):
             out[0] = float(t.reservationTime)
             out[1] = float(max(0.0, now - float(t.reservationTime)))
             out[2] = float(getattr(t, "estTravelTime", 0.0))
+
+            # fromEdge = getattr(t, "fromEdge", None)
+            # toEdge = getattr(t, "toEdge", None)
+
+            # print("fromEdge:", fromEdge)
+            # print("toEdge: ", toEdge)
 
             px, py = _edge_xy(getattr(t, "fromEdge", None))
             dx, dy = _edge_xy(getattr(t, "toEdge", None))
