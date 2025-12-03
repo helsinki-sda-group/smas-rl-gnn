@@ -73,6 +73,8 @@ class EgoActorCritic(nn.Module):
         else:
             raise ValueError(f"Unknown backbone '{backbone}'")
 
+
+        self.actor_norm = nn.LayerNorm(hidden)
         # Actor: per-node score
         self.actor_head = nn.Linear(hidden, 1)
 
@@ -161,7 +163,12 @@ class EgoActorCritic(nn.Module):
         device = obs["x"].device
 
         # === Actor (unchanged) ===
-        h_a, batch_a = self.enc_actor.encode_graphs(x_list, ei_list)  # [sum_nodes, H]
+        #h_a, batch_a = self.enc_actor.encode_graphs(x_list, ei_list)  # [sum_nodes, H]
+        #scores = self.actor_head(h_a).squeeze(-1)                      # [sum_nodes]
+
+         # === Actor (with normalization) ===
+        h_a, batch_a = self.enc_actor.encode_graphs(x_list, ei_list)   # [sum_nodes, H]
+        h_a = self.actor_norm(h_a)                                     # NEW
         scores = self.actor_head(h_a).squeeze(-1)                      # [sum_nodes]
 
         logits_list: List[torch.Tensor] = []
@@ -169,7 +176,14 @@ class EgoActorCritic(nn.Module):
             mask_i = (batch_a.batch == i)
             scores_i = scores[mask_i]                 # [n_i]
             cand_i = cand_loc_idx[i]                  # [k_i]
-            li = scores_i[cand_i] if (cand_i.numel() > 0 and scores_i.numel() > 0) else torch.empty(0, device=device)
+            
+            if cand_i.numel() > 0 and scores_i.numel() > 0:
+                raw_logits = scores_i[cand_i]
+                li = torch.tanh(raw_logits) * 5.0         # logits in [-5, +5]
+            else:
+                li = torch.empty(0, device=device)
+
+
             if li.numel() < K_max:
                 li = torch.cat([li, torch.full((K_max - li.numel(),), -1e9, device=device)], dim=0)
             logits_list.append(li)

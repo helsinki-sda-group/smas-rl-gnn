@@ -88,6 +88,18 @@ class RTGNNPolicy(ActorCriticPolicy):
         # # Single learnable NO-OP logit shared across robots and batch.
         self.noop_logit = nn.Parameter(th.tensor(0.0))
 
+        # === NEW: temperature to soften logits (no gradient needed) ===
+        self.logit_temperature: float = 5.0 
+
+        # --- Ensure GNN + NOOP parameters are optimized by PPO's optimizer ---
+        # At this point, super().__init__ has already created `self.optimizer`
+        # using the base policy parameters. We must explicitly add the new
+        # GNN parameters and the NOOP logit to the optimizer param groups.
+        extra_params = list(self.gnn_ac.parameters()) + [self.noop_logit]
+        # Avoid adding empty groups in case of weird configs
+        if len(extra_params) > 0:
+            self.optimizer.add_param_group({"params": extra_params})
+
     # --- helpers -------------------------------------------------------------
 
     def _build_batch_outputs(self, obs_b: Dict[str, th.Tensor]) -> tuple[th.Tensor, th.Tensor]:
@@ -119,6 +131,9 @@ class RTGNNPolicy(ActorCriticPolicy):
             values_list.append(v_b)
 
         logits = th.stack(logits_list, dim=0)               # [B, R, K_max]
+
+        logits = logits / self.logit_temperature
+
         values = th.stack(values_list, dim=0).unsqueeze(-1) # [B, 1]
         return logits, values
 
@@ -149,7 +164,7 @@ class RTGNNPolicy(ActorCriticPolicy):
         The logits are flattened along the last two dimensions to match MultiDiscrete semantics.
         """
 
-        logits = logits.masked_fill(~mask, -1e9)
+        logits = logits.masked_fill(~mask, -10)
         B = logits.size(0)
         logits_flat = logits.reshape(B, -1)                 # [B, R*K_out]
         return self.action_dist.proba_distribution(action_logits=logits_flat)
