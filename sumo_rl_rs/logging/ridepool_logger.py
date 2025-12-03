@@ -216,7 +216,7 @@ class RidepoolLogger:
             abandoned=float(terms.get("abandoned", 0.0)),
             wait_at_pickups=float(terms.get("wait_at_pickups", 0.0)),
             completion=float(terms.get("completion", 0.0)),
-            completion=float(terms.get("nonserved", 0.0)),
+            nonserved=float(terms.get("nonserved", 0.0)),
         ))
 
     def log_fleet_counts(self, t: float, idle: int, en_route: int, occupied: int, pickup_occupied: int):
