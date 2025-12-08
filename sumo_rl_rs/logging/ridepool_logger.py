@@ -61,7 +61,7 @@ class RidepoolLogger:
         ep_name = f"episode_{self.cfg.episode_index:04d}"
         self.ep_dir = os.path.join(self.run_dir, ep_name)
 
-        # --- NEW: optionally nuke the episode dir on start ---
+        # ---  optionally nuke the episode dir on start ---
         if self.cfg.erase_episode_dir_on_start and os.path.isdir(self.ep_dir):
             if self.cfg.console_debug:
                 print(f"[RidepoolLogger] Removing existing episode dir: {self.ep_dir}")
@@ -75,6 +75,7 @@ class RidepoolLogger:
         self._open_csv("rewards.csv", ["time","taxi","reward","capacity","step","abandoned","wait_at_pickups","completion", "nonserved"])
         self._open_csv("fleet_counts.csv", ["time","idle","en_route","occupied","pickup_occupied"])
         self._open_csv("episode_totals.csv", ["episode","sum_reward","n_pickups","n_dropoffs","duration"])
+        self._open_csv("rewards_macro.csv", ["macro_steps","reward","capacity_avg","step_avg","abandoned_avg", "wait_avg", "completion_avg", "nonserved_avg"])
         # reset timeseries
         for k in self._ts:
             self._ts[k].clear()
@@ -220,6 +221,21 @@ class RidepoolLogger:
             wait_at_pickups=terms_round["wait_at_pickups"],
             completion=terms_round["completion"],
             nonserved=terms_round["nonserved"],
+        ))
+
+    def log_macro_step(self, info):
+        self._ensure_csv("rewards_macro.csv", 
+                         ["macro_steps","reward","capacity_avg","step_avg","abandoned_avg", "wait_avg", "completion_avg", "nonserved_avg"])
+
+        self._write("rewards_macro.csv", dict(
+                    macro_steps = info["macro_steps"],
+                    reward = info["macro_reward"],
+                    capacity_avg = info["macro_capacity"],
+                    step_avg = info["macro_step"],
+                    abandoned_avg = info["macro_abandoned"],
+                    wait_avg = info["macro_wait"],
+                    completion_avg = info["macro_completion"],
+                    nonserved_avg = info["macro_nonserved"],
         ))
 
     def log_fleet_counts(self, t: float, idle: int, en_route: int, occupied: int, pickup_occupied: int):

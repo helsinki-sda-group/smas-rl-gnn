@@ -40,6 +40,8 @@ class RidepoolRTEnv(gym.Env):
         self.F, self.G = int(F), int(G)
         self.feature_fn = feature_fn
         self.global_stats_fn = global_stats_fn  # can be None (ignored)
+        self._episode_reward = 0
+        self._macro_step = 0
 
         # explicit no-op slot at the END of each robot's action vector
         self._noop_index = self.K_max
@@ -96,6 +98,17 @@ class RidepoolRTEnv(gym.Env):
         )
         # Save the exact ids used for slots this step (for action mapping)
         self._last_cand_task_ids = cand_task_ids
+
+        x = obs["x"]
+
+        
+        # print("tasks:", len(tasks))
+        # print("cand_lists:", cand_lists)
+        # print("cand_task_ids:", cand_task_ids)
+        # print("robot features:", x[0,0])
+        # print("task features:", x[0,1:5])
+        # print("cand_mask:", obs["cand_mask"][0])
+
         return obs
 
     # --- gym API
@@ -103,6 +116,8 @@ class RidepoolRTEnv(gym.Env):
         super().reset(seed=seed)
         # Adapter's reset doesn't take seed; that's fine.
         self.controller.reset()
+        self._episode_reward = 0
+        self._macro_step = 0
         obs = self._build_obs()
         info = {"action_mask": self.action_mask()}
         return obs, info
@@ -159,6 +174,15 @@ class RidepoolRTEnv(gym.Env):
         truncated = False
         last_info: Dict[str, Any] = {}
 
+        sum_terms = {
+            "capacity": 0.,
+            "step": 0.,
+            "abandoned": 0.,
+            "wait_at_pickups": 0.,
+            "completion": 0.,
+            "nonserved": 0.,
+        }
+
         # (1) apply chosen assignments now
         assignments = self._decode(action)
         step_out = self.controller.apply_and_step(assignments)  # controller aligns with its robot order
@@ -167,6 +191,15 @@ class RidepoolRTEnv(gym.Env):
         terminated = bool(self.controller.is_episode_done())
         last_info = {k: v for k, v in step_out.items() if k != "sum_reward"}
 
+        terms_out = step_out.get("terms",{})
+        for rid in terms_out:
+            for key in sum_terms:
+                sum_terms[key] += terms_out[rid].get(key, 0.)
+
+        self._macro_step +=1
+
+        # print("action = ", action)
+    
         # (2) macro no-op rollout
         steps_done = 1
         while (not terminated) and steps_done < self.decision_dt:
@@ -175,16 +208,47 @@ class RidepoolRTEnv(gym.Env):
             total_reward += float(step_out.get("sum_reward", 0.0))
             terminated = bool(self.controller.is_episode_done())
             last_info = {k: v for k, v in step_out.items() if k != "sum_reward"}
+
+            terms_out = step_out.get("terms",{})
+            for rid in terms_out:
+                for key in sum_terms:
+                    sum_terms[key] += terms_out[rid].get(key, 0.)
+
             steps_done += 1
-        
+
+       
         # (3) build next obs only at the macro boundary
         obs = self._build_obs()
 
+        total_reward = total_reward/self.decision_dt
+
+        self._episode_reward += total_reward
+
+        # macro info for reward logging
+        macro_info = {
+            "macro_reward": round(total_reward, 3),
+            "macro_capacity": round(sum_terms["capacity"] / steps_done,3),
+            "macro_step": round(sum_terms["step"] / steps_done,3),
+            "macro_abandoned": round(sum_terms["abandoned"] / steps_done,3),
+            "macro_wait": round(sum_terms["wait_at_pickups"] / steps_done,3),
+            "macro_completion": round(sum_terms["completion"] / steps_done,3),
+            "macro_nonserved": round(sum_terms["nonserved"] / steps_done,3),
+        }
+        
         info = {
             **last_info,
             "action_mask": self.action_mask(),
-            "macro_steps": steps_done, # how many sim tick were consumed
+            "macro_steps": self._macro_step, # how many sim tick were consumed
         }
+
+        info.update(macro_info)
+
+        self.controller.logger.log_macro_step(info)
+
+        if terminated or truncated:
+            info["episode_reward"] = self._episode_reward
+            info["steps_done"] = steps_done
+            self._episode_reward = 0
 
 
         return obs, total_reward, terminated, truncated, info
