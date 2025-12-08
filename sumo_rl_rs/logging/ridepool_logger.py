@@ -209,14 +209,17 @@ class RidepoolLogger:
 
     def log_rewards(self, t: float, taxi: str, reward: float, terms: Dict[str, float]):
         self._ensure_csv("rewards.csv", ["time","taxi","reward","capacity","step","abandoned","wait_at_pickups","completion", "nonserved"])
+
+        terms_round = {k: round(float(v),2) for k,v in terms.items()}
+
         self._write("rewards.csv", dict(
-            time=float(t), taxi=str(taxi), reward=float(reward),
-            capacity=float(terms.get("capacity", 0.0)),
-            step=float(terms.get("step", 0.0)),
-            abandoned=float(terms.get("abandoned", 0.0)),
-            wait_at_pickups=float(terms.get("wait_at_pickups", 0.0)),
-            completion=float(terms.get("completion", 0.0)),
-            nonserved=float(terms.get("nonserved", 0.0)),
+            time=float(t), taxi=str(taxi), reward=round(float(reward),2),
+            capacity=terms_round["capacity"],
+            step=terms_round["step"],
+            abandoned=terms_round["abandoned"],
+            wait_at_pickups=terms_round["wait_at_pickups"],
+            completion=terms_round["completion"],
+            nonserved=terms_round["nonserved"],
         ))
 
     def log_fleet_counts(self, t: float, idle: int, en_route: int, occupied: int, pickup_occupied: int):
