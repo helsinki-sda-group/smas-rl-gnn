@@ -13,6 +13,25 @@ from utils.sumo_bootstrap import start_sumo, make_reset_fn
 import numpy as np
 from utils.feature_fns import make_feature_fn
 
+# to write PPO output to txt file
+import sys
+
+class Tee(object):
+    def __init__(self, filename):
+        self.file = open(filename, "w")
+        self.stdout = sys.stdout
+        sys.stdout = self
+
+    def write(self, data):
+        self.stdout.write(data)
+        self.file.write(data)
+
+    def flush(self):
+        self.stdout.flush()
+        self.file.flush()
+
+Tee("train_output.txt")
+
 # 1) SUMO/controller setup (example; adapt to your config)
 SUMO_CFG = "configs/small_net.sumocfg"
 USE_GUI = False
@@ -68,7 +87,7 @@ env = RidepoolRTEnv(
     global_stats_fn=None, 
     decision_dt=5,  
 )
-env = Monitor(env)
+env = Monitor(env, filename="monitor.csv", info_keywords=("episode_reward",))
 
 # 4) SB3 PPO with custom GNN policy
 policy_kwargs = dict(in_dim=F, hidden=128, k_max=K_max)
