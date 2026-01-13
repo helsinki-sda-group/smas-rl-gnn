@@ -70,7 +70,7 @@ class RidepoolLogger:
         os.makedirs(self.ep_dir, exist_ok=True)
 
         self._open_csv("dispatch.csv", ["time","taxi","prev_seq","base_ids","seq","seq_pd","raw_currentCustomers","notes"])
-        self._open_csv("conflicts.csv", ["time","res_id","taxi_candidates","remaining_caps","winner"])
+        self._open_csv("conflicts.csv", ["time","res_id","taxi_candidates","remaining_caps","distances","winner"])
         self._open_csv("candidates.csv", ["time","taxi","cand_slots","cand_res_ids","cand_persons","cand_pd_seq"])
         self._open_csv("rewards.csv", ["time","taxi","reward","capacity","step","abandoned","wait_at_pickups","completion", "nonserved"])
         self._open_csv("fleet_counts.csv", ["time","idle","en_route","occupied","pickup_occupied"])
@@ -181,12 +181,13 @@ class RidepoolLogger:
         ))
 
     def log_conflict(self, t: float, res_id: str, taxi_candidates: Sequence[str],
-                     remaining_caps: Sequence[int], winner: str):
-        self._ensure_csv("conflicts.csv", ["time","res_id","taxi_candidates","remaining_caps","winner"])
+                     remaining_caps: Sequence[int], distances: Sequence[float], winner: str):
+        self._ensure_csv("conflicts.csv", ["time","res_id","taxi_candidates","remaining_caps","distances", "winner"])
         self._write("conflicts.csv", dict(
             time=float(t), res_id=str(res_id),
             taxi_candidates="|".join(map(str, taxi_candidates)),
             remaining_caps="|".join(map(str, remaining_caps)),
+            distances="|".join(map(str, distances)),
             winner=str(winner),
         ))
 

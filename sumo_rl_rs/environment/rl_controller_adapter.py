@@ -58,6 +58,7 @@ class RLControllerAdapter:
         max_travel_delay_s: float = 900.0,      # how late the robot is allowed to deliever to dropoff
         max_robot_capacity: int = 5,
         logger: Optional["RidepoolLogger"]=None,
+        conflict_resolution: str = "closest_then_capacity", # "capacity" | "closest" | "closest_then_capacity"
     ) -> None:
         """
         Args:
@@ -76,6 +77,7 @@ class RLControllerAdapter:
             max_travel_delay_s: how late the robot is allowed to deliever to dropoff. No explicit penalty for that in the current implementation. 
             max_robot_capacity:
             logger: RidepoolLogger instance.
+            conflict_resolution: how the assignment conflicts are resolved ("capacity" | "closest" | "closest_then_capacity")
         """
         self.sumo = sumo
         self.k_max = int(k_max)
@@ -83,6 +85,9 @@ class RLControllerAdapter:
         self.max_steps = max_steps
         self.completion_mode = completion_mode.lower().strip()
         assert self.completion_mode in {"pickup", "dropoff"}, "completion_mode must be 'pickup' or 'dropoff'"
+        self.conflict_resolution = str(conflict_resolution).lower().strip()
+        assert self.conflict_resolution in {"capacity", "closest", "closest_then_capacity"}, "conflict resolution must be 'capacity', 'closest', 'closest_then_capacity'"
+
         self.reset_fn = reset_fn
         self._shadow_assigned_by_robot = defaultdict(list)  # rid -> [reservation 1, reservation 2, ...]
         self._shadow_plan_by_robot = defaultdict(list)  # rid -> ["a","a","b","c","b","c", ...]
@@ -464,21 +469,19 @@ class RLControllerAdapter:
         return "|".join(tokens)
 
 
-    def get_candidate_lists(self, K: Optional[int] = None) -> List[List[int]]:
+    def get_tasks_and_candidate_lists(self, K: Optional[int] = None) -> tuple[List[Task], List[List[int]]]:
         """
-        For each robot, return up to K nearest tasks by pickup distance,
+        For each robot, return viable task list and list of candidates - up to K nearest tasks by pickup distance,
         filtered by road-network distance <= vicinity_m.
-        Output indices reference the *most recent* get_tasks() list.
+        Output indices reference viable task list.
         """
         if not self._last_robot_ids:
             self.get_robots()
-        if not self._last_tasks:
-            self.get_tasks()
 
         K = self.k_max if K is None else int(K)
-        tasks = self._last_tasks
-        tasks = [t for t in tasks if not t.is_obsolete and not t.is_assigned]  # <- keep only viable tasks
-        self._last_tasks = tasks  # keep consistent indices
+        tasks_all = self.get_tasks()
+        tasks_viable = [t for t in tasks_all if not t.is_obsolete ] # and not t.is_assigned]  # <- keep only viable tasks
+
 
         # robot "position" proxy: first edge of current route
         robot_first_edge: Dict[str, str] = {}
@@ -493,12 +496,12 @@ class RLControllerAdapter:
         cand_lists: List[List[int]] = []
         for rid in self._last_robot_ids:
             r_edge = robot_first_edge.get(rid)
-            if r_edge is None or not tasks:
+            if r_edge is None or not tasks_viable:
                 cand_lists.append([])
                 continue
 
             dist_idx: List[Tuple[float, int]] = []
-            for j, t in enumerate(tasks):
+            for j, t in enumerate(tasks_viable):
                 if not t.fromEdge:
                     continue
                 d = self._road_distance(r_edge, t.fromEdge)
@@ -511,7 +514,7 @@ class RLControllerAdapter:
         if self.logger:
             tnow = self._now()
             res_index = self._reservation_index()  # to resolve persons per reservation
-            ids = [t.id for t in self._last_tasks]
+            ids = [t.id for t in tasks_viable]
             for rid, cidx in zip(self._last_robot_ids, cand_lists):
                 # slots are 0..K_i-1
                 slots = list(range(len(cidx)))
@@ -539,24 +542,27 @@ class RLControllerAdapter:
                     pd_seq_joined,    # NEW
                 )
         self._last_cand_lists = cand_lists
-        self._last_task_ids = [t.id for t in self._last_tasks]
+        self._last_task_ids = [t.id for t in tasks_viable]
 
-        return cand_lists
+        return tasks_viable, cand_lists
 
     def _resolve_assignment_conflicts(
         self,
-        robots: List[str],
-        chosen: List[Optional[str]],
+        robots: List[str], # list of robot IDs ["t0", "t1", "t2"]
+        chosen: List[Optional[str]], # list of reservation IDs selected by each taxi ["r4", "r1", "r4"]
         tasks_list: List[Task],
     ) -> tuple[List[Optional[str]], Dict[str, str]]:
         """
-        For each reservation chosen by multiple taxis, keep exactly one winner:
-        - highest remaining capacity wins,
-        - ties broken at random (stable via self._rng).
+        For each reservation chosen by multiple taxis, keep exactly one winner.
+
+        Modes (self.conflict_resolution):
+        - "capacity": highest remaining capacity wins, ties broken at random.
+        - "closest": choose taxi with smallest distance to pickup edge.
+        - "closest_then_capacity": closest, then capacity.
         Returns:
         (resolved_assignments, winners_map) where winners_map is {res_id: rid_winner}.
         """
-        # Group: res_id -> [rid, ...]
+        # Bucket: res_id -> [rid, ...], e.g. r4 -> [t0, t2]
         buckets: Dict[str, List[str]] = {}
         for rid, res in zip(robots, chosen):
             if res is None:
@@ -569,17 +575,44 @@ class RLControllerAdapter:
 
         # Remaining capacity per taxi
         rem_cap: Dict[str, int] = {rid: self._remaining_capacity(rid) for rid in robots}
+        # Reservation id -> Task object
+        task_by_res_id: Dict[str, Task] = {str(t.id): t for t in tasks_list}
 
         winners: Dict[str, str] = {}
+
+
         for res_id, rids in buckets.items():
             if len(rids) == 1:
                 winners[res_id] = rids[0]
                 continue
 
-            # Pick taxis with max remaining capacity
-            caps = [(rid, rem_cap.get(rid, 0)) for rid in rids]
-            max_cap = max(c for _, c in caps)
-            best = [rid for rid, c in caps if c == max_cap]
+            # (rid, pickup distance)
+            dists : List[Tuple[str, float]] = []
+
+            mode = self.conflict_resolution
+            if mode == "capacity":
+                # Pick taxis with max remaining capacity
+                caps = [(rid, rem_cap.get(rid, 0)) for rid in rids]
+                max_cap = max(c for _, c in caps)
+                best = [rid for rid, c in caps if c == max_cap]
+
+            else:
+                # get Task object
+                t = task_by_res_id.get(res_id)
+                pickup_edge = t.fromEdge
+                
+                for rid in rids:
+                    # current edge of a robot
+                    r_edge = self.sumo.vehicle.getRoute(rid)[0]
+                    dist = round(float(self._road_distance(r_edge, pickup_edge)),2)
+                    dists.append((rid, dist))
+                min_d = min(d for _, d in dists)
+                best = [rid for rid, d in dists if d <=min_d + 1e-6]
+
+                if mode == "closest_then_capacity" and len(best)>1:
+                    caps = [(rid, rem_cap.get(rid, 0)) for rid in best]
+                    max_cap = max(c for _, c in caps)
+                    best = [rid for rid, c in caps if c == max_cap]
 
             # Tie-break at random using controller RNG
             if len(best) == 1:
@@ -589,9 +622,14 @@ class RLControllerAdapter:
                 winners[res_id] = best[idx]
 
             # Conflict log (the actual winner is used)
+            # 116.0,1,t0|t1|t3|t4,2|2|2|1, 31.33, 214.15, 176.13, 222.14, t1
             if self.logger:
+                if mode == "capacity": 
+                    dists_dict = {rid: -1.0 for rid in rids}
+                else:
+                    dists_dict =  {rid: dist for (rid, dist) in dists}
                 self.logger.log_conflict(
-                    self._now(), res_id, rids, [rem_cap[r] for r in rids], winners[res_id]
+                    self._now(), res_id, rids, [rem_cap[r] for r in rids], [dists_dict[r] for r in rids], winners[res_id]
                 )
 
         # Build resolved list: losers -> None
@@ -655,6 +693,23 @@ class RLControllerAdapter:
             self.logger.log_debug(self._now(), "apply-mapped", {
                 "chosen_res_ids": chosen,  # None or reservation ids per robot
             })
+
+        valid = set(str(t.id) for t in tasks)
+        invalid = [c for c in chosen if c is not None and str(c) not in valid]
+
+        if invalid:
+            print("INVALID chosen IDs: ", invalid[:])
+            print("VALID task IDs: ", list(sorted(valid)))
+
+        if invalid and cand_lists is not None:
+            for ridx, (a,c) in enumerate(zip(assignments, chosen)):
+                if c is not None and str(c) not in valid:
+                    clist = cand_lists[ridx]
+                    print("ridx", ridx, "a", a, "clist_len", len(clist), "clist_head", clist[:])
+                    if isinstance(a, int) and a < len(clist):
+                        task_idx = clist[a]
+                        print("task_idx", task_idx, "idx_to_res_id[task_idx]", idx_to_res_id.get(task_idx))
+                        break
 
         # 1b) resolve conflicts so only one taxi wins each reservation
         chosen, winners = self._resolve_assignment_conflicts(list(robots), chosen, tasks)
@@ -1031,7 +1086,7 @@ class RLControllerAdapter:
             return []
 
     def _get_vehicle_capacity(self, rid: str) -> int:
-        """Read person capacity; fall back to default_capacity on failure."""
+        """Read maximum capacity; fall back to default_capacity on failure."""
         try:
             # SUMO has getPersonCapacity for vehicles in recent versions
             cap = int(self.sumo.vehicle.getPersonCapacity(rid))  # type: ignore[attr-defined]
@@ -1083,13 +1138,10 @@ class RLControllerAdapter:
         try:
             route = self.sumo.simulation.findRoute(from_edge, to_edge)
             edges = getattr(route, "edges", None)
-            if edges:
-                dist = float(sum(self._edge_length(e) for e in edges))
-            else:
-                if hasattr(route, "length"):
-                    dist = float(getattr(route, "length"))
-                elif hasattr(route, "travelTime"):
-                    dist = float(getattr(route, "travelTime"))  # last-resort proxy
+            if hasattr(route, "length"):
+                dist = float(getattr(route, "length"))
+            elif hasattr(route, "travelTime"):
+                dist = float(getattr(route, "travelTime"))  # last-resort proxy
         except Exception:
             if from_edge == to_edge:
                 dist = 0.0

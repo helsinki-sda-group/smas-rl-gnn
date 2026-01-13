@@ -67,8 +67,7 @@ class RidepoolRTEnv(gym.Env):
     # --- helpers
     def _sync_from_controller(self) -> Dict[str, Any]:
         robots = self.controller.get_robots()
-        tasks = self.controller.get_tasks()
-        cand_lists = self.controller.get_candidate_lists(self.K_max)
+        tasks_viable, cand_lists = self.controller.get_tasks_and_candidate_lists(self.K_max)
 
         # Trim robots to R; never append Nones
         robots = robots[: self.R]
@@ -78,7 +77,7 @@ class RidepoolRTEnv(gym.Env):
             cand_lists += [[] for _ in range(self.R - len(cand_lists))]
         cand_lists = cand_lists[: self.R]
 
-        return {"robots": robots, "tasks": tasks, "cand_lists": cand_lists}
+        return {"robots": robots, "tasks": tasks_viable, "cand_lists": cand_lists}
 
 
     def _build_obs(self):
@@ -124,7 +123,10 @@ class RidepoolRTEnv(gym.Env):
     
     def _decode(self, action_vec: np.ndarray) -> List[Optional[str]]:
         """
-        Map action vector -> per-robot assignment list
+        Map action vector  -> per-robot assignment list
+        Each entry action vector[r] is an integer index (not a task id). 
+        Decode converts those indices into actual task IDs 
+        For example, action_vec = [0, 3, 0, 3, 0], and _last_cand_task_ids[1] = ['0', None, None]
         - slot in [0..K_max-1] and valid: assign that candidate's task id
         - slot == K_max (self._noop_index) OR invalid: None (no-op)
         """
@@ -167,6 +169,9 @@ class RidepoolRTEnv(gym.Env):
             (1) apply chosen assignments for this tick
             (2) advance (decision_dt-1) ticks as no-ops
             (3) sum rewards; break early if episode ends
+
+            Action is a vector of indices, e.g. [0 3 0 3 0] where 3 is no-op index in this example
+            Assignments are task ids, e.g. ['0', None, '0', None, '0']
         """
         action = np.asarray(action, dtype=np.int64)
         total_reward = 0.0
