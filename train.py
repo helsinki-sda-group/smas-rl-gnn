@@ -43,8 +43,8 @@ controller = RLControllerAdapter(
     k_max=K_max,
     vicinity_m=1000.0,      # vicinity in meters
     completion_mode="dropoff", # task is marked as completed at dropoff
-    max_steps=10000,
-    min_episode_steps = 700,
+    max_steps=1000,
+    min_episode_steps = 100,
     serve_to_empty=True,    # end only when nothing left to do
     require_seen_reservation=True, # don't allow done until we've seen at least one reservation
     max_wait_delay_s=600.0,     # allowed waiting time until pickup 
@@ -66,7 +66,7 @@ env = RidepoolRTEnv(
     F=F, G=0,
     feature_fn=feature_fn,
     global_stats_fn=None, 
-    decision_dt=1,  
+    decision_dt=5,  
 )
 env = Monitor(env)
 
@@ -76,12 +76,12 @@ model = PPO(
     RTGNNPolicy,
     env,
     policy_kwargs=policy_kwargs,
-    n_steps=512,
-    batch_size=512,
+    n_steps=128,
+    batch_size=64,
     learning_rate=3e-4,
     gamma=0.99,
     clip_range=0.2,
-    ent_coef=0.0,
+    ent_coef=0.01,
     verbose=1
 )
 
