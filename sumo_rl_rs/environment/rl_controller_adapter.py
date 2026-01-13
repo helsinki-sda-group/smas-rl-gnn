@@ -974,7 +974,7 @@ class RLControllerAdapter:
                 completion_by_robot[rid] = float(len(dropped_ids_by_robot[rid]))
 
         step_penalty = step_penalty * 0.1
-        backlog_penalty = backlog_penalty * 0.05
+        backlog_penalty = backlog_penalty * 0.05 / len(robots)
 
         # Compose rewards
         per_robot: Dict[str, float] = {}
