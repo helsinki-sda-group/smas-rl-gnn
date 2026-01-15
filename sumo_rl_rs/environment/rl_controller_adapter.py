@@ -91,6 +91,7 @@ class RLControllerAdapter:
         self.reset_fn = reset_fn
         self._shadow_assigned_by_robot = defaultdict(list)  # rid -> [reservation 1, reservation 2, ...]
         self._shadow_plan_by_robot = defaultdict(list)  # rid -> ["a","a","b","c","b","c", ...]
+        self._prev_n_res = 0
 
         # runtime state
         self._step_count: int = 0
@@ -227,6 +228,7 @@ class RLControllerAdapter:
         """
         # build POIs = (res_id, edge_id, kind)
         poi = []
+        poi_picked_up = []
         for r_id in res_ids:
             r = res_index.get(r_id)
             if r is None:
@@ -236,6 +238,10 @@ class RLControllerAdapter:
             # pickup only if not already onboard
             if r_id not in already_picked:
                 poi.append((r_id, self._edge_for_pickup(r), "pickup"))
+            else:
+                # save for later to include to final sequence
+                # will be ignored by dispatcher but is needed by SUMO
+                poi_picked_up.append((r_id, self._edge_for_pickup(r), "pickup"))
 
         # which POIs may be scheduled next, given what's already scheduled
         def getCandPoi(poi_all, scheduled):
@@ -273,6 +279,7 @@ class RLControllerAdapter:
             current_edge = ""
 
         scheduled: list[tuple[str, str, str]] = []
+
         total = len(poi)
         while len(scheduled) < total:
             candidates = getCandPoi(poi, scheduled)
@@ -287,8 +294,18 @@ class RLControllerAdapter:
             scheduled.append(best)
             current_edge = best[1]
 
+        seq = []
+        # add in the begginning onboard ids
+        # as SUMO requires res_id appears twice in dispatching sequence
+        # first entry will be ignored by a dispatched
+        for p in poi_picked_up:
+            seq.append(p[0])
+        # then add real sequence
+        for p in scheduled:
+            seq.append(p[0])
+
         # return the reservation id sequence (ids may repeat)
-        return [p[0] for p in scheduled]
+        return seq
 
 
     def taxis_available(self, min_robots: int = 1) -> bool:
@@ -317,6 +334,19 @@ class RLControllerAdapter:
 
     def reset(self) -> None:
         """Clear internal counters/caches; optionally call external SUMO reset."""
+
+        try:
+            if hasattr(self, '_last_robot_ids') and self._last_robot_ids:
+                for rid in self._last_robot_ids:
+                    self._shadow_plan_by_robot[rid] = []
+                    if hasattr(self.sumo.vehicle, "clearStops"):
+                        try:
+                            self.sumo.vehicle.clearStops(rid)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
         self._step_count = 0
         self._last_robot_ids.clear()
         self._last_tasks.clear()
@@ -334,6 +364,8 @@ class RLControllerAdapter:
         self._seen_any_reservation = False
         self._seen_any_customer = False
         self._idle_streak = 0
+        self._prev_n_res = 0
+        self._shadow_plan_by_robot.clear()
 
 
         if self.reset_fn:
@@ -495,6 +527,12 @@ class RLControllerAdapter:
 
         cand_lists: List[List[int]] = []
         for rid in self._last_robot_ids:
+            # capacity check 
+            remaining_capacity = self._remaining_capacity(rid)
+            if remaining_capacity <=0:
+                cand_lists.append([])
+                continue
+
             r_edge = robot_first_edge.get(rid)
             if r_edge is None or not tasks_viable:
                 cand_lists.append([])
@@ -751,11 +789,19 @@ class RLControllerAdapter:
             if res_id and res_id not in base_ids:
                 base_ids.append(res_id)
 
+                    
             # keep only reservations whose effective owner is this taxi
             base_ids = [r for r in base_ids if owners.get(r) == rid]
 
+            # Keep only currently alive reservations (prevents dispatching finished/unknown IDs)
+            alive_res_ids = set(res_index.keys())
+            base_ids = [r for r in base_ids if r in alive_res_ids]
+
+
             # FULL RESET strategy: every active reservation appears twice
-            seq = self._build_sequence_reset_twice(base_ids)
+            # seq = self._build_sequence_reset_twice(base_ids)
+            already_picked = set(onboard_ids)
+            seq = self._greedy_pd_sequence(rid, base_ids, res_index, already_picked)
 
             # log pre-dispatch
             try:
@@ -769,6 +815,36 @@ class RLControllerAdapter:
                     seq_pd=seq_pd,  # <-- NEW named arg
                     notes="pre-dispatch"
                 )
+            
+            # If nothing to dispatch, do NOT call dispatchTaxi with an empty list.
+            if not seq:
+                # drop our shadow plan
+                self._shadow_plan_by_robot[rid] = []
+
+                # best-effort: clear remaining SUMO stops to avoid end-of-run warnings
+                try:
+                    if hasattr(self.sumo.vehicle, "clearStops"):
+                        self.sumo.vehicle.clearStops(rid)
+                    else:
+                        # fallback: remove stops one by one if API supports it
+                        stops = list(self.sumo.vehicle.getStops(rid))
+                        for i in reversed(range(len(stops))):
+                            try:
+                                self.sumo.vehicle.removeStop(rid, i)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+                if self.logger:
+                    self.logger.log_dispatch(
+                        self._now(), rid, prev_seq, base_ids, seq, raw_cc,
+                        seq_pd=self._seq_to_person_pd(seq, res_index),
+                        notes="skip-empty"
+                    )
+                continue
+
+            
             # avoid spamming SUMO if unchanged
             if seq == prev_seq:
                 if self.logger:
@@ -847,7 +923,14 @@ class RLControllerAdapter:
         for rid, seq in list(self._shadow_plan_by_robot.items()):
             if not seq:
                 continue
-            kept = [r for r in seq if (not alive or r in alive)]
+            kept = [r for r in seq if r in alive]
+
+            if kept==[] and seq != []:
+                try:
+                    if hasattr(self.sumo.vehicle, "clearStops"):
+                        self.sumo.vehicle.clearStops(rid)
+                except Exception:
+                    pass
             self._shadow_plan_by_robot[rid] = kept
 
     # Helper: is there any work left right now?
@@ -886,10 +969,23 @@ class RLControllerAdapter:
                 return False
         return True
 
-    # --- replace is_episode_done() ---
+    def _cleanup_all_dispatches(self) -> None:
+        """
+        Clear all dispatch plans before terminating
+        """
+        robots = self._last_robot_ids or self.get_robots()
+        for rid in robots:
+            self._shadow_plan_by_robot[rid] = []
+            try:
+                if hasattr(self.sumo.vehicle, "clearStops"):
+                    self.sumo.vehicle.clearStops(rid)
+            except Exception:
+                pass
+
     def is_episode_done(self) -> bool:
         # 1) hard cap by steps (if provided)
         if self.max_steps is not None and self._step_count >= self.max_steps:
+            self._cleanup_all_dispatches() # Clean up before terminating
             return True
 
         now = self._now()
@@ -899,6 +995,7 @@ class RLControllerAdapter:
             try:
                 end_t = float(self.sumo.simulation.getEndTime())
                 if end_t > 0 and now >= end_t:
+                    self._cleanup_all_dispatches() # Clean up before terminating
                     return True
             except Exception:
                 pass
@@ -940,8 +1037,8 @@ class RLControllerAdapter:
         except Exception:
             try:
                 self.sumo.simulationStep()
-            except Exception:
-                pass
+            except Exception as e:
+                raise RuntimeError(f"SUMO step failed (TraCI likely closed): {e}")
         self._step_count += 1
 
     # ---- reward helpers ----
@@ -990,11 +1087,12 @@ class RLControllerAdapter:
 
         # Waiting-time reward at pickup: negative of wait seconds for new pickups
         wait_reward_by_robot: Dict[str, float] = {}
+        WAIT_CAP = 60.0 # seconds
         for rid in robots:
             rew = 0.0
             for pid in picked_up_ids_by_robot[rid]:
-                t0 = self._res_created_time.get(pid, now)
-                rew += -(now - t0)
+                t0 = self._res_created_time.get(pid.lstrip("p"), now)
+                rew += -min(now - t0, WAIT_CAP) / WAIT_CAP # bounded [-1,0]
             wait_reward_by_robot[rid] = rew
 
         # Capacity reward: (free capacity) = capacity - current_customers
@@ -1017,8 +1115,9 @@ class RLControllerAdapter:
         except Exception:
             n_res = 0
 
-        backlog_penalty = -n_res   # tune coefficient
-
+        backlog_penalty = self._prev_n_res-n_res   # tune coefficient
+        self._prev_n_res = n_res
+        
         # Completion reward per robot
         completion_by_robot: Dict[str, float] = {}
         if self.completion_mode == "pickup":
@@ -1035,11 +1134,13 @@ class RLControllerAdapter:
         per_robot: Dict[str, float] = {}
         terms: Dict[str, Dict[str, float]] = {}
         for rid in robots:
-            cap = capacity_reward_by_robot[rid] * 0.5
-            abandoned = float(abandoned_count_by_robot[rid]) * (-3)
-            waitr = wait_reward_by_robot[rid] / 30
-            comp = max(0, completion_by_robot[rid]) * 10
-            r = cap + step_penalty + abandoned + waitr + comp + backlog_penalty
+            cap = capacity_reward_by_robot[rid] * 2.0
+            # cap = len(picked_up_ids_by_robot[rid]) * 20
+            abandoned = float(abandoned_count_by_robot[rid]) * -10.0
+            waitr = wait_reward_by_robot[rid] # / 30
+            comp = max(0, completion_by_robot[rid]) * 40
+            backlog = backlog_penalty * 0 # 0.5
+            r = cap + step_penalty + abandoned + waitr + comp + backlog
             per_robot[rid] = float(r)
             terms[rid] = {
                 "capacity": cap,
@@ -1047,7 +1148,7 @@ class RLControllerAdapter:
                 "abandoned": abandoned,        # penalty actually added
                 "wait_at_pickups": waitr,       # negative seconds
                 "completion": comp,             # pickups or dropoffs per tick,
-                "nonserved": backlog_penalty    # fine for non-serving requests
+                "nonserved": backlog   # fine for non-serving requests
             }
 
         # Update previous snapshots

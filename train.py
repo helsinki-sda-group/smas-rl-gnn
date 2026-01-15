@@ -60,7 +60,7 @@ controller = RLControllerAdapter(
     reset_fn=make_reset_fn(SUMO_CFG, use_gui=False,
                            extra_args=["--seed", "42", "--device.taxi.dispatch-algorithm", "traci"]),
     k_max=K_max,
-    vicinity_m=1000.0,      # vicinity in meters
+    vicinity_m=1500.0,      # vicinity in meters
     completion_mode="dropoff", # task is marked as completed at dropoff
     max_steps=1000,
     min_episode_steps = 100,
@@ -69,7 +69,7 @@ controller = RLControllerAdapter(
     max_wait_delay_s=600.0,     # allowed waiting time until pickup 
     max_travel_delay_s=900.0,  # no explicit penalty for that now (!)
     max_robot_capacity=2, # should match to taxis.rou.xml
-    logger=rp_logger,
+    logger= rp_logger,
 )
 feature_fn = make_feature_fn(controller)
 
@@ -85,7 +85,7 @@ env = RidepoolRTEnv(
     F=F, G=0,
     feature_fn=feature_fn,
     global_stats_fn=None, 
-    decision_dt=5,  
+    decision_dt=60,  
 )
 env = Monitor(env, filename="monitor.csv", info_keywords=("episode_reward",))
 
@@ -98,9 +98,11 @@ model = PPO(
     n_steps=128,
     batch_size=64,
     learning_rate=3e-4,
-    gamma=0.99,
+    gamma=0.95,
     clip_range=0.2,
-    ent_coef=0.01,
+    ent_coef=0.03,
+    gae_lambda=0.90,
+    n_epochs=10,
     verbose=1
 )
 

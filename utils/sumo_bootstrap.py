@@ -23,7 +23,7 @@ def start_sumo(sumocfg_path: str, use_gui: bool = False, extra_args: Optional[Li
     traci, checkBinary = _imports()
     binary = checkBinary("sumo-gui" if use_gui else "sumo")
     if traci.isLoaded():
-        traci.close(wait=False)
+        traci.close(wait=True)
     traci.start([binary, *_build_args(sumocfg_path, extra_args)])
     return traci
 
@@ -44,7 +44,7 @@ def start_sumo_conn(sumocfg_path: str, use_gui: bool = False, extra_args: Option
     traci, checkBinary = _imports()
     binary = checkBinary("sumo-gui" if use_gui else "sumo")
     if traci.isLoaded():
-        traci.close(wait=False)
+        traci.close(wait=True)
     traci.start([binary, *_build_args(sumocfg_path, extra_args)])
     return traci.getConnection()
 
@@ -59,7 +59,15 @@ def make_reset_fn_conn(
         traci, checkBinary = _imports()
         args = _build_args(sumocfg_path, extra_args)
         if traci.isLoaded():
-            traci.load(args)
+            try:
+                traci.load(args)
+            except Exception:
+                # If reload fails, do full restart
+                try:
+                    traci.close(wait=True)
+                except Exception:
+                    pass
+                traci.start([binary, *args])
         else:
             binary = checkBinary("sumo-gui" if use_gui else "sumo")
             traci.start([binary, *args])

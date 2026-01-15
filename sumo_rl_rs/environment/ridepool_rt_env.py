@@ -223,9 +223,12 @@ class RidepoolRTEnv(gym.Env):
 
        
         # (3) build next obs only at the macro boundary
-        obs = self._build_obs()
+        try:
+            obs = self._build_obs()
+        except Exception:
+            obs = {k: np.zeros_like(v) for k,v in self.observation_space.spaces.items()}
 
-        total_reward = total_reward/self.decision_dt
+        total_reward = total_reward/100.0 # self.decision_dt
 
         self._episode_reward += total_reward
 
@@ -248,7 +251,8 @@ class RidepoolRTEnv(gym.Env):
 
         info.update(macro_info)
 
-        self.controller.logger.log_macro_step(info)
+        if self.controller.logger:
+            self.controller.logger.log_macro_step(info)
 
         if terminated or truncated:
             info["episode_reward"] = self._episode_reward
