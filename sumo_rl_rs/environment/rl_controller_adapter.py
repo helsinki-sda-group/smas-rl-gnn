@@ -132,6 +132,15 @@ class RLControllerAdapter:
         self._seen_any_reservation: bool = False
         self._seen_any_customer: bool = False
 
+        # task lifecycle tracking
+        self._task_lifecycle: Dict[str, Dict[str, Any]] = {}
+        self._task_first_assigned: Dict[str, tuple] = {}
+        self._task_pickup_time: Dict[str, float] = {}
+        self._task_dropoff_time: Dict[str, float] = {}   
+        self._prev_picked_res: Set[str] = set()
+        self._prev_completed_res: Set[str] = set()
+    
+
     # ---------------- Public API ----------------
 
     # in sumo_rl_rs/environment/rl_controller_adapter.py
@@ -366,6 +375,13 @@ class RLControllerAdapter:
         self._idle_streak = 0
         self._prev_n_res = 0
         self._shadow_plan_by_robot.clear()
+        self._task_lifecycle.clear()
+        self._task_first_assigned.clear()
+        self._task_pickup_time.clear()
+        self._task_dropoff_time.clear()
+        self._prev_picked_res.clear()
+        self._prev_completed_res.clear()
+
 
 
         if self.reset_fn:
@@ -451,6 +467,13 @@ class RLControllerAdapter:
                 is_obsolete=is_obsolete,
                 is_assigned=is_assigned,
             ))
+
+            if rid not in self._task_lifecycle:
+                task_obj = tasks[-1]
+                self._init_task_lifecycle_tracking(rid, task_obj)
+            
+            if is_obsolete:
+                self._track_task_obsolete(rid)
 
         self._last_tasks = tasks
         return tasks
@@ -726,7 +749,7 @@ class RLControllerAdapter:
             else:
                 chosen.append(str(a))
 
-
+        
         if self.logger:
             self.logger.log_debug(self._now(), "apply-mapped", {
                 "chosen_res_ids": chosen,  # None or reservation ids per robot
@@ -777,6 +800,11 @@ class RLControllerAdapter:
                 owners[r] = rid_win
         owners.update(onboard_by_res)           # onboard has highest precedence
 
+        # track task assignment
+        for rid, res_id in enumerate(chosen):
+            if res_id and rid < len(robots):
+                taxi_id = robots[rid]
+                self._track_task_assignment(res_id, taxi_id)
 
         # 2) build/dispatch per taxi sequence
         for rid, res_id in zip(robots, chosen):
@@ -870,6 +898,7 @@ class RLControllerAdapter:
 
         # 3) advance simulation and clean the shadow
         self._step()
+        self._detect_and_log_events()
         self._refresh_shadow_plan()
 
         # 4) rewards + logs
@@ -986,6 +1015,9 @@ class RLControllerAdapter:
         # 1) hard cap by steps (if provided)
         if self.max_steps is not None and self._step_count >= self.max_steps:
             self._cleanup_all_dispatches() # Clean up before terminating
+            self._finalize_all_tasks()
+            #if self.logger:
+            #    self.analyze_assignment_distances()
             return True
 
         now = self._now()
@@ -996,6 +1028,9 @@ class RLControllerAdapter:
                 end_t = float(self.sumo.simulation.getEndTime())
                 if end_t > 0 and now >= end_t:
                     self._cleanup_all_dispatches() # Clean up before terminating
+                    self._finalize_all_tasks()
+                    #if self.logger:
+                    #    self.analyze_assignment_distances()
                     return True
             except Exception:
                 pass
@@ -1003,6 +1038,10 @@ class RLControllerAdapter:
         # 3) classic TraCI empty check (usually useless with persistent taxis)
         try:
             if int(self.sumo.simulation.getMinExpectedNumber()) == 0:
+                self._cleanup_all_dispatches() # Clean up before terminating
+                self._finalize_all_tasks()
+                #if self.logger:
+                #    self.analyze_assignment_distances()
                 return True
         except Exception:
             pass
@@ -1011,6 +1050,7 @@ class RLControllerAdapter:
         try:
             alive_res = list(self.sumo.person.getTaxiReservations(0))
             n_res = len(alive_res)
+
         except Exception:
             n_res = 0
 
@@ -1022,6 +1062,10 @@ class RLControllerAdapter:
             self._idle_streak = 0
 
         if self._step_count >= self.min_episode_steps and self._idle_streak >= self.idle_patience_steps:
+            self._cleanup_all_dispatches() # Clean up before terminating
+            self._finalize_all_tasks()
+            #if self.logger:
+            #    self.analyze_assignment_distances()
             return True
 
         return False
@@ -1166,7 +1210,10 @@ class RLControllerAdapter:
 
 
     def _get_current_customers(self, rid: str) -> List[str]:
-        """Read current customers onboard a taxi (best-effort)."""
+        """
+        Read current customers onboard a taxi (best-effort).
+        !NB: Marked for deletion. device.taxi.currentCustomers: space-separated list of persons that are to be picked up or already on board
+        """
         # Preferred: string space-separated reservation ids
         try:
             s = self.sumo.vehicle.getParameter(rid, "device.taxi.currentCustomers")
@@ -1287,3 +1334,355 @@ class RLControllerAdapter:
                 else:
                     occupied += 1
         return idle, en_route, occupied, pickup_occupied
+
+
+    def _init_task_lifecycle_tracking(self, task_id: str, task: Any) -> None:
+        """Initialize lifecycle tracking for a new task."""
+        task_id = self._normalize_task_id(task_id)
+        if task_id in self._task_lifecycle:
+            return
+        
+        self._task_lifecycle[task_id] = {
+            "task_id": task_id,
+            "reservation_time": getattr(task, "reservationTime", self._now()),
+            "pickup_deadline": getattr(task, "pickupDeadline", None),
+            "estimated_travel_time": getattr(task, "estTravelTime", None),
+            "dropoff_deadline": getattr(task, "dropoffDeadline", None),
+            "actual_pickup_time": None,
+            "actual_dropoff_time": None,
+            "assigned_step": None,
+            "assigned_taxi": None,
+            "pickup_step": None,
+            "pickup_taxi": None,
+            "dropoff_step": None,
+            "dropoff_taxi": None,
+            "was_obsolete": False,
+            "actual_waiting_time": None,
+            "actual_travel_time": None,
+        }
+
+    def _track_task_assignment(self, task_id: str, taxi_id: str) -> None:
+        """Track when a task is first assigned to a taxi."""
+        task_id = self._normalize_task_id(task_id)
+        
+        if task_id not in self._task_lifecycle:
+            self._init_task_lifecycle_tracking(task_id, None)
+        
+        lifecycle = self._task_lifecycle[task_id]
+        
+        # Only record first assignment
+        if lifecycle["assigned_step"] is None:
+            lifecycle["assigned_step"] = self._step_count
+            lifecycle["assigned_taxi"] = taxi_id
+            
+            # Calculate distance to pickup (optional, for debugging)
+            distance = self._get_distance_to_task(taxi_id, task_id)
+            if distance is not None:
+                lifecycle["_assignment_distance"] = round(distance, 2)
+            
+            if self.logger:
+                self.logger.log_taxi_event(
+                    step=int(self._now()),
+                    taxi=taxi_id,
+                    event_type="assigned",
+                    task_id=task_id
+                )
+
+
+
+    def _track_task_pickup(self, task_id: str, taxi_id: str) -> None:
+        task_id = self._normalize_task_id(task_id)
+        now = self._now()
+        
+        if task_id not in self._task_lifecycle:
+            # Initialize with stored reservation time if available
+            res_time = self._res_created_time.get(task_id,now)
+            self._task_lifecycle[task_id] = {
+                "task_id": task_id,
+                "reservation_time": res_time,  # Use stored time!
+                # ... rest of initialization
+            }
+        
+        lifecycle = self._task_lifecycle[task_id]
+        
+        if lifecycle["actual_pickup_time"] is None:
+            lifecycle["actual_pickup_time"] = now
+            lifecycle["pickup_step"] = self._step_count
+            lifecycle["pickup_taxi"] = taxi_id
+            
+            # Calculate waiting time using stored reservation time
+            res_time = lifecycle["reservation_time"]
+            if res_time is not None:
+                lifecycle["actual_waiting_time"] = now - res_time
+            
+            # Log event
+            if self.logger:
+                self.logger.log_taxi_event(
+                    step=int(now),
+                    taxi=taxi_id,
+                    event_type="picked_up",
+                    task_id=task_id
+                )
+
+    def _track_task_dropoff(self, task_id: str, taxi_id: str) -> None:
+        """Track when a task is dropped off and finalize lifecycle."""
+        task_id = self._normalize_task_id(task_id)
+        if task_id not in self._task_lifecycle:
+            self._init_task_lifecycle_tracking(task_id, None)
+        
+        lifecycle = self._task_lifecycle[task_id]
+        
+        if lifecycle["actual_dropoff_time"] is None:
+            now = self._now()
+            lifecycle["actual_dropoff_time"] = now
+            lifecycle["dropoff_step"] = self._step_count
+            lifecycle["dropoff_taxi"] = taxi_id
+            
+            if lifecycle["actual_pickup_time"] is not None:
+                lifecycle["actual_travel_time"] = now - lifecycle["actual_pickup_time"]
+            
+            if self.logger:
+                self.logger.log_taxi_event(
+                    step=self._step_count,
+                    taxi=taxi_id,
+                    event_type="dropped_off",
+                    task_id=task_id
+                )
+                # Log complete lifecycle immediately on dropoff
+                self.logger.log_task_lifecycle(**lifecycle)
+
+                lifecycle["_logged"] = True
+
+    def _track_task_obsolete(self, task_id: str) -> None:
+        """Mark a task as obsolete (missed pickup deadline)."""
+        task_id = self._normalize_task_id(task_id)
+        if task_id not in self._task_lifecycle:
+            self._init_task_lifecycle_tracking(task_id, None)
+        
+        self._task_lifecycle[task_id]["was_obsolete"] = True
+
+    def _finalize_all_tasks(self) -> None:
+
+        """Finalize logging for all tracked tasks at end of episode."""
+        if not self.logger:
+            return
+        
+        for task_id, lifecycle in self._task_lifecycle.items():
+
+            # Only log if not already logged (dropoffs are logged immediately)
+            if not lifecycle.get("_logged", False):
+                log_data = {k: v for k, v in lifecycle.items() 
+                       if not k.startswith("_")}  # Skip _logged, _assignment_distance, etc.
+                self.logger.log_task_lifecycle(**lifecycle)
+
+    def _normalize_task_id(self, task_id: str) -> str:
+        """
+        Normalize task ID to consistent format.
+        SUMO uses reservation IDs like '0', '1', but passengers are 'p0', 'p1'.
+        We'll use reservation IDs as the canonical format.
+        """
+        if not task_id:
+            return task_id
+        
+        # Convert passenger ID to reservation ID
+        if str(task_id).startswith('p'):
+            return str(task_id)[1:]  # 'p0' -> '0'
+        
+        return str(task_id)
+
+    def _get_reservation_id_from_passenger(self, passenger_id: str) -> str:
+        """
+        Get reservation ID from passenger ID.
+        passenger_id like 'p0' maps to reservation '0'
+        """
+        if str(passenger_id).startswith('p'):
+            return str(passenger_id)[1:]
+        return str(passenger_id)
+    
+
+    def _get_taxi_current_edge(self, taxi_id: str) -> Optional[str]:
+        """
+        Get the current edge where a taxi is located.
+        Returns the first edge in the vehicle's route (current position).
+        """
+        try:
+            route = self.sumo.vehicle.getRoute(taxi_id)
+            if route and len(route) > 0:
+                return str(route[0])
+        except Exception:
+            pass
+        return None
+
+    def _get_distance_to_task(self, taxi_id: str, task_id: str) -> Optional[float]:
+        """
+        Calculate road network distance from taxi to task pickup location.
+        Returns distance in meters, or None if calculation fails.
+        """
+        # Get taxi current edge
+        taxi_edge = self._get_taxi_current_edge(taxi_id)
+        if not taxi_edge:
+            return None
+        
+        # Get task pickup edge
+        task = next((t for t in (self._last_tasks or []) if t.id == task_id), None)
+        if not task:
+            return None
+        
+        pickup_edge = task.fromEdge
+        if not pickup_edge:
+            return None
+        
+        # Calculate distance
+        try:
+            dist = self._road_distance(taxi_edge, pickup_edge)
+            return float(dist) if np.isfinite(dist) else None
+        except Exception:
+            return None
+        
+    def analyze_assignment_distances(self):
+        """
+        Analyze distances at assignment time to understand instant pickups.
+        Call this at episode end for debugging.
+        """
+        if not self._task_lifecycle:
+            return
+        
+        print("\n" + "="*80)
+        print("ASSIGNMENT DISTANCE ANALYSIS")
+        print("="*80)
+        
+        instant_pickups = []
+        delayed_pickups = []
+        
+        for task_id, lifecycle in self._task_lifecycle.items():
+            assigned_step = lifecycle.get("assigned_step")
+            pickup_step = lifecycle.get("pickup_step")
+            distance = lifecycle.get("_assignment_distance")
+            
+            if assigned_step and pickup_step:
+                time_to_pickup = pickup_step - assigned_step
+                
+                record = {
+                    "task_id": task_id,
+                    "distance": distance,
+                    "time_to_pickup": time_to_pickup,
+                    "taxi": lifecycle.get("assigned_taxi")
+                }
+                
+                if time_to_pickup <= 1:
+                    instant_pickups.append(record)
+                else:
+                    delayed_pickups.append(record)
+        
+        print(f"\nInstant pickups (≤1 step): {len(instant_pickups)}")
+        if instant_pickups:
+            print("  task_id  taxi  distance(m)  time_to_pickup")
+            for r in instant_pickups[:10]:
+                dist_str = f"{r['distance']:.1f}" if r['distance'] else "N/A"
+                print(f"  {r['task_id']:7s}  {r['taxi']:4s}  {dist_str:>11s}  {r['time_to_pickup']}")
+        
+        print(f"\nDelayed pickups (>1 step): {len(delayed_pickups)}")
+        if delayed_pickups:
+            print("  task_id  taxi  distance(m)  time_to_pickup")
+            for r in delayed_pickups[:10]:
+                dist_str = f"{r['distance']:.1f}" if r['distance'] else "N/A"
+                print(f"  {r['task_id']:7s}  {r['taxi']:4s}  {dist_str:>11s}  {r['time_to_pickup']}")
+        
+        # Statistics
+        instant_dists = [r['distance'] for r in instant_pickups if r['distance'] is not None]
+        if instant_dists:
+            print(f"\nInstant pickup distances:")
+            print(f"  Mean: {np.mean(instant_dists):.1f}m")
+            print(f"  Median: {np.median(instant_dists):.1f}m")
+            print(f"  Max: {np.max(instant_dists):.1f}m")
+            print(f"  Min: {np.min(instant_dists):.1f}m")
+
+
+    def _detect_and_log_events(self) -> None:
+        """
+        Detect pickups/dropoffs using reservation state transitions (accurate),
+        not device.taxi.currentCustomers (which includes "to be picked up").
+        Call this AFTER each _step().
+        """
+        robots = self._last_robot_ids or self.get_robots()
+        res_index = self._reservation_index()
+
+        picked_now: Set[str] = set()
+        completed_now: Set[str] = set()
+
+        # Build state sets
+        for res_id, r in res_index.items():
+            st = int(getattr(r, "state", 0))
+            if st & self.STATE_PICKED_UP:
+                picked_now.add(str(res_id))
+            if st & self.STATE_COMPLETED:
+                completed_now.add(str(res_id))
+
+        # New pickups = picked_up now but not before
+        new_pickups = picked_now - self._prev_picked_res
+        # New completed = completed now but not before
+        new_completed = completed_now - self._prev_completed_res
+
+        # If SUMO removes completed reservations quickly, also treat "disappeared after pickup" as dropoff:
+        disappeared = (self._prev_picked_res - picked_now) - self._prev_completed_res
+        # (optional) you can add this if you see missed completions.
+
+        now = self._now()
+
+        # Attribute to a taxi:
+        # best-effort mapping: use currentCustomers mapping p->reservation when possible,
+        # otherwise leave taxi_id unknown or infer from shadow plan owners.
+        p2r = self._person_to_res_index(res_index)
+        onboard_owner: Dict[str, str] = {}
+        for rid in robots:
+            for res_id in self._current_reservation_ids_onboard(rid, p2r):
+                onboard_owner[res_id] = rid
+
+        for res_id in new_pickups:
+            taxi_id = onboard_owner.get(res_id, "UNKNOWN")
+            self._track_task_pickup(res_id, taxi_id)
+
+        for res_id in new_completed:
+            taxi_id = onboard_owner.get(res_id, "UNKNOWN")
+            self._track_task_dropoff(res_id, taxi_id)
+
+        # (optional) handle disappeared as dropoff if needed
+        for res_id in disappeared:
+            taxi_id = onboard_owner.get(res_id, "UNKNOWN")
+            self._track_task_dropoff(res_id, taxi_id)
+
+        self._prev_picked_res = picked_now
+        self._prev_completed_res = completed_now
+
+def _reservation_state_events(self) -> tuple[set[str], set[str]]:
+    """
+    Returns (new_pickups, new_dropoffs) based on reservation state transitions.
+    Pickup: state gains PICKED_UP bit.
+    Dropoff: state gains COMPLETED bit (or reservation disappears after being picked, optional).
+    """
+    res_index = self._reservation_index()
+
+    picked_now: set[str] = set()
+    completed_now: set[str] = set()
+
+    for res_id, r in res_index.items():
+        st = int(getattr(r, "state", 0))
+        rid = str(res_id)
+        if st & self.STATE_PICKED_UP:
+            picked_now.add(rid)
+        if st & self.STATE_COMPLETED:
+            completed_now.add(rid)
+
+    new_pickups = picked_now - self._prev_picked_res
+    new_dropoffs = completed_now - self._prev_completed_res
+
+    # Optional robustness: if SUMO removes reservations quickly, treat “picked but vanished”
+    # as a dropoff. Enable only if you observe missing COMPLETED transitions.
+    disappeared_after_pick = (self._prev_picked_res - picked_now) - self._prev_completed_res
+    # If you want this behavior:
+    # new_dropoffs |= disappeared_after_pick
+
+    self._prev_picked_res = picked_now
+    self._prev_completed_res = completed_now
+    return new_pickups, new_dropoffs
+

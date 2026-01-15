@@ -28,8 +28,8 @@ class RidepoolLogger:
       - rewards.csv           : one row per taxi per step with reward decomposition
       - fleet_counts.csv      : one row per step with counters (idle, en_route, occupied, pickup_occupied)
       - episode_totals.csv    : summary per episode
-      - task_lifecycle.csv    : comprehensive task tracking 
-      - taxi_events.csv       : taxi events by step 
+      - task_lifecycle.csv    : comprehensive task tracking (NEW)
+      - taxi_events.csv       : taxi events by step (NEW)
       - plots/*.png           : a few basic plots
     """
     def __init__(self, cfg: RidepoolLogConfig):
@@ -75,7 +75,8 @@ class RidepoolLogger:
         self._open_csv("fleet_counts.csv", ["time","idle","en_route","occupied","pickup_occupied"])
         self._open_csv("episode_totals.csv", ["episode","sum_reward","n_pickups","n_dropoffs","duration"])
         self._open_csv("rewards_macro.csv", ["macro_steps","reward","capacity_avg","step_avg","abandoned_avg", "wait_avg", "completion_avg", "nonserved_avg"])
-
+        
+        # NEW: task lifecycle and taxi events
         self._open_csv("task_lifecycle.csv", [
             "task_id", "reservation_time", "pickup_deadline", "estimated_travel_time",
             "dropoff_deadline", "actual_pickup_time", "actual_dropoff_time",
@@ -84,6 +85,7 @@ class RidepoolLogger:
             "actual_waiting_time", "actual_travel_time"
         ])
         self._open_csv("taxi_events.csv", ["step", "taxi", "event_type", "task_id"])
+        
         # reset timeseries
         for k in self._ts:
             self._ts[k].clear()
@@ -190,12 +192,12 @@ class RidepoolLogger:
 
     def log_conflict(self, t: float, res_id: str, taxi_candidates: Sequence[str],
                      remaining_caps: Sequence[int], distances: Sequence[float], winner: str):
-        self._ensure_csv("conflicts.csv", ["time","res_id","taxi_candidates","remaining_caps","distances", "winner"])
+        self._ensure_csv("conflicts.csv", ["time","res_id","taxi_candidates","remaining_caps","distances","winner"])
         self._write("conflicts.csv", dict(
             time=float(t), res_id=str(res_id),
             taxi_candidates="|".join(map(str, taxi_candidates)),
             remaining_caps="|".join(map(str, remaining_caps)),
-            distances="|".join(map(str, distances)),
+            distances="|".join(f"{d:.2f}" for d in distances),
             winner=str(winner),
         ))
 
@@ -277,7 +279,7 @@ class RidepoolLogger:
         except Exception as e:
             print(f"[logger] log_debug failed: {e}")
 
-# ---------- Task lifecycle tracking ----------
+    # ---------- Task lifecycle tracking ----------
     def log_task_lifecycle(self, task_id: str, **kwargs):
         """
         Log comprehensive task lifecycle information.
