@@ -138,7 +138,9 @@ class RLControllerAdapter:
         self._task_pickup_time: Dict[str, float] = {}
         self._task_dropoff_time: Dict[str, float] = {}   
         self._prev_picked_res: Set[str] = set()
-        self._prev_completed_res: Set[str] = set()
+        self._prev_dropped_res: Set[str] = set()
+        self._prev_alive_res: Set[str] = set()
+        self._res_owner_by_res: Dict[str, str] = {}
     
 
     # ---------------- Public API ----------------
@@ -380,7 +382,9 @@ class RLControllerAdapter:
         self._task_pickup_time.clear()
         self._task_dropoff_time.clear()
         self._prev_picked_res.clear()
-        self._prev_completed_res.clear()
+        self._prev_dropped_res.clear()
+        self._prev_alive_res.clear()
+        self._res_owner_by_res.clear()
 
 
 
@@ -704,6 +708,36 @@ class RLControllerAdapter:
 
         return resolved, winners
 
+    def _is_completed(self, res_obj: object) -> bool:
+        try:
+            st = int(getattr(res_obj, "state", 0))
+        except Exception:
+            st = 0
+        return bool(st & self.STATE_COMPLETED)   
+
+    def _cap_base_ids_to_capacity(
+        self,
+        rid: str,
+        base_ids: list[str],
+        res_index: dict[str, object],
+    ) -> list[str]:
+        """
+        Option 1a: capacity is "reserved" by all owned, alive, not-completed reservations
+        (picked or not). Keep order stable, and always keep picked-up ones first.
+        """
+        cap = int(self._get_vehicle_capacity(rid))
+        if cap <= 0 or not base_ids:
+            return []
+
+        # Filter out completed defensively (sometimes still present in caches)
+        base_ids = [r for r in base_ids if (r in res_index) and (not self._is_completed(res_index[r]))]
+
+        picked = [r for r in base_ids if self._is_picked(res_index.get(r))]
+        unpicked = [r for r in base_ids if r not in picked]
+
+        free_for_unpicked = max(0, cap - len(picked))
+        return picked + unpicked[:free_for_unpicked]
+
     def apply_and_step(self, assignments: Sequence[Optional[Union[int, str]]]) -> Dict[str, Any]:
         """
         Apply assignments (aligned with self.get_robots() order), then advance SUMO one step.
@@ -825,10 +859,12 @@ class RLControllerAdapter:
             alive_res_ids = set(res_index.keys())
             base_ids = [r for r in base_ids if r in alive_res_ids]
 
+            # enforce reserved-seat capacity (prevents over-assignment)
+            base_ids = self._cap_base_ids_to_capacity(rid, base_ids, res_index)
 
             # FULL RESET strategy: every active reservation appears twice
             # seq = self._build_sequence_reset_twice(base_ids)
-            already_picked = set(onboard_ids)
+            already_picked = {r for r in base_ids if (r in res_index) and self._is_picked(res_index[r])}
             seq = self._greedy_pd_sequence(rid, base_ids, res_index, already_picked)
 
             # log pre-dispatch
@@ -898,11 +934,17 @@ class RLControllerAdapter:
 
         # 3) advance simulation and clean the shadow
         self._step()
-        self._detect_and_log_events()
-        self._refresh_shadow_plan()
-
+        new_pickups, new_dropoffs, alive_now = self._reservation_events()
+        self._detect_and_log_events_from_sets(new_pickups, new_dropoffs)
+        
         # 4) rewards + logs
-        per_robot, terms = self._compute_rewards_per_robot()
+        per_robot, terms = self._compute_rewards_per_robot_from_events(
+            new_pickups = new_pickups,
+            new_dropoffs = new_dropoffs,
+            alive_now = alive_now,
+
+        )
+        self._refresh_shadow_plan(alive_now)
         if self.logger:
             tnow = self._now()
             total = 0.0
@@ -940,26 +982,22 @@ class RLControllerAdapter:
         total = float(sum(per_robot.values()))
         return {"per_robot": per_robot, "sum_reward": total, "terms": terms}
 
-    def _refresh_shadow_plan(self) -> None:
+    def _refresh_shadow_plan(self, alive: Optional[Set[str]] = None) -> None:
         """Prune sequence entries for finished/onboard removed reservations."""
         # alive reservations
-        try:
-            alive = {str(getattr(r, "id", "")) for r in self.sumo.person.getTaxiReservations(0)}
-        except Exception:
-            alive = set()
+        if alive is None:
+            try:
+                alive = {str(getattr(r, "id", "")) for r in self.sumo.person.getTaxiReservations(0)}
+            except Exception:
+                alive = set()
 
         # keep ids that still exist (SUMO often removes finished ones)
         for rid, seq in list(self._shadow_plan_by_robot.items()):
             if not seq:
                 continue
-            kept = [r for r in seq if r in alive]
+            obsolete_ids = {t.id for t in (self._last_tasks or []) if t.is_obsolete}
+            kept = [r for r in seq if r in alive and r not in obsolete_ids]
 
-            if kept==[] and seq != []:
-                try:
-                    if hasattr(self.sumo.vehicle, "clearStops"):
-                        self.sumo.vehicle.clearStops(rid)
-                except Exception:
-                    pass
             self._shadow_plan_by_robot[rid] = kept
 
     # Helper: is there any work left right now?
@@ -1086,7 +1124,133 @@ class RLControllerAdapter:
         self._step_count += 1
 
     # ---- reward helpers ----
+    def _compute_rewards_per_robot_from_events(self,
+                                               *,
+                                               new_pickups: Set[str],
+                                               new_dropoffs: Set[str],
+                                               alive_now: Set[str]
+                                               ) -> Tuple[Dict[str, float], Dict[str, Dict[str, float]]]:
+        """
+        Build per-robot rewards from reservation state transitions (accurate pickups/dropoffs).
+        Returns (rewards, terms_per_robot) where terms contain each component for debugging.
+        """
+        robots = self._last_robot_ids or self.get_robots()
+        now = self._now()  
 
+        # rid - robot id
+        # res_id - reservation id
+
+        # currently assigned passengers (from shadow plan, filterd by actual reservations)
+        cur_assigned_by_robot: Dict[str, Set[str]] = {}
+        for rid in robots:
+            plain_ids = self._get_assigned_reservations(rid)
+            cur_assigned_by_robot[rid] = {r for r in plain_ids if r in alive_now}
+
+        picked_up_ids_by_robot: Dict[str, set[str]] = {rid: set() for rid in robots}
+        dropped_off_ids_by_robot: Dict[str, set[str]] = {rid: set() for rid in robots}
+
+        def owner_from_shadow(res_id: str) -> str | None:
+            for rid in robots:
+                if res_id in self._shadow_plan_by_robot.get(rid, []):
+                    return rid
+            return None
+        
+        for res_id in new_pickups:
+            rid = owner_from_shadow(res_id)
+            if rid:
+                picked_up_ids_by_robot[rid].add(res_id)
+                # record owner for future onboard counting
+                self._res_owner_by_res[res_id] = rid
+
+
+        for res_id in new_dropoffs:
+            rid = self._res_owner_by_res.get(res_id) or owner_from_shadow(res_id)
+            if rid:
+                dropped_off_ids_by_robot[rid].add(res_id)
+
+        # abandoned tasks: removed from this taxi's plan, and were not picked up or dropped off by anyone
+        # reservation left a plan without being served by anyone, probably due to reownership or plan churn
+        abandoned_count_by_robot: Dict[str, int] = {}
+        for rid in robots:
+            prev_ass = self._prev_assigned_by_robot.get(rid, set())
+            curr_ass = cur_assigned_by_robot[rid]
+            removed = prev_ass - curr_ass
+            # task was assigned but not picked up by the robot, and removed from its assignment plan
+            removed_not_picked = {x for x in removed if x not in picked_up_ids_by_robot[rid]}
+            # and it was not picked up or dropped of by anyone else
+            # ! is it the same as OBSOLETE?
+            abandoned = {x for x in removed_not_picked 
+                         if (x not in self._ever_picked_up and x not in self._ever_dropped_off)}
+            abandoned_count_by_robot[rid] = len(abandoned)
+
+        # waiting for pickup - in [-1;0]
+        WAIT_CAP = 600.0
+        wait_reward_by_robot: Dict[str, float] = {rid: 0.0 for rid in robots}
+        for rid in robots:
+            w = 0.0
+            for res_id in picked_up_ids_by_robot[rid]:
+                t0 = float(self._res_created_time.get(res_id, now))
+                w += -min(max(0.0, now-t0), WAIT_CAP)/WAIT_CAP
+            wait_reward_by_robot[rid] = w
+
+        # capacity reward (onboard count)
+        capacity_reward_by_robot: Dict[str, float] = {}
+        # Robust occupancy: use device.taxi.currentCustomers -> reservation ids,
+        # then count only those reservations that are actually PICKED_UP by state bit.
+        res_index_now = self._reservation_index()
+        p2r_now = self._person_to_res_index(res_index_now)
+        for rid in robots:
+            onboard_res = self._current_reservation_ids_onboard(rid, p2r_now)
+            onboard_picked = 0
+            for res_id in onboard_res:
+                robj = res_index_now.get(res_id)
+                if robj is not None and self._is_picked(robj):
+                    onboard_picked += 1
+            capacity_reward_by_robot[rid] = float(onboard_picked)
+        
+        step_penalty = -1.0 * 0.1
+
+        # backlog penalty
+        # ! why not use alive_res
+        n_res = len(alive_now)
+        backlog_penalty = (self._prev_n_res - n_res) * 0.05 / max(1, len(robots))
+        self._prev_n_res = n_res
+
+        # completion count by robot
+        completion_by_robot: Dict[str, float] = {}
+        if self.completion_mode == "pickup":
+            for rid in robots:
+                completion_by_robot[rid] = float(len(picked_up_ids_by_robot[rid]))
+        else:
+            for rid in robots:
+                completion_by_robot[rid] = float(len(dropped_off_ids_by_robot[rid]))
+
+        # compose
+        per_robot: Dict[str, float] = {}
+        terms: Dict[str, Dict[str, float]] = {}
+        for rid in robots:
+            cap = capacity_reward_by_robot[rid] * 0 # 2.0
+            abandoned = float(abandoned_count_by_robot[rid]) * - 10.0
+            waitr = wait_reward_by_robot[rid]
+            comp = max(0.0, completion_by_robot[rid]) * 0 # 40.0
+            backlog = backlog_penalty * 0.0
+
+            r = cap + step_penalty * 0 + abandoned + waitr + comp + backlog
+            per_robot[rid] = float(r)
+
+            terms[rid] = {
+                "capacity": cap,
+                "step": step_penalty,
+                "abandoned": abandoned,
+                "wait_at_pickups": waitr,
+                "completion": comp,
+                "nonserved": backlog,
+            }
+
+        self._prev_assigned_by_robot = cur_assigned_by_robot
+        return per_robot, terms
+
+    # ! OBSOLETE
     def _compute_rewards_per_robot(self) -> Tuple[Dict[str, float], Dict[str, Dict[str, float]]]:
         """
         Build per-robot rewards.
@@ -1242,13 +1406,25 @@ class RLControllerAdapter:
                 return cap
         except Exception:
             pass
-        return self.default_capacity
+        return self.max_robot_capacity
 
     def _remaining_capacity(self, rid: str) -> int:
         """Free seats right now for taxi rid."""
         cap = self._get_vehicle_capacity(rid)
-        onboard = len(self._get_current_customers(rid))
-        return max(0, cap - onboard)
+        if cap <= 0:
+            return 0
+        
+        res_index = self._reservation_index()
+        planned_unique = list(dict.fromkeys(self._shadow_plan_by_robot.get(rid, [])))
+        load = 0
+        for r in planned_unique:
+            obj = res_index.get(r)
+            if obj is None:
+                continue
+            if self._is_completed(obj):
+                continue
+            load += 1
+        return max(0, cap - load)
 
 
     def _now(self) -> float:
@@ -1598,91 +1774,74 @@ class RLControllerAdapter:
             print(f"  Min: {np.min(instant_dists):.1f}m")
 
 
-    def _detect_and_log_events(self) -> None:
+    def _detect_and_log_events_from_sets(self, new_pickups: Set[str], new_dropoffs: Set[str]) -> None:
+        def taxi_for(res_id: str) -> str:
+            res_id = self._normalize_task_id(res_id)
+            lc = self._task_lifecycle.get(res_id)
+            if lc and lc.get("assigned_taxi"):
+                return str(lc["assigned_taxi"])
+            return "UNKNOWN"
+
+        for res_id in new_pickups:
+            self._track_task_pickup(res_id, taxi_for(res_id))
+
+        for res_id in new_dropoffs:
+            self._track_task_dropoff(res_id, taxi_for(res_id))
+
+
+
+
+    def _reservation_events(self) -> Tuple[Set[str], Set[str], Set[str]]:
         """
-        Detect pickups/dropoffs using reservation state transitions (accurate),
-        not device.taxi.currentCustomers (which includes "to be picked up").
-        Call this AFTER each _step().
+        Detect reservation pickup/dropoff events in ONE place.
+
+        Returns:
+        (new_pickups, new_dropoffs, alive_now)
+
+        Semantics (robust across SUMO builds):
+        - pickup: reservation's state has PICKED_UP bit (8) now, but not in previous picked set.
+        - dropoff: either
+            a) reservation has COMPLETED bit (16) now but not previously (if your build ever uses it), OR
+            b) reservation disappeared since last tick AND it has been picked at least once.
         """
-        robots = self._last_robot_ids or self.get_robots()
         res_index = self._reservation_index()
+        alive_now: Set[str] = set(res_index.keys())
 
         picked_now: Set[str] = set()
         completed_now: Set[str] = set()
 
-        # Build state sets
         for res_id, r in res_index.items():
             st = int(getattr(r, "state", 0))
             if st & self.STATE_PICKED_UP:
-                picked_now.add(str(res_id))
+                picked_now.add(res_id)
             if st & self.STATE_COMPLETED:
-                completed_now.add(str(res_id))
+                completed_now.add(res_id)
 
-        # New pickups = picked_up now but not before
-        new_pickups = picked_now - self._prev_picked_res
-        # New completed = completed now but not before
-        new_completed = completed_now - self._prev_completed_res
+        prev_picked = self._prev_picked_res
+        prev_completed = self._prev_dropped_res  
 
-        # If SUMO removes completed reservations quickly, also treat "disappeared after pickup" as dropoff:
-        disappeared = (self._prev_picked_res - picked_now) - self._prev_completed_res
-        # (optional) you can add this if you see missed completions.
+        # New pickups by state transition
+        new_pickups = picked_now - prev_picked
 
-        now = self._now()
+        # Dropoffs by completed state transition (if any)
+        new_dropoffs_state = completed_now - prev_completed
 
-        # Attribute to a taxi:
-        # best-effort mapping: use currentCustomers mapping p->reservation when possible,
-        # otherwise leave taxi_id unknown or infer from shadow plan owners.
-        p2r = self._person_to_res_index(res_index)
-        onboard_owner: Dict[str, str] = {}
-        for rid in robots:
-            for res_id in self._current_reservation_ids_onboard(rid, p2r):
-                onboard_owner[res_id] = rid
+        # Dropoffs by disappearance-after-pickup (works in your build)
+        prev_alive = getattr(self, "_prev_alive_res", set())
+        disappeared = prev_alive - alive_now
+        new_dropoffs_disappear = {rid for rid in disappeared if rid in self._ever_picked_up}
 
-        for res_id in new_pickups:
-            taxi_id = onboard_owner.get(res_id, "UNKNOWN")
-            self._track_task_pickup(res_id, taxi_id)
+        new_dropoffs = new_dropoffs_state | new_dropoffs_disappear
 
-        for res_id in new_completed:
-            taxi_id = onboard_owner.get(res_id, "UNKNOWN")
-            self._track_task_dropoff(res_id, taxi_id)
+        # Update "ever" sets
+        for rid in new_pickups:
+            self._ever_picked_up.add(rid)
+        for rid in new_dropoffs:
+            self._ever_dropped_off.add(rid)
 
-        # (optional) handle disappeared as dropoff if needed
-        for res_id in disappeared:
-            taxi_id = onboard_owner.get(res_id, "UNKNOWN")
-            self._track_task_dropoff(res_id, taxi_id)
-
+        # Update previous snapshots (IMPORTANT: store full sets)
         self._prev_picked_res = picked_now
-        self._prev_completed_res = completed_now
+        self._prev_dropped_res = completed_now
+        self._prev_alive_res = alive_now
 
-def _reservation_state_events(self) -> tuple[set[str], set[str]]:
-    """
-    Returns (new_pickups, new_dropoffs) based on reservation state transitions.
-    Pickup: state gains PICKED_UP bit.
-    Dropoff: state gains COMPLETED bit (or reservation disappears after being picked, optional).
-    """
-    res_index = self._reservation_index()
-
-    picked_now: set[str] = set()
-    completed_now: set[str] = set()
-
-    for res_id, r in res_index.items():
-        st = int(getattr(r, "state", 0))
-        rid = str(res_id)
-        if st & self.STATE_PICKED_UP:
-            picked_now.add(rid)
-        if st & self.STATE_COMPLETED:
-            completed_now.add(rid)
-
-    new_pickups = picked_now - self._prev_picked_res
-    new_dropoffs = completed_now - self._prev_completed_res
-
-    # Optional robustness: if SUMO removes reservations quickly, treat “picked but vanished”
-    # as a dropoff. Enable only if you observe missing COMPLETED transitions.
-    disappeared_after_pick = (self._prev_picked_res - picked_now) - self._prev_completed_res
-    # If you want this behavior:
-    # new_dropoffs |= disappeared_after_pick
-
-    self._prev_picked_res = picked_now
-    self._prev_completed_res = completed_now
-    return new_pickups, new_dropoffs
-
+        return new_pickups, new_dropoffs, alive_now
