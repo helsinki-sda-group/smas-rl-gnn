@@ -738,9 +738,17 @@ class RLControllerAdapter:
         free_for_unpicked = max(0, cap - len(picked))
         return picked + unpicked[:free_for_unpicked]
 
-    def apply_and_step(self, assignments: Sequence[Optional[Union[int, str]]]) -> Dict[str, Any]:
+    def apply_and_step(self, 
+                       assignments: Sequence[Optional[Union[int, str]]],
+                       allow_redispatch: bool = True,
+                       ) -> Dict[str, Any]:
         """
         Apply assignments (aligned with self.get_robots() order), then advance SUMO one step.
+
+        If allow_redispatch = False:
+        - DO NOT recompute ownership / base ids / sequences
+        - DO NOT call dispatchTaxi
+        - Just advance SUMO one tick, compute rewards, refresh shadow plans, logs
         """
 
         
@@ -748,189 +756,191 @@ class RLControllerAdapter:
         res_index = self._reservation_index()
         p2r = self._person_to_res_index(res_index)
 
-        # 1) resolve incoming choices -> reservation ids (or None)
-        tasks = self._last_tasks or self.get_tasks()
-        idx_to_res_id = [t.id for t in tasks]
-        cand_lists = getattr(self, "_last_cand_lists", None)
+        if allow_redispatch:
 
-        if self.logger:
-            self.logger.log_debug(
-                self._now(), "apply-input",
-                {"robots": list(robots),
-                "assignments_raw": list(assignments[:len(robots)]),
-                "cand_counts": [len(cl) for cl in getattr(self, "_last_cand_lists", [])]}
-            )
-            self.logger.log_debug(self._now(), "apply-len-types", {
-                "len_assignments": len(assignments),
-                "types": [type(a).__name__ for a in assignments],
-            })
+            # 1) resolve incoming choices -> reservation ids (or None)
+            tasks = self._last_tasks or self.get_tasks()
+            idx_to_res_id = [t.id for t in tasks]
+            cand_lists = getattr(self, "_last_cand_lists", None)
 
-
-        chosen: list[Optional[str]] = []
-
-        for ridx, a in enumerate(assignments[:len(robots)]):
-            if a is None:
-                chosen.append(None)
-                continue
-            if isinstance(a, int) and cand_lists is not None:
-                clist = cand_lists[ridx] if ridx < len(cand_lists) else []
-                if a < len(clist):
-                    task_idx = clist[a]
-                    chosen.append(idx_to_res_id[task_idx])
-                    continue
-                chosen.append(None)
-                continue
-            else:
-                chosen.append(str(a))
-
-        
-        if self.logger:
-            self.logger.log_debug(self._now(), "apply-mapped", {
-                "chosen_res_ids": chosen,  # None or reservation ids per robot
-            })
-
-        valid = set(str(t.id) for t in tasks)
-        invalid = [c for c in chosen if c is not None and str(c) not in valid]
-
-        if invalid:
-            print("INVALID chosen IDs: ", invalid[:])
-            print("VALID task IDs: ", list(sorted(valid)))
-
-        if invalid and cand_lists is not None:
-            for ridx, (a,c) in enumerate(zip(assignments, chosen)):
-                if c is not None and str(c) not in valid:
-                    clist = cand_lists[ridx]
-                    print("ridx", ridx, "a", a, "clist_len", len(clist), "clist_head", clist[:])
-                    if isinstance(a, int) and a < len(clist):
-                        task_idx = clist[a]
-                        print("task_idx", task_idx, "idx_to_res_id[task_idx]", idx_to_res_id.get(task_idx))
-                        break
-
-        # 1b) resolve conflicts so only one taxi wins each reservation
-        chosen, winners = self._resolve_assignment_conflicts(list(robots), chosen, tasks)
-
-        if self.logger:
-            self.logger.log_debug(self._now(), "apply-winners", {
-                "winners": winners,  # {res_id: rid}
-            })
-
-        # --- Build per-step "owners" map to guarantee global uniqueness ---
-        # --- Build exclusive owners map: onboard > winner(this tick) > sticky(previous plan) ---
-        onboard_by_res: Dict[str, str] = {}
-        for rid0 in robots:
-            for res_id in self._current_reservation_ids_onboard(rid0, p2r):
-                onboard_by_res[res_id] = rid0
-
-        sticky_by_res: Dict[str, str] = {}
-        for rid0 in robots:
-            prev_ids_unique = list(dict.fromkeys(self._shadow_plan_by_robot.get(rid0, [])))
-            for r in prev_ids_unique:
-                if r not in onboard_by_res and r not in sticky_by_res:
-                    sticky_by_res[r] = rid0
-
-        owners: Dict[str, str] = dict(sticky_by_res)
-        for r, rid_win in winners.items():
-            if r not in onboard_by_res:        # never override onboard
-                owners[r] = rid_win
-        owners.update(onboard_by_res)           # onboard has highest precedence
-
-        # track task assignment
-        for rid, res_id in enumerate(chosen):
-            if res_id and rid < len(robots):
-                taxi_id = robots[rid]
-                self._track_task_assignment(res_id, taxi_id)
-
-        # 2) build/dispatch per taxi sequence
-        for rid, res_id in zip(robots, chosen):
-            prev_seq = list(self._shadow_plan_by_robot.get(rid, []))
-            prev_ids = list(dict.fromkeys(prev_seq))
-            onboard_ids = self._current_reservation_ids_onboard(rid, p2r)
-
-            # base set: prev uniques ∪ onboard ∪ {new}
-            base_ids = list(dict.fromkeys(prev_ids + onboard_ids))
-            if res_id and res_id not in base_ids:
-                base_ids.append(res_id)
-
-                    
-            # keep only reservations whose effective owner is this taxi
-            base_ids = [r for r in base_ids if owners.get(r) == rid]
-
-            # Keep only currently alive reservations (prevents dispatching finished/unknown IDs)
-            alive_res_ids = set(res_index.keys())
-            base_ids = [r for r in base_ids if r in alive_res_ids]
-
-            # enforce reserved-seat capacity (prevents over-assignment)
-            base_ids = self._cap_base_ids_to_capacity(rid, base_ids, res_index)
-
-            # FULL RESET strategy: every active reservation appears twice
-            # seq = self._build_sequence_reset_twice(base_ids)
-            already_picked = {r for r in base_ids if (r in res_index) and self._is_picked(res_index[r])}
-            seq = self._greedy_pd_sequence(rid, base_ids, res_index, already_picked)
-
-            # log pre-dispatch
-            try:
-                raw_cc = self.sumo.vehicle.getParameter(rid, "device.taxi.currentCustomers") or ""
-            except Exception:
-                raw_cc = ""
             if self.logger:
-                seq_pd = self._seq_to_person_pd(seq, res_index)  # <-- NEW
-                self.logger.log_dispatch(
-                    self._now(), rid, prev_seq, base_ids, seq, raw_cc,  # existing args
-                    seq_pd=seq_pd,  # <-- NEW named arg
-                    notes="pre-dispatch"
+                self.logger.log_debug(
+                    self._now(), "apply-input",
+                    {"robots": list(robots),
+                    "assignments_raw": list(assignments[:len(robots)]),
+                    "cand_counts": [len(cl) for cl in getattr(self, "_last_cand_lists", [])]}
                 )
-            
-            # If nothing to dispatch, do NOT call dispatchTaxi with an empty list.
-            if not seq:
-                # drop our shadow plan
-                self._shadow_plan_by_robot[rid] = []
+                self.logger.log_debug(self._now(), "apply-len-types", {
+                    "len_assignments": len(assignments),
+                    "types": [type(a).__name__ for a in assignments],
+                })
 
-                # best-effort: clear remaining SUMO stops to avoid end-of-run warnings
+
+            chosen: list[Optional[str]] = []
+
+            for ridx, a in enumerate(assignments[:len(robots)]):
+                if a is None:
+                    chosen.append(None)
+                    continue
+                if isinstance(a, int) and cand_lists is not None:
+                    clist = cand_lists[ridx] if ridx < len(cand_lists) else []
+                    if a < len(clist):
+                        task_idx = clist[a]
+                        chosen.append(idx_to_res_id[task_idx])
+                        continue
+                    chosen.append(None)
+                    continue
+                else:
+                    chosen.append(str(a))
+
+            
+            if self.logger:
+                self.logger.log_debug(self._now(), "apply-mapped", {
+                    "chosen_res_ids": chosen,  # None or reservation ids per robot
+                })
+
+            valid = set(str(t.id) for t in tasks)
+            invalid = [c for c in chosen if c is not None and str(c) not in valid]
+
+            if invalid:
+                print("INVALID chosen IDs: ", invalid[:])
+                print("VALID task IDs: ", list(sorted(valid)))
+
+            if invalid and cand_lists is not None:
+                for ridx, (a,c) in enumerate(zip(assignments, chosen)):
+                    if c is not None and str(c) not in valid:
+                        clist = cand_lists[ridx]
+                        print("ridx", ridx, "a", a, "clist_len", len(clist), "clist_head", clist[:])
+                        if isinstance(a, int) and a < len(clist):
+                            task_idx = clist[a]
+                            print("task_idx", task_idx, "idx_to_res_id[task_idx]", idx_to_res_id[task_idx])
+                            break
+
+            # 1b) resolve conflicts so only one taxi wins each reservation
+            chosen, winners = self._resolve_assignment_conflicts(list(robots), chosen, tasks)
+
+            if self.logger:
+                self.logger.log_debug(self._now(), "apply-winners", {
+                    "winners": winners,  # {res_id: rid}
+                })
+
+            # --- Build per-step "owners" map to guarantee global uniqueness ---
+            # --- Build exclusive owners map: onboard > winner(this tick) > sticky(previous plan) ---
+            onboard_by_res: Dict[str, str] = {}
+            for rid0 in robots:
+                for res_id in self._current_reservation_ids_onboard(rid0, p2r):
+                    onboard_by_res[res_id] = rid0
+
+            sticky_by_res: Dict[str, str] = {}
+            for rid0 in robots:
+                prev_ids_unique = list(dict.fromkeys(self._shadow_plan_by_robot.get(rid0, [])))
+                for r in prev_ids_unique:
+                    if r not in onboard_by_res and r not in sticky_by_res:
+                        sticky_by_res[r] = rid0
+
+            owners: Dict[str, str] = dict(sticky_by_res)
+            for r, rid_win in winners.items():
+                if r not in onboard_by_res:        # never override onboard
+                    owners[r] = rid_win
+            owners.update(onboard_by_res)           # onboard has highest precedence
+
+            # track task assignment
+            for rid, res_id in enumerate(chosen):
+                if res_id and rid < len(robots):
+                    taxi_id = robots[rid]
+                    self._track_task_assignment(res_id, taxi_id)
+
+            # 2) build/dispatch per taxi sequence
+            for rid, res_id in zip(robots, chosen):
+                prev_seq = list(self._shadow_plan_by_robot.get(rid, []))
+                prev_ids = list(dict.fromkeys(prev_seq))
+                onboard_ids = self._current_reservation_ids_onboard(rid, p2r)
+
+                # base set: prev uniques ∪ onboard ∪ {new}
+                base_ids = list(dict.fromkeys(prev_ids + onboard_ids))
+                if res_id and res_id not in base_ids:
+                    base_ids.append(res_id)
+
+                        
+                # keep only reservations whose effective owner is this taxi
+                base_ids = [r for r in base_ids if owners.get(r) == rid]
+
+                # Keep only currently alive reservations (prevents dispatching finished/unknown IDs)
+                alive_res_ids = set(res_index.keys())
+                base_ids = [r for r in base_ids if r in alive_res_ids]
+
+                # enforce reserved-seat capacity (prevents over-assignment)
+                base_ids = self._cap_base_ids_to_capacity(rid, base_ids, res_index)
+
+                # FULL RESET strategy: every active reservation appears twice
+                # seq = self._build_sequence_reset_twice(base_ids)
+                already_picked = {r for r in base_ids if (r in res_index) and self._is_picked(res_index[r])}
+                seq = self._greedy_pd_sequence(rid, base_ids, res_index, already_picked)
+
+                # log pre-dispatch
                 try:
-                    if hasattr(self.sumo.vehicle, "clearStops"):
-                        self.sumo.vehicle.clearStops(rid)
-                    else:
-                        # fallback: remove stops one by one if API supports it
-                        stops = list(self.sumo.vehicle.getStops(rid))
-                        for i in reversed(range(len(stops))):
-                            try:
-                                self.sumo.vehicle.removeStop(rid, i)
-                            except Exception:
-                                pass
+                    raw_cc = self.sumo.vehicle.getParameter(rid, "device.taxi.currentCustomers") or ""
                 except Exception:
-                    pass
-
+                    raw_cc = ""
                 if self.logger:
+                    seq_pd = self._seq_to_person_pd(seq, res_index)  # <-- NEW
                     self.logger.log_dispatch(
-                        self._now(), rid, prev_seq, base_ids, seq, raw_cc,
-                        seq_pd=self._seq_to_person_pd(seq, res_index),
-                        notes="skip-empty"
+                        self._now(), rid, prev_seq, base_ids, seq, raw_cc,  # existing args
+                        seq_pd=seq_pd,  # <-- NEW named arg
+                        notes="pre-dispatch"
                     )
-                continue
+                
+                # If nothing to dispatch, do NOT call dispatchTaxi with an empty list.
+                if not seq:
+                    # drop our shadow plan
+                    self._shadow_plan_by_robot[rid] = []
 
-            
-            # avoid spamming SUMO if unchanged
-            if seq == prev_seq:
-                if self.logger:
-                    self.logger.log_dispatch(
-                        self._now(), rid, prev_seq, base_ids, seq, raw_cc,
-                        seq_pd=self._seq_to_person_pd(seq, res_index),
-                        notes="skip-unchanged"
-                    )
-                continue
+                    # best-effort: clear remaining SUMO stops to avoid end-of-run warnings
+                    try:
+                        if hasattr(self.sumo.vehicle, "clearStops"):
+                            self.sumo.vehicle.clearStops(rid)
+                        else:
+                            # fallback: remove stops one by one if API supports it
+                            stops = list(self.sumo.vehicle.getStops(rid))
+                            for i in reversed(range(len(stops))):
+                                try:
+                                    self.sumo.vehicle.removeStop(rid, i)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
 
-            try:
-                self.sumo.vehicle.dispatchTaxi(rid, seq)
-                self._shadow_plan_by_robot[rid] = seq
-            except Exception as e:
-                if self.logger:
-                    seq_pd = self._seq_to_person_pd(seq, res_index)
-                    self.logger.log_dispatch(
-                        self._now(), rid, prev_seq, base_ids, seq, raw_cc,
-                        seq_pd=seq_pd,
-                        notes=f"dispatch-error:{e}"
-                    )
-                # keep previous plan on failure
+                    if self.logger:
+                        self.logger.log_dispatch(
+                            self._now(), rid, prev_seq, base_ids, seq, raw_cc,
+                            seq_pd=self._seq_to_person_pd(seq, res_index),
+                            notes="skip-empty"
+                        )
+                    continue
+
+                
+                # avoid spamming SUMO if unchanged
+                if seq == prev_seq:
+                    if self.logger:
+                        self.logger.log_dispatch(
+                            self._now(), rid, prev_seq, base_ids, seq, raw_cc,
+                            seq_pd=self._seq_to_person_pd(seq, res_index),
+                            notes="skip-unchanged"
+                        )
+                    continue
+
+                try:
+                    self.sumo.vehicle.dispatchTaxi(rid, seq)
+                    self._shadow_plan_by_robot[rid] = seq
+                except Exception as e:
+                    if self.logger:
+                        seq_pd = self._seq_to_person_pd(seq, res_index)
+                        self.logger.log_dispatch(
+                            self._now(), rid, prev_seq, base_ids, seq, raw_cc,
+                            seq_pd=seq_pd,
+                            notes=f"dispatch-error:{e}"
+                        )
+                    # keep previous plan on failure
 
         # 3) advance simulation and clean the shadow
         self._step()

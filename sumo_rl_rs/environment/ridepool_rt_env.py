@@ -190,7 +190,7 @@ class RidepoolRTEnv(gym.Env):
 
         # (1) apply chosen assignments now
         assignments = self._decode(action)
-        step_out = self.controller.apply_and_step(assignments)  # controller aligns with its robot order
+        step_out = self.controller.apply_and_step(assignments, allow_redispatch=True)  # controller aligns with its robot order
          # Expect dict like {"per_robot": {...}, "sum_reward": float, "terms": {...}}
         total_reward += float(step_out.get("sum_reward", 0.0))
         terminated = bool(self.controller.is_episode_done())
@@ -209,7 +209,7 @@ class RidepoolRTEnv(gym.Env):
         steps_done = 1
         while (not terminated) and steps_done < self.decision_dt:
             noop = [None] * self.R
-            step_out = self.controller.apply_and_step(noop)
+            step_out = self.controller.apply_and_step(noop, allow_redispatch = False)
             total_reward += float(step_out.get("sum_reward", 0.0))
             terminated = bool(self.controller.is_episode_done())
             last_info = {k: v for k, v in step_out.items() if k != "sum_reward"}
