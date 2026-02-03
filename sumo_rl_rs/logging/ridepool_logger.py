@@ -3,7 +3,6 @@ from __future__ import annotations
 import os, csv, time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Any
-import matplotlib.pyplot as plt
 import json
 
 from pathlib import Path
@@ -18,6 +17,7 @@ class RidepoolLogConfig:
     console_debug: bool = False          # print some lines to console
     erase_run_dir_on_start: bool = False         # if True: delete the whole run directory at construction
     erase_episode_dir_on_start: bool = False     # if True: delete an episode dir when starting it
+    csv_postfix: Optional[str] = None    # postfix for all CSV filenames (e.g., "random1"). If None, no postfix added
 
 class RidepoolLogger:
     """
@@ -48,6 +48,9 @@ class RidepoolLogger:
         self._counters = {"writes": 0}
         self._files: Dict[str, Any] = {}
         self._writers: Dict[str, csv.DictWriter] = {}
+        self._csv_postfix = cfg.csv_postfix or ""
+        # Map logical filenames to actual filenames (for backward compatibility with postfix)
+        self._fname_map: Dict[str, str] = {}
         # step-local timeseries for plotting
         self._ts: Dict[str, List[float]] = {
             "idle": [], "en_route": [], "occupied": [], "pickup_occupied": [],
@@ -55,6 +58,28 @@ class RidepoolLogger:
         }
 
     # ---------- lifecycle ----------
+    def set_csv_postfix(self, postfix: str) -> None:
+        """Set the postfix for all CSV filenames. If empty string, no postfix is added."""
+        self._csv_postfix = postfix
+        self._fname_map.clear()  # Clear the mapping cache when postfix changes
+
+    def _get_csv_filename(self, base_name: str) -> str:
+        """
+        Get the actual CSV filename with postfix applied.
+        base_name should be without .csv extension (e.g., 'dispatch')
+        Returns the postfixed filename (e.g., 'dispatch_random1.csv' or 'dispatch.csv')
+        """
+        if base_name in self._fname_map:
+            return self._fname_map[base_name]
+        
+        if self._csv_postfix:
+            fname = f"{base_name}_{self._csv_postfix}.csv"
+        else:
+            fname = f"{base_name}.csv"
+        
+        self._fname_map[base_name] = fname
+        return fname
+
     def start_episode(self, episode_idx: Optional[int] = None):
         if episode_idx is not None:
             self.cfg.episode_index = int(episode_idx)
@@ -68,28 +93,28 @@ class RidepoolLogger:
 
         os.makedirs(self.ep_dir, exist_ok=True)
 
-        self._open_csv("dispatch.csv", ["time","taxi","prev_seq","base_ids","seq","seq_pd","raw_currentCustomers","notes"])
-        self._open_csv("conflicts.csv", ["time","res_id","taxi_candidates","remaining_caps","distances","winner"])
-        self._open_csv("candidates.csv", ["time","taxi","cand_slots","cand_res_ids","cand_persons","cand_pd_seq"])
-        self._open_csv("rewards.csv", ["time","taxi","reward","capacity","step","abandoned","wait_at_pickups","completion", "nonserved"])
-        self._open_csv("fleet_counts.csv", ["time","idle","en_route","occupied","pickup_occupied"])
-        self._open_csv("episode_totals.csv", ["episode","sum_reward","n_pickups","n_dropoffs","duration"])
-        self._open_csv("rewards_macro.csv", ["macro_steps","reward","capacity_avg","step_avg","abandoned_avg", "wait_avg", "completion_avg", "nonserved_avg"])
+        self._open_csv(self._get_csv_filename("dispatch"), ["time","taxi","prev_seq","base_ids","seq","seq_pd","raw_currentCustomers","notes"])
+        self._open_csv(self._get_csv_filename("conflicts"), ["time","res_id","taxi_candidates","remaining_caps","distances","winner"])
+        self._open_csv(self._get_csv_filename("candidates"), ["time","taxi","cand_slots","cand_res_ids","cand_persons","cand_pd_seq"])
+        self._open_csv(self._get_csv_filename("rewards"), ["time","taxi","reward","capacity","step","missed_deadline","wait_at_pickups","completion", "nonserved"])
+        self._open_csv(self._get_csv_filename("fleet_counts"), ["time","idle","en_route","occupied","pickup_occupied"])
+        self._open_csv(self._get_csv_filename("episode_totals"), ["episode","sum_reward","n_pickups","n_dropoffs","duration"])
+        self._open_csv(self._get_csv_filename("rewards_macro"), ["macro_steps","reward","capacity_avg","step_avg","missed_deadline_avg", "wait_avg", "completion_avg", "nonserved_avg"])
 
-        self._open_csv("task_lifecycle.csv", [
+        self._open_csv(self._get_csv_filename("task_lifecycle"), [
             "task_id", "reservation_time", "pickup_deadline", "estimated_travel_time",
             "dropoff_deadline", "actual_pickup_time", "actual_dropoff_time",
             "assigned_step", "assigned_taxi", "pickup_step", "pickup_taxi",
             "dropoff_step", "dropoff_taxi", "was_obsolete",
             "actual_waiting_time", "actual_travel_time"
         ])
-        self._open_csv("taxi_events.csv", ["step", "taxi", "event_type", "task_id"])
+        self._open_csv(self._get_csv_filename("taxi_events"), ["step", "taxi", "event_type", "task_id"])
         # reset timeseries
         for k in self._ts:
             self._ts[k].clear()
 
     def end_episode(self, sum_reward: float, n_pickups: int, n_dropoffs: int, duration: float):
-        self._write("episode_totals.csv", dict(
+        self._write(self._get_csv_filename("episode_totals"), dict(
             episode=self.cfg.episode_index,
             sum_reward=float(sum_reward),
             n_pickups=int(n_pickups),
@@ -175,9 +200,10 @@ class RidepoolLogger:
         seq_pd: a single string like 'p1:PU|p1:DO|p2:PU|p2:DO|...'
         raw_currentCustomers: raw TraCI string (person ids, usually "p7 p12 ...")
         """
-        self._ensure_csv("dispatch.csv",
+        fname = self._get_csv_filename("dispatch")
+        self._ensure_csv(fname,
                         ["time","taxi","prev_seq","base_ids","seq","seq_pd","raw_currentCustomers","notes"])
-        self._write("dispatch.csv", dict(
+        self._write(fname, dict(
             time=float(t),
             taxi=str(taxi),
             prev_seq="|".join(map(str, prev_seq)),
@@ -190,8 +216,9 @@ class RidepoolLogger:
 
     def log_conflict(self, t: float, res_id: str, taxi_candidates: Sequence[str],
                      remaining_caps: Sequence[int], distances: Sequence[float], winner: str):
-        self._ensure_csv("conflicts.csv", ["time","res_id","taxi_candidates","remaining_caps","distances", "winner"])
-        self._write("conflicts.csv", dict(
+        fname = self._get_csv_filename("conflicts")
+        self._ensure_csv(fname, ["time","res_id","taxi_candidates","remaining_caps","distances", "winner"])
+        self._write(fname, dict(
             time=float(t), res_id=str(res_id),
             taxi_candidates="|".join(map(str, taxi_candidates)),
             remaining_caps="|".join(map(str, remaining_caps)),
@@ -206,9 +233,10 @@ class RidepoolLogger:
         cand_persons: list[str]  (per candidate: 'p1+p2' or '')
         cand_pd_seq:  list[str]  (per candidate: 'p1:PU+p2:PU+p1:DO+p2:DO' or '')
         """
-        self._ensure_csv("candidates.csv",
+        fname = self._get_csv_filename("candidates")
+        self._ensure_csv(fname,
                         ["time","taxi","cand_slots","cand_res_ids","cand_persons","cand_pd_seq"])
-        self._write("candidates.csv", dict(
+        self._write(fname, dict(
             time=float(t),
             taxi=str(taxi),
             cand_slots="|".join(map(str, cand_slots)),
@@ -218,38 +246,42 @@ class RidepoolLogger:
         ))
 
     def log_rewards(self, t: float, taxi: str, reward: float, terms: Dict[str, float]):
-        self._ensure_csv("rewards.csv", ["time","taxi","reward","capacity","step","abandoned","wait_at_pickups","completion", "nonserved"])
+        fname = self._get_csv_filename("rewards")
+        self._ensure_csv(fname, ["time","taxi","reward","capacity","step","missed_deadline","wait_at_pickups","completion", "nonserved"])
 
         terms_round = {k: round(float(v),2) for k,v in terms.items()}
 
-        self._write("rewards.csv", dict(
+        self._write(fname, dict(
             time=float(t), taxi=str(taxi), reward=round(float(reward),2),
             capacity=terms_round["capacity"],
             step=terms_round["step"],
-            abandoned=terms_round["abandoned"],
+            missed_deadline=terms_round["missed_deadline"],
             wait_at_pickups=terms_round["wait_at_pickups"],
             completion=terms_round["completion"],
             nonserved=terms_round["nonserved"],
         ))
 
     def log_macro_step(self, info):
-        self._ensure_csv("rewards_macro.csv", 
-                         ["macro_steps","reward","capacity_avg","step_avg","abandoned_avg", "wait_avg", "completion_avg", "nonserved_avg"])
+        fname = self._get_csv_filename("rewards_macro")
+        self._ensure_csv(fname, 
+                         ["macro_steps","reward","capacity_avg","step_avg","missed_deadline_avg", "wait_avg", "completion_avg", "nonserved_avg"])
 
-        self._write("rewards_macro.csv", dict(
-                    macro_steps = info["macro_steps"],
-                    reward = info["macro_reward"],
-                    capacity_avg = info["macro_capacity"],
-                    step_avg = info["macro_step"],
-                    abandoned_avg = info["macro_abandoned"],
-                    wait_avg = info["macro_wait"],
-                    completion_avg = info["macro_completion"],
-                    nonserved_avg = info["macro_nonserved"],
+        missed_deadline_avg = info.get("macro_missed_deadline", info.get("macro_abandoned"))
+        self._write(fname, dict(
+                macro_steps = info["macro_steps"],
+                reward = info["macro_reward"],
+                capacity_avg = info["macro_capacity"],
+                step_avg = info["macro_step"],
+                missed_deadline_avg = missed_deadline_avg,
+                wait_avg = info["macro_wait"],
+                completion_avg = info["macro_completion"],
+                nonserved_avg = info["macro_nonserved"],
         ))
 
     def log_fleet_counts(self, t: float, idle: int, en_route: int, occupied: int, pickup_occupied: int):
-        self._ensure_csv("fleet_counts.csv", ["time","idle","en_route","occupied","pickup_occupied"])
-        self._write("fleet_counts.csv", dict(
+        fname = self._get_csv_filename("fleet_counts")
+        self._ensure_csv(fname, ["time","idle","en_route","occupied","pickup_occupied"])
+        self._write(fname, dict(
             time=float(t), idle=int(idle), en_route=int(en_route),
             occupied=int(occupied), pickup_occupied=int(pickup_occupied)
         ))
@@ -268,8 +300,9 @@ class RidepoolLogger:
         Generic debugging hook: writes a row to debug.csv
         """
         try:
-            self._ensure_csv("debug.csv", ["time", "tag", "data"])
-            self._write("debug.csv", dict(
+            fname = self._get_csv_filename("debug")
+            self._ensure_csv(fname, ["time", "tag", "data"])
+            self._write(fname, dict(
                 time=float(tnow),
                 tag=str(tag),
                 data=json.dumps(payload, ensure_ascii=False)
@@ -306,11 +339,12 @@ class RidepoolLogger:
             "dropoff_step", "dropoff_taxi", "was_obsolete",
             "actual_waiting_time", "actual_travel_time"
         ]
-        self._ensure_csv("task_lifecycle.csv", header)
+        fname = self._get_csv_filename("task_lifecycle")
+        self._ensure_csv(fname, header)
         
         row = {"task_id": str(task_id)}
         row.update(kwargs)
-        self._write("task_lifecycle.csv", row)
+        self._write(fname, row)
 
     def log_taxi_event(self, step: int, taxi: str, event_type: str, task_id: str):
         """
@@ -322,10 +356,11 @@ class RidepoolLogger:
             event_type: 'assigned', 'picked_up', 'dropped_off'
             task_id: task/passenger id (e.g., 'p0', '0')
         """
+        fname = self._get_csv_filename("taxi_events")
         header = ["step", "taxi", "event_type", "task_id"]
-        self._ensure_csv("taxi_events.csv", header)
+        self._ensure_csv(fname, header)
         
-        self._write("taxi_events.csv", dict(
+        self._write(fname, dict(
             step=int(step),
             taxi=str(taxi),
             event_type=str(event_type),
@@ -334,22 +369,5 @@ class RidepoolLogger:
 
     # ---------- plotting ----------
     def _plot_ts(self, png_name: str, series: List[tuple], ylabel: str = ""):
-        if not self._ts or not any(self._ts.get(k, []) for k, _ in series):
-            return
-        plt.figure(figsize=(10, 5))
-        for key, label in series:
-            if self._ts.get(key):
-                xs = list(range(len(self._ts[key])))
-                ys = self._ts[key]
-                plt.plot(xs, ys, label=label)
-        plt.xlabel("Step")
-        plt.ylabel(ylabel)
-        plt.title(png_name.replace("_", " ")[:-4])
-        plt.grid(True)
-        plt.legend()
-        ep_dir = self.ep_dir
-        if ep_dir is None:
-            return
-        os.makedirs(os.path.join(ep_dir, "plots"), exist_ok=True)
-        plt.savefig(os.path.join(ep_dir, "plots", png_name))
-        plt.close()
+        # Plotting disabled
+        return

@@ -3,7 +3,6 @@ from __future__ import annotations
 import os, csv, time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Any
-import matplotlib.pyplot as plt
 import json
 
 from pathlib import Path
@@ -71,10 +70,10 @@ class RidepoolLogger:
         self._open_csv("dispatch.csv", ["time","taxi","prev_seq","base_ids","seq","seq_pd","raw_currentCustomers","notes"])
         self._open_csv("conflicts.csv", ["time","res_id","taxi_candidates","remaining_caps","distances","winner"])
         self._open_csv("candidates.csv", ["time","taxi","cand_slots","cand_res_ids","cand_persons","cand_pd_seq"])
-        self._open_csv("rewards.csv", ["time","taxi","reward","capacity","step","abandoned","wait_at_pickups","completion", "nonserved"])
+        self._open_csv("rewards.csv", ["time","taxi","reward","capacity","step","missed_deadline","wait_at_pickups","completion", "nonserved"])
         self._open_csv("fleet_counts.csv", ["time","idle","en_route","occupied","pickup_occupied"])
         self._open_csv("episode_totals.csv", ["episode","sum_reward","n_pickups","n_dropoffs","duration"])
-        self._open_csv("rewards_macro.csv", ["macro_steps","reward","capacity_avg","step_avg","abandoned_avg", "wait_avg", "completion_avg", "nonserved_avg"])
+        self._open_csv("rewards_macro.csv", ["macro_steps","reward","capacity_avg","step_avg","missed_deadline_avg", "wait_avg", "completion_avg", "nonserved_avg"])
         
         # NEW: task lifecycle and taxi events
         self._open_csv("task_lifecycle.csv", [
@@ -220,7 +219,7 @@ class RidepoolLogger:
         ))
 
     def log_rewards(self, t: float, taxi: str, reward: float, terms: Dict[str, float]):
-        self._ensure_csv("rewards.csv", ["time","taxi","reward","capacity","step","abandoned","wait_at_pickups","completion", "nonserved"])
+        self._ensure_csv("rewards.csv", ["time","taxi","reward","capacity","step","missed_deadline","wait_at_pickups","completion", "nonserved"])
 
         terms_round = {k: round(float(v),2) for k,v in terms.items()}
 
@@ -228,7 +227,7 @@ class RidepoolLogger:
             time=float(t), taxi=str(taxi), reward=round(float(reward),2),
             capacity=terms_round["capacity"],
             step=terms_round["step"],
-            abandoned=terms_round["abandoned"],
+            missed_deadline=terms_round["missed_deadline"],
             wait_at_pickups=terms_round["wait_at_pickups"],
             completion=terms_round["completion"],
             nonserved=terms_round["nonserved"],
@@ -236,14 +235,14 @@ class RidepoolLogger:
 
     def log_macro_step(self, info):
         self._ensure_csv("rewards_macro.csv", 
-                         ["macro_steps","reward","capacity_avg","step_avg","abandoned_avg", "wait_avg", "completion_avg", "nonserved_avg"])
+                 ["macro_steps","reward","capacity_avg","step_avg","missed_deadline_avg", "wait_avg", "completion_avg", "nonserved_avg"])
 
         self._write("rewards_macro.csv", dict(
                     macro_steps = info["macro_steps"],
                     reward = info["macro_reward"],
                     capacity_avg = info["macro_capacity"],
                     step_avg = info["macro_step"],
-                    abandoned_avg = info["macro_abandoned"],
+                    missed_deadline_avg = info.get("macro_missed_deadline", info.get("macro_abandoned")),
                     wait_avg = info["macro_wait"],
                     completion_avg = info["macro_completion"],
                     nonserved_avg = info["macro_nonserved"],
@@ -336,22 +335,5 @@ class RidepoolLogger:
 
     # ---------- plotting ----------
     def _plot_ts(self, png_name: str, series: List[tuple], ylabel: str = ""):
-        if not self._ts or not any(self._ts.get(k, []) for k, _ in series):
-            return
-        plt.figure(figsize=(10, 5))
-        for key, label in series:
-            if self._ts.get(key):
-                xs = list(range(len(self._ts[key])))
-                ys = self._ts[key]
-                plt.plot(xs, ys, label=label)
-        plt.xlabel("Step")
-        plt.ylabel(ylabel)
-        plt.title(png_name.replace("_", " ")[:-4])
-        plt.grid(True)
-        plt.legend()
-        ep_dir = self.ep_dir
-        if ep_dir is None:
-            return
-        os.makedirs(os.path.join(ep_dir, "plots"), exist_ok=True)
-        plt.savefig(os.path.join(ep_dir, "plots", png_name))
-        plt.close()
+        # Plotting disabled
+        return
