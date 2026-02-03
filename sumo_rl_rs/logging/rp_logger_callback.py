@@ -11,13 +11,14 @@ from utils.metrics_calculator import (
 
 class RPLoggerCallback(BaseCallback):
     def __init__(self, rp_logger, controller, verbose: int = 0, metrics_log_path: str | None = None,
-                 num_robots: int | None = None, seed: int = 0):
+                 num_robots: int | None = None, seed: int = 0, reset_fn = None):
         super().__init__(verbose)
         self.rp_logger = rp_logger                # RidepoolLogger
         self.controller = controller              # RLControllerAdapter
         self.metrics_log_path = metrics_log_path
         self.num_robots = num_robots
         self.seed = seed
+        self.reset_fn = reset_fn  # Optional: RotatingSeedResetFn for dynamic seeds
         self.ep_idx = 0
         self.sum_reward = 0.0
         self.steps_in_ep = 0
@@ -52,11 +53,19 @@ class RPLoggerCallback(BaseCallback):
             if self.metrics_log_path:
                 episode_dir = getattr(self.rp_logger, "last_ep_dir", None) or self.rp_logger.ep_dir
                 info_for_metrics = infos[0] if infos else {}
+                
+                # Get current seed from reset_fn if available (for rotating seeds)
+                current_seed = self.seed
+                if self.reset_fn and hasattr(self.reset_fn, 'get_current_seed'):
+                    # Note: episode_count was already incremented in reset, so we need previous seed
+                    # which is at (episode_count - 1) % len(seeds)
+                    current_seed = self.reset_fn.seeds[(self.reset_fn.episode_count - 1) % len(self.reset_fn.seeds)]
+                
                 metrics = compute_episode_metrics_from_logs(
                     episode_dir=episode_dir,
                     episode_info=info_for_metrics,
                     policy=str(self.ep_idx),
-                    seed=self.seed,
+                    seed=current_seed,
                     num_robots=self.num_robots,
                 )
                 append_metrics_log(self.metrics_log_path, metrics)

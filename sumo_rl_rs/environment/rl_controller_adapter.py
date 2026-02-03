@@ -1297,9 +1297,9 @@ class RLControllerAdapter:
                         deadline_penalty_by_robot[r] += share
 
         # Weights
-        W_COMP = 3.0 
-        W_WAIT = 1.0
-        W_DEADLINE = 5.0
+        W_COMP = 1.0 
+        W_WAIT = 1.5
+        W_DEADLINE = 10.0
 
         # compose
         per_robot: Dict[str, float] = {}

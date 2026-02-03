@@ -47,7 +47,48 @@ MAX_STEPS = 1200
 MAX_WAIT_DELAY_S = 240.0
 MAX_TRAVEL_DELAY_S = 900.0
 MAX_ROBOT_CAPACITY = 2
-SEED = 42
+
+# Training seeds - different from evaluation seeds [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
+TRAIN_SEEDS = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+
+# Initial seed for first episode
+SEED = TRAIN_SEEDS[0]
+
+# Create a class to track episode count and rotate seeds
+class RotatingSeedResetFn:
+    """Reset function that rotates through training seeds on each episode."""
+    def __init__(self, sumocfg_path: str, use_gui: bool, seeds: list[int]):
+        self.sumocfg_path = sumocfg_path
+        self.use_gui = use_gui
+        self.seeds = seeds
+        self.episode_count = 0
+    
+    def __call__(self) -> None:
+        # Get the seed for current episode
+        seed = self.seeds[self.episode_count % len(self.seeds)]
+        extra_args = ["--seed", str(seed), "--device.taxi.dispatch-algorithm", "traci"]
+        
+        # Import here to avoid circular dependencies
+        from utils.sumo_bootstrap import _imports, _build_args
+        traci, checkBinary = _imports()
+        args = _build_args(self.sumocfg_path, extra_args)
+        
+        if traci.isLoaded():
+            # reload in the same process/port
+            traci.load(args)
+        else:
+            binary = checkBinary("sumo-gui" if self.use_gui else "sumo")
+            traci.start([binary, *args])
+        
+        # Increment episode count for next reset
+        self.episode_count += 1
+    
+    def get_current_seed(self) -> int:
+        """Get the seed that will be used for the current episode."""
+        return self.seeds[self.episode_count % len(self.seeds)]
+
+# Create rotating reset function
+reset_fn = RotatingSeedResetFn(SUMO_CFG, use_gui=False, seeds=TRAIN_SEEDS)
 
 traci = start_sumo(SUMO_CFG, use_gui=False,
                    extra_args=["--seed", str(SEED), "--device.taxi.dispatch-algorithm", "traci"])
@@ -64,8 +105,7 @@ rp_logger = RidepoolLogger(
 
 controller = RLControllerAdapter(
     sumo=traci,
-    reset_fn=make_reset_fn(SUMO_CFG, use_gui=False,
-                           extra_args=["--seed", str(SEED), "--device.taxi.dispatch-algorithm", "traci"]),
+    reset_fn=reset_fn,  # Use rotating seed reset function
     k_max=K_max,
     vicinity_m=VICINITY_M,      # vicinity in meters
     completion_mode="dropoff", # task is marked as completed at dropoff
@@ -125,7 +165,7 @@ callback = RPLoggerCallback(
     controller,
     metrics_log_path=metrics_log_path,
     num_robots=R,
-    seed=SEED,
+    reset_fn=reset_fn,  # Pass reset_fn to get current seed
 )
 
 model.learn(total_timesteps=100_000, callback=callback)

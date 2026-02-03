@@ -32,7 +32,7 @@ MAX_WAIT_DELAY_S = 240.0
 MAX_TRAVEL_DELAY_S = 900.0
 MAX_ROBOT_CAPACITY = 2
 
-NUM_SEEDS = 3  # Number of seeds to use (first N from SEEDS list)
+NUM_SEEDS = 10  # Number of seeds to use (first N from SEEDS list)
 SEEDS = [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
 POLICIES = ["random", "greedy", "unique"]
 
