@@ -265,3 +265,15 @@ def get_metrics_header() -> str:
     return (
         "pol        seed |      rew      cap     step      mdl     wait     comp      nsv |   pku    pkr obs  obsr   pkv   pkvr    mwt   cmp    cmr   anp   anpr     mtt   pnc    pncr |   noop  overld  mcand  cne_fr cne_mn   dstep    macmr    msd"
     )
+
+
+def ensure_metrics_log(path: str) -> None:
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(get_metrics_header() + "\n")
+
+
+def append_metrics_log(path: str, metrics: EpisodeMetrics) -> None:
+    ensure_metrics_log(path)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(metrics_to_string(metrics) + "\n")

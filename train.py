@@ -40,10 +40,17 @@ K_max = 3        # candidates per robot
 N_max = 16        # max nodes per ego-graph (robot + tasks in its neighborhood)
 E_max = 64        # max edges per ego-graph
 F = 9            # node feature dimension (robot node and task node should have the same dimensionality, padding is applied)
-G = 0             # global stats dim 
+G = 0             # global stats dim
+
+VICINITY_M = 2000.0
+MAX_STEPS = 1200
+MAX_WAIT_DELAY_S = 240.0
+MAX_TRAVEL_DELAY_S = 900.0
+MAX_ROBOT_CAPACITY = 2
+SEED = 42
 
 traci = start_sumo(SUMO_CFG, use_gui=False,
-                   extra_args=["--seed", "42", "--device.taxi.dispatch-algorithm", "traci"])
+                   extra_args=["--seed", str(SEED), "--device.taxi.dispatch-algorithm", "traci"])
 
 rp_logger = RidepoolLogger(
     RidepoolLogConfig(
@@ -58,17 +65,17 @@ rp_logger = RidepoolLogger(
 controller = RLControllerAdapter(
     sumo=traci,
     reset_fn=make_reset_fn(SUMO_CFG, use_gui=False,
-                           extra_args=["--seed", "42", "--device.taxi.dispatch-algorithm", "traci"]),
+                           extra_args=["--seed", str(SEED), "--device.taxi.dispatch-algorithm", "traci"]),
     k_max=K_max,
-    vicinity_m=2000.0,      # vicinity in meters
+    vicinity_m=VICINITY_M,      # vicinity in meters
     completion_mode="dropoff", # task is marked as completed at dropoff
-    max_steps=1200,
+    max_steps=MAX_STEPS,
     min_episode_steps = 100,
     serve_to_empty=True,    # end only when nothing left to do
     require_seen_reservation=True, # don't allow done until we've seen at least one reservation
-    max_wait_delay_s=240.0,     # allowed waiting time until pickup 
-    max_travel_delay_s=900.0,  # no explicit penalty for that now (!)
-    max_robot_capacity=2, # should match to taxis.rou.xml
+    max_wait_delay_s=MAX_WAIT_DELAY_S,     # allowed waiting time until pickup
+    max_travel_delay_s=MAX_TRAVEL_DELAY_S,  # no explicit penalty for that now (!)
+    max_robot_capacity=MAX_ROBOT_CAPACITY, # should match to taxis.rou.xml
     logger= rp_logger,
 )
 feature_fn = make_feature_fn(controller)
@@ -108,7 +115,18 @@ model = PPO(
     verbose=1
 )
 
-callback = RPLoggerCallback(rp_logger, controller)
+metrics_log_path = (
+    f"training_metrics_v{int(VICINITY_M)}_ms{MAX_STEPS}_mwd{int(MAX_WAIT_DELAY_S)}_"
+    f"mtd{int(MAX_TRAVEL_DELAY_S)}_cap{MAX_ROBOT_CAPACITY}.log"
+)
+
+callback = RPLoggerCallback(
+    rp_logger,
+    controller,
+    metrics_log_path=metrics_log_path,
+    num_robots=R,
+    seed=SEED,
+)
 
 model.learn(total_timesteps=100_000, callback=callback)
 model.save("ppo_rp_gnn.zip")

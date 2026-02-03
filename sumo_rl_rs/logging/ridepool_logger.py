@@ -45,6 +45,7 @@ class RidepoolLogger:
         os.makedirs(self.run_dir, exist_ok=True)
 
         self.ep_dir: Optional[str] = None
+        self.last_ep_dir: Optional[str] = None
         self._counters = {"writes": 0}
         self._files: Dict[str, Any] = {}
         self._writers: Dict[str, csv.DictWriter] = {}
@@ -114,6 +115,7 @@ class RidepoolLogger:
             self._ts[k].clear()
 
     def end_episode(self, sum_reward: float, n_pickups: int, n_dropoffs: int, duration: float):
+        self.last_ep_dir = self.ep_dir
         self._write(self._get_csv_filename("episode_totals"), dict(
             episode=self.cfg.episode_index,
             sum_reward=float(sum_reward),
