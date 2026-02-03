@@ -233,14 +233,15 @@ class RidepoolRTEnv(gym.Env):
         self._episode_reward += total_reward
 
         # macro info for reward logging
+        # All components are cumulative (not averaged) to match macro_reward
         macro_info = {
             "macro_reward": round(total_reward, 3),
-            "macro_capacity": round(sum_terms["capacity"] / steps_done,3),
-            "macro_step": round(sum_terms["step"] / steps_done,3),
-            "macro_missed_deadline": round(sum_terms["missed_deadline"] / steps_done,3),
-            "macro_wait": round(sum_terms["wait_at_pickups"] / steps_done,3),
-            "macro_completion": round(sum_terms["completion"] / steps_done,3),
-            "macro_nonserved": round(sum_terms["nonserved"] / steps_done,3),
+            "macro_capacity": round(sum_terms["capacity"],3),
+            "macro_step": round(sum_terms["step"],3),
+            "macro_missed_deadline": round(sum_terms["missed_deadline"],3),
+            "macro_wait": round(sum_terms["wait_at_pickups"],3),
+            "macro_completion": round(sum_terms["completion"],3),
+            "macro_nonserved": round(sum_terms["nonserved"],3),
         }
         
         info = {
