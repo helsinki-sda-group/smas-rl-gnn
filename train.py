@@ -60,13 +60,13 @@ controller = RLControllerAdapter(
     reset_fn=make_reset_fn(SUMO_CFG, use_gui=False,
                            extra_args=["--seed", "42", "--device.taxi.dispatch-algorithm", "traci"]),
     k_max=K_max,
-    vicinity_m=1500.0,      # vicinity in meters
+    vicinity_m=2000.0,      # vicinity in meters
     completion_mode="dropoff", # task is marked as completed at dropoff
-    max_steps=1000,
+    max_steps=1200,
     min_episode_steps = 100,
     serve_to_empty=True,    # end only when nothing left to do
     require_seen_reservation=True, # don't allow done until we've seen at least one reservation
-    max_wait_delay_s=600.0,     # allowed waiting time until pickup 
+    max_wait_delay_s=240.0,     # allowed waiting time until pickup 
     max_travel_delay_s=900.0,  # no explicit penalty for that now (!)
     max_robot_capacity=2, # should match to taxis.rou.xml
     logger= rp_logger,
@@ -97,16 +97,18 @@ model = PPO(
     policy_kwargs=policy_kwargs,
     n_steps=128,
     batch_size=64,
-    learning_rate=3e-4,
-    gamma=0.95,
+    learning_rate=1e-4,
+    gamma=0.99, # was 0.95
     clip_range=0.2,
-    ent_coef=0.03,
-    gae_lambda=0.90,
-    n_epochs=10,
+    clip_range_vf=None,
+    vf_coef=0.35,
+    ent_coef=0.001, # was 0.03
+    gae_lambda=0.95, # was 0.9
+    n_epochs=5,
     verbose=1
 )
 
 callback = RPLoggerCallback(rp_logger, controller)
 
-model.learn(total_timesteps=1_000_000, callback=callback)
+model.learn(total_timesteps=100_000, callback=callback)
 model.save("ppo_rp_gnn.zip")

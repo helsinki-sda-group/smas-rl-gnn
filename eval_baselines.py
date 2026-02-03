@@ -35,13 +35,13 @@ controller = RLControllerAdapter(
     reset_fn=make_reset_fn(SUMO_CFG, use_gui=False,
                            extra_args=["--seed", "42", "--device.taxi.dispatch-algorithm", "traci"]),
     k_max=K_max,
-    vicinity_m=3000.0,      # vicinity in meters
+    vicinity_m=2000.0,      # vicinity in meters
     completion_mode="dropoff", # task is marked as completed at dropoff
-    max_steps=1000,
+    max_steps=1200,
     min_episode_steps = 100,
     serve_to_empty=True,    # end only when nothing left to do
     require_seen_reservation=True, # don't allow done until we've seen at least one reservation
-    max_wait_delay_s=600.0,     # allowed waiting time until pickup 
+    max_wait_delay_s=240.0,     # allowed waiting time until pickup 
     max_travel_delay_s=900.0,  # no explicit penalty for that now (!)
     max_robot_capacity=2, # should match to taxis.rou.xml
     logger=rp_logger,
@@ -149,6 +149,10 @@ def run_policy(policy_name: str, n_episodes: int = 50):
     ep_pickups = []
 
     for ep in range(n_episodes):
+        # Set CSV postfix to include policy name and episode number (1-indexed)
+        postfix = f"{policy_name}{ep + 1}"
+        rp_logger.set_csv_postfix(postfix)
+        
         obs, info = env.reset()
         done = False
         trunc = False
@@ -185,6 +189,8 @@ def run_policy(policy_name: str, n_episodes: int = 50):
 
 #run_policy("noop", n_episodes=1)
 run_policy("random", n_episodes=3)
+
+
 run_policy("greedy", n_episodes=1)   
 run_policy("greedy_unique", n_episodes=1)    
 
