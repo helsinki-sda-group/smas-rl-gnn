@@ -30,7 +30,7 @@ class RLControllerAdapter:
     Key features:
       • Candidate selection is restricted by a "vicinity" threshold (meters) using road-network distance.
       • Rewards are computed per-robot as in MultiTaskAllocationEnv:
-          r_i = capacity_i + (-1 step) + (- abandoned_i) + (- wait_at_pickups_i) + completion_i
+          r_i = capacity_i + (-1 step) + (- missed_deadline_i) + (- wait_at_pickups_i) + completion_i
         where completion_i = pickups_i or dropoffs_i per tick (configurable).
     """
 
@@ -141,6 +141,7 @@ class RLControllerAdapter:
         self._prev_dropped_res: Set[str] = set()
         self._prev_alive_res: Set[str] = set()
         self._res_owner_by_res: Dict[str, str] = {}
+        self._prev_obsolete: Set[str] = set()
     
 
     # ---------------- Public API ----------------
@@ -385,6 +386,7 @@ class RLControllerAdapter:
         self._prev_dropped_res.clear()
         self._prev_alive_res.clear()
         self._res_owner_by_res.clear()
+        self._prev_obsolete.clear()
 
 
 
@@ -1150,11 +1152,11 @@ class RLControllerAdapter:
         # rid - robot id
         # res_id - reservation id
 
-        # currently assigned passengers (from shadow plan, filterd by actual reservations)
-        cur_assigned_by_robot: Dict[str, Set[str]] = {}
-        for rid in robots:
-            plain_ids = self._get_assigned_reservations(rid)
-            cur_assigned_by_robot[rid] = {r for r in plain_ids if r in alive_now}
+        # # currently assigned passengers (from shadow plan, filtered by actual reservations)
+        # cur_assigned_by_robot: Dict[str, Set[str]] = {}
+        # for rid in robots:
+        #     plain_ids = self._get_assigned_reservations(rid)
+        #     cur_assigned_by_robot[rid] = {r for r in plain_ids if r in alive_now}
 
         picked_up_ids_by_robot: Dict[str, set[str]] = {rid: set() for rid in robots}
         dropped_off_ids_by_robot: Dict[str, set[str]] = {rid: set() for rid in robots}
@@ -1178,53 +1180,85 @@ class RLControllerAdapter:
             if rid:
                 dropped_off_ids_by_robot[rid].add(res_id)
 
-        # abandoned tasks: removed from this taxi's plan, and were not picked up or dropped off by anyone
-        # reservation left a plan without being served by anyone, probably due to reownership or plan churn
-        abandoned_count_by_robot: Dict[str, int] = {}
-        for rid in robots:
-            prev_ass = self._prev_assigned_by_robot.get(rid, set())
-            curr_ass = cur_assigned_by_robot[rid]
-            removed = prev_ass - curr_ass
-            # task was assigned but not picked up by the robot, and removed from its assignment plan
-            removed_not_picked = {x for x in removed if x not in picked_up_ids_by_robot[rid]}
-            # and it was not picked up or dropped of by anyone else
-            # ! is it the same as OBSOLETE?
-            abandoned = {x for x in removed_not_picked 
-                         if (x not in self._ever_picked_up and x not in self._ever_dropped_off)}
-            abandoned_count_by_robot[rid] = len(abandoned)
+        # # abandoned tasks: removed from this taxi's plan, and were not picked up or dropped off by anyone
+        # # reservation left a plan without being served by anyone, probably due to reownership or plan churn
+        # abandoned_count_by_robot: Dict[str, int] = {}
+        # for rid in robots:
+        #     prev_ass = self._prev_assigned_by_robot.get(rid, set())
+        #     curr_ass = cur_assigned_by_robot[rid]
+        #     removed = prev_ass - curr_ass
+        #     # task was assigned but not picked up by the robot, and removed from its assignment plan
+        #     removed_not_picked = {x for x in removed if x not in picked_up_ids_by_robot[rid]}
+        #     # and it was not picked up or dropped of by anyone else
+        #     abandoned = {x for x in removed_not_picked 
+        #                  if (x not in self._ever_picked_up and x not in self._ever_dropped_off)}
+        #     abandoned_count_by_robot[rid] = len(abandoned)
 
+        
         # waiting for pickup - in [-1;0]
         WAIT_CAP = 600.0
-        wait_reward_by_robot: Dict[str, float] = {rid: 0.0 for rid in robots}
+        wait_penalty_by_robot: Dict[str, float] = {rid: 0.0 for rid in robots}
         for rid in robots:
             w = 0.0
             for res_id in picked_up_ids_by_robot[rid]:
                 t0 = float(self._res_created_time.get(res_id, now))
-                w += -min(max(0.0, now-t0), WAIT_CAP)/WAIT_CAP
-            wait_reward_by_robot[rid] = w
+                wait_s = max(0.0, now - t0)
+                w += -min(wait_s, WAIT_CAP)/WAIT_CAP
+            wait_penalty_by_robot[rid] = w
+
+        # missed deadline: single component, counts pickup & dropoff tardiness
+        # (0 if on time; negative if late; bounded)
+        DEADLINE_CAP = 600.0  # sec cap for normalization
+        deadline_penalty_by_robot: Dict[str, float] = {rid: 0.0 for rid in robots}
+
+        for rid in robots:
+            d = 0.0
+
+            # pickup deadline violations (measured at actual pickup moment)
+            for res_id in picked_up_ids_by_robot[rid]:
+                info = self._task_lifecycle.get(res_id)
+                if info is None:
+                    continue
+                pd = info.get("pickup_deadline", None)
+                if pd is not None:
+                    late = max(0.0, now - pd)
+                    d += -min(late, DEADLINE_CAP) / DEADLINE_CAP
+
+            # dropoff deadline violations (measured at actual dropoff moment)
+            for res_id in dropped_off_ids_by_robot[rid]:
+                info = self._task_lifecycle.get(res_id)
+                if info is None:
+                    continue
+                dd = info.get("dropoff_deadline", None)
+                if dd is not None:
+                    late = max(0.0, now - dd)
+                    d += -min(late, DEADLINE_CAP) / DEADLINE_CAP
+
+            deadline_penalty_by_robot[rid] = d
+
 
         # capacity reward (onboard count)
-        capacity_reward_by_robot: Dict[str, float] = {}
-        # Robust occupancy: use device.taxi.currentCustomers -> reservation ids,
-        # then count only those reservations that are actually PICKED_UP by state bit.
-        res_index_now = self._reservation_index()
-        p2r_now = self._person_to_res_index(res_index_now)
-        for rid in robots:
-            onboard_res = self._current_reservation_ids_onboard(rid, p2r_now)
-            onboard_picked = 0
-            for res_id in onboard_res:
-                robj = res_index_now.get(res_id)
-                if robj is not None and self._is_picked(robj):
-                    onboard_picked += 1
-            capacity_reward_by_robot[rid] = float(onboard_picked)
+        # capacity_reward_by_robot: Dict[str, float] = {}
+        # # Robust occupancy: use device.taxi.currentCustomers -> reservation ids,
+        # # then count only those reservations that are actually PICKED_UP by state bit.
+        # res_index_now = self._reservation_index()
+        # p2r_now = self._person_to_res_index(res_index_now)
+        # for rid in robots:
+        #     onboard_res = self._current_reservation_ids_onboard(rid, p2r_now)
+        #     onboard_picked = 0
+        #     for res_id in onboard_res:
+        #         robj = res_index_now.get(res_id)
+        #         if robj is not None and self._is_picked(robj):
+        #             onboard_picked += 1
+        #     capacity_reward_by_robot[rid] = float(onboard_picked)
         
-        step_penalty = -1.0 * 0.1
+        # step_penalty = -1.0 * 0.1
 
-        # backlog penalty
-        # ! why not use alive_res
-        n_res = len(alive_now)
-        backlog_penalty = (self._prev_n_res - n_res) * 0.05 / max(1, len(robots))
-        self._prev_n_res = n_res
+        # # backlog penalty
+        # # ! why not use alive_res
+        # n_res = len(alive_now)
+        # backlog_penalty = (self._prev_n_res - n_res) * 0.05 / max(1, len(robots))
+        # self._prev_n_res = n_res
 
         # completion count by robot
         completion_by_robot: Dict[str, float] = {}
@@ -1235,29 +1269,70 @@ class RLControllerAdapter:
             for rid in robots:
                 completion_by_robot[rid] = float(len(dropped_off_ids_by_robot[rid]))
 
+        cur_obsolete = {res_id for res_id, info in self._task_lifecycle.items() if info.get("was_obsolete", False)}
+        newly_obsolete = cur_obsolete - self._prev_obsolete
+        self._prev_obsolete = cur_obsolete
+
+        # OPTIONAL: penalize tasks that became obsolete without pickup
+        # This makes the deadline signal *much* stronger and avoids "avoid pickup to avoid penalty".
+        if newly_obsolete:
+            for res_id in newly_obsolete:
+                info = self._task_lifecycle.get(res_id)
+                if not info:
+                    continue
+                pd = info.get("pickup_deadline")
+                if pd is None:
+                    continue
+                late = max(1.0, now - float(pd))
+                p = -max(0.05, min(late, DEADLINE_CAP) / DEADLINE_CAP)  # negative
+
+                # Attribute obsolete penalty: prefer last known owner, else shadow owner.
+                rid = self._res_owner_by_res.get(res_id) or owner_from_shadow(res_id)
+                if rid:
+                    deadline_penalty_by_robot[rid] += p
+                else:
+                    # fallback: distribute evenly (keeps signal even if ownership missing)
+                    share = p / max(1, len(robots))
+                    for r in robots:
+                        deadline_penalty_by_robot[r] += share
+
+        # Weights
+        W_COMP = 3.0 
+        W_WAIT = 1.0
+        W_DEADLINE = 5.0
+
         # compose
         per_robot: Dict[str, float] = {}
         terms: Dict[str, Dict[str, float]] = {}
         for rid in robots:
-            cap = capacity_reward_by_robot[rid] * 0 # 2.0
-            abandoned = float(abandoned_count_by_robot[rid]) * - 10.0
-            waitr = wait_reward_by_robot[rid]
-            comp = max(0.0, completion_by_robot[rid]) * 0 # 40.0
-            backlog = backlog_penalty * 0.0
+            # cap = capacity_reward_by_robot[rid] * 0 # 2.0
+            # abandoned = float(abandoned_count_by_robot[rid]) * - 10.0
+            # waitr = wait_reward_by_robot[rid]
+            # comp = max(0.0, completion_by_robot[rid]) * 0 # 40.0
+            # backlog = backlog_penalty * 0.0
 
-            r = cap + step_penalty * 0 + abandoned + waitr + comp + backlog
+            # r = cap + step_penalty * 0 + abandoned + waitr + comp + backlog
+            comp = completion_by_robot[rid] * W_COMP
+            waitp = wait_penalty_by_robot[rid] * W_WAIT
+            deadp = deadline_penalty_by_robot[rid] * W_DEADLINE
+            cap = 0.0
+            step_penalty = 0.0
+            backlog = 0.0
+
+            r = comp + waitp + deadp
+
             per_robot[rid] = float(r)
 
             terms[rid] = {
                 "capacity": cap,
                 "step": step_penalty,
-                "abandoned": abandoned,
-                "wait_at_pickups": waitr,
+                "missed_deadline": deadp,
+                "wait_at_pickups": waitp,
                 "completion": comp,
                 "nonserved": backlog,
             }
 
-        self._prev_assigned_by_robot = cur_assigned_by_robot
+        #self._prev_assigned_by_robot = cur_assigned_by_robot
         return per_robot, terms
 
     # ! OBSOLETE
@@ -1363,7 +1438,7 @@ class RLControllerAdapter:
             terms[rid] = {
                 "capacity": cap,
                 "step": step_penalty,
-                "abandoned": abandoned,        # penalty actually added
+                "missed_deadline": abandoned,        # penalty actually added
                 "wait_at_pickups": waitr,       # negative seconds
                 "completion": comp,             # pickups or dropoffs per tick,
                 "nonserved": backlog   # fine for non-serving requests

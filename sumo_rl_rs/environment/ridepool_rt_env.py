@@ -182,7 +182,7 @@ class RidepoolRTEnv(gym.Env):
         sum_terms = {
             "capacity": 0.,
             "step": 0.,
-            "abandoned": 0.,
+            "missed_deadline": 0.,
             "wait_at_pickups": 0.,
             "completion": 0.,
             "nonserved": 0.,
@@ -228,7 +228,7 @@ class RidepoolRTEnv(gym.Env):
         except Exception:
             obs = {k: np.zeros_like(v) for k,v in self.observation_space.spaces.items()}
 
-        total_reward = total_reward/100.0 # self.decision_dt
+        #total_reward = total_reward/100.0 # self.decision_dt
 
         self._episode_reward += total_reward
 
@@ -237,7 +237,7 @@ class RidepoolRTEnv(gym.Env):
             "macro_reward": round(total_reward, 3),
             "macro_capacity": round(sum_terms["capacity"] / steps_done,3),
             "macro_step": round(sum_terms["step"] / steps_done,3),
-            "macro_abandoned": round(sum_terms["abandoned"] / steps_done,3),
+            "macro_missed_deadline": round(sum_terms["missed_deadline"] / steps_done,3),
             "macro_wait": round(sum_terms["wait_at_pickups"] / steps_done,3),
             "macro_completion": round(sum_terms["completion"] / steps_done,3),
             "macro_nonserved": round(sum_terms["nonserved"] / steps_done,3),
