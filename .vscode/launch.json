@@ -15,6 +15,21 @@
         "PYTHONPATH": "${workspaceFolder}"        // so `rt_gnn_rl` imports resolve
       },
       "justMyCode": true
+    },
+    {
+      "name": "eval_baselines",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "eval_baselines.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "args": ["-c", "configs/rp_toy.yaml"],
+      "python": "C:\\Users\\bochenin\\Anaconda3\\envs\\smas_pyg\\python.exe",
+      "env": {
+        "SUMO_HOME": "C:\\Program Files (x86)\\Eclipse\\Sumo",
+        "PYTHONPATH": "${workspaceFolder}"
+      },
+      "justMyCode": true
     }
   ]
 }
