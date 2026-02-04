@@ -2,17 +2,38 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "plot_training_results",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "plot_training_results.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "training_metrics_v2000_ms1200_mwd240_mtd900_cap2.log",
+        "train_output.txt"
+      ],
+      "python": "C:\\Users\\bochenin\\Anaconda3\\envs\\smas_pyg\\python.exe",
+      "env": {
+        "SUMO_HOME": "C:\\Program Files (x86)\\Eclipse\\Sumo", // set this for SUMO tools
+        "PYTHONPATH": "${workspaceFolder}" // so `rt_gnn_rl` imports resolve
+      },
+      "justMyCode": true
+    },
+    {
       "name": "gnn-rl",
       "type": "debugpy",
       "request": "launch",
-      "program": "train.py",                      // or scripts/train_gnn_ppo.py
+      "program": "train.py", // or scripts/train_gnn_ppo.py
       "console": "integratedTerminal",
       "cwd": "${workspaceFolder}",
-      "args": ["-c", "configs/rp_toy.yaml"],
+      "args": [
+        "-c",
+        "configs/rp_toy.yaml"
+      ],
       "python": "C:\\Users\\bochenin\\Anaconda3\\envs\\smas_pyg\\python.exe",
       "env": {
-        "SUMO_HOME": "C:\\Program Files (x86)\\Eclipse\\Sumo",        // set this for SUMO tools
-        "PYTHONPATH": "${workspaceFolder}"        // so `rt_gnn_rl` imports resolve
+        "SUMO_HOME": "C:\\Program Files (x86)\\Eclipse\\Sumo", // set this for SUMO tools
+        "PYTHONPATH": "${workspaceFolder}" // so `rt_gnn_rl` imports resolve
       },
       "justMyCode": true
     },
@@ -23,7 +44,10 @@
       "program": "eval_baselines.py",
       "console": "integratedTerminal",
       "cwd": "${workspaceFolder}",
-      "args": ["-c", "configs/rp_toy.yaml"],
+      "args": [
+        "-c",
+        "configs/rp_toy.yaml"
+      ],
       "python": "C:\\Users\\bochenin\\Anaconda3\\envs\\smas_pyg\\python.exe",
       "env": {
         "SUMO_HOME": "C:\\Program Files (x86)\\Eclipse\\Sumo",
