@@ -49,24 +49,26 @@ MAX_TRAVEL_DELAY_S = 900.0
 MAX_ROBOT_CAPACITY = 2
 
 # Training seeds - different from evaluation seeds [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
-TRAIN_SEEDS = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+TRAIN_SEEDS = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
+               1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000]
 
 # Initial seed for first episode
 SEED = TRAIN_SEEDS[0]
 
-# Create a class to track episode count and rotate seeds
-class RotatingSeedResetFn:
-    """Reset function that rotates through training seeds on each episode."""
-    def __init__(self, sumocfg_path: str, use_gui: bool, seeds: list[int]):
+# Create a class to randomly sample seeds from pool
+class RandomSeedResetFn:
+    """Reset function that randomly samples from training seeds pool on each episode."""
+    def __init__(self, sumocfg_path: str, use_gui: bool, seeds: list[int], random_seed: int = 42):
         self.sumocfg_path = sumocfg_path
         self.use_gui = use_gui
         self.seeds = seeds
-        self.episode_count = 0
+        self.rng = np.random.RandomState(random_seed)  # Separate RNG for seed selection
+        self.current_seed = seeds[0]
     
     def __call__(self) -> None:
-        # Get the seed for current episode
-        seed = self.seeds[self.episode_count % len(self.seeds)]
-        extra_args = ["--seed", str(seed), "--device.taxi.dispatch-algorithm", "traci"]
+        # Randomly sample a seed from the pool
+        self.current_seed = self.rng.choice(self.seeds)
+        extra_args = ["--seed", str(self.current_seed), "--device.taxi.dispatch-algorithm", "traci"]
         
         # Import here to avoid circular dependencies
         from utils.sumo_bootstrap import _imports, _build_args
@@ -79,16 +81,13 @@ class RotatingSeedResetFn:
         else:
             binary = checkBinary("sumo-gui" if self.use_gui else "sumo")
             traci.start([binary, *args])
-        
-        # Increment episode count for next reset
-        self.episode_count += 1
     
     def get_current_seed(self) -> int:
-        """Get the seed that will be used for the current episode."""
-        return self.seeds[self.episode_count % len(self.seeds)]
+        """Get the seed that was used for the current episode."""
+        return self.current_seed
 
 # Create rotating reset function
-reset_fn = RotatingSeedResetFn(SUMO_CFG, use_gui=False, seeds=TRAIN_SEEDS)
+reset_fn = RandomSeedResetFn(SUMO_CFG, use_gui=False, seeds=TRAIN_SEEDS, random_seed=42)
 
 traci = start_sumo(SUMO_CFG, use_gui=False,
                    extra_args=["--seed", str(SEED), "--device.taxi.dispatch-algorithm", "traci"])

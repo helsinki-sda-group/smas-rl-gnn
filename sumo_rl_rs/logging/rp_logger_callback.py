@@ -54,12 +54,10 @@ class RPLoggerCallback(BaseCallback):
                 episode_dir = getattr(self.rp_logger, "last_ep_dir", None) or self.rp_logger.ep_dir
                 info_for_metrics = infos[0] if infos else {}
                 
-                # Get current seed from reset_fn if available (for rotating seeds)
+                # Get current seed from reset_fn if available
                 current_seed = self.seed
                 if self.reset_fn and hasattr(self.reset_fn, 'get_current_seed'):
-                    # Note: episode_count was already incremented in reset, so we need previous seed
-                    # which is at (episode_count - 1) % len(seeds)
-                    current_seed = self.reset_fn.seeds[(self.reset_fn.episode_count - 1) % len(self.reset_fn.seeds)]
+                    current_seed = self.reset_fn.get_current_seed()
                 
                 metrics = compute_episode_metrics_from_logs(
                     episode_dir=episode_dir,
