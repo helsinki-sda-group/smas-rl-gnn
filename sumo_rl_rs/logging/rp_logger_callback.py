@@ -25,7 +25,7 @@ class RPLoggerCallback(BaseCallback):
 
     def _on_training_start(self) -> None:
         if self.metrics_log_path:
-            ensure_metrics_log(self.metrics_log_path)
+            ensure_metrics_log(self.metrics_log_path, overwrite=True)
 
     def _on_step(self) -> bool:
         # rewards is shape (n_envs,), we assume n_envs=1 unless you set otherwise

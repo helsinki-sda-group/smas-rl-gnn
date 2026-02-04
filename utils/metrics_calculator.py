@@ -267,8 +267,8 @@ def get_metrics_header() -> str:
     )
 
 
-def ensure_metrics_log(path: str) -> None:
-    if not os.path.exists(path) or os.path.getsize(path) == 0:
+def ensure_metrics_log(path: str, overwrite: bool = False) -> None:
+    if overwrite or not os.path.exists(path) or os.path.getsize(path) == 0:
         with open(path, "w", encoding="utf-8") as f:
             f.write(get_metrics_header() + "\n")
 
