@@ -142,14 +142,14 @@ model = PPO(
     RTGNNPolicy,
     env,
     policy_kwargs=policy_kwargs,
-    n_steps=128,
+    n_steps=256,
     batch_size=64,
-    learning_rate=1e-4,
+    learning_rate=3e-4,
     gamma=0.99, # was 0.95
     clip_range=0.2,
     clip_range_vf=None,
     vf_coef=0.35,
-    ent_coef=0.001, # was 0.03
+    ent_coef=0.003, # was 0.03
     gae_lambda=0.95, # was 0.9
     n_epochs=5,
     verbose=1
