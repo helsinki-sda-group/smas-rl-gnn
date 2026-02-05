@@ -107,6 +107,10 @@ def compute_episode_metrics_from_logs(
     df_lifecycle["was_obsolete"] = df_lifecycle["was_obsolete"].astype(str).str.lower() == "true"
     df_lifecycle["assigned_taxi"] = df_lifecycle["assigned_taxi"].fillna("")
 
+    # Remove duplicate rows (by task_id) to avoid counting same task multiple times
+    # Keep the last occurrence in case task was logged multiple times with updates
+    df_lifecycle = df_lifecycle.drop_duplicates(subset=["task_id"], keep="last")
+
     total_tasks = len(df_lifecycle)
     metrics.total_tasks = total_tasks
 
@@ -215,8 +219,8 @@ def compute_episode_metrics_from_logs(
 
                 df_candidates = df_candidates.assign(_cand_count=candidate_counts)
                 decision_steps = (
-                    df_candidates.groupby("time")
-                    .apply(lambda g: (g["_cand_count"] > 0).any())
+                    df_candidates.groupby("time", group_keys=False)
+                    .apply(lambda g: (g["_cand_count"] > 0).any(), include_groups=False)
                     .sum()
                 )
                 metrics.decision_steps = int(decision_steps)
@@ -277,3 +281,44 @@ def append_metrics_log(path: str, metrics: EpisodeMetrics) -> None:
     ensure_metrics_log(path)
     with open(path, "a", encoding="utf-8") as f:
         f.write(metrics_to_string(metrics) + "\n")
+
+
+def compute_metrics_summary(metrics_list: List[EpisodeMetrics]) -> tuple[EpisodeMetrics, EpisodeMetrics]:
+    """
+    Compute mean and std of all numeric fields across a list of metrics.
+    
+    Returns:
+        tuple of (mean_metrics, std_metrics)
+    """
+    import numpy as np
+    from dataclasses import fields
+    
+    if not metrics_list:
+        raise ValueError("metrics_list cannot be empty")
+    
+    # Get all numeric fields (exclude policy and seed)
+    numeric_fields = [f.name for f in fields(EpisodeMetrics) 
+                     if f.name not in ['policy', 'seed']]
+    
+    # Compute mean and std for each field
+    mean_values = {}
+    std_values = {}
+    
+    for field_name in numeric_fields:
+        values = [getattr(m, field_name) for m in metrics_list]
+        mean_values[field_name] = float(np.mean(values))
+        std_values[field_name] = float(np.std(values))
+    
+    # Create metrics objects with special policy labels
+    mean_metrics = EpisodeMetrics(policy="MEAN", seed=0, **mean_values)
+    std_metrics = EpisodeMetrics(policy="STD", seed=0, **std_values)
+    
+    return mean_metrics, std_metrics
+
+
+def append_metrics_summary(path: str, metrics_list: List[EpisodeMetrics]) -> None:
+    """Compute and append mean/std summary rows to metrics log."""
+    mean_metrics, std_metrics = compute_metrics_summary(metrics_list)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(metrics_to_string(mean_metrics) + "\n")
+        f.write(metrics_to_string(std_metrics) + "\n")
