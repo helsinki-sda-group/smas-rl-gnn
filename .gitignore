@@ -3,3 +3,4 @@ __pycache__/
 runs/
 error.xml
 message.xml
+sumo_output/tripinfo.xml
