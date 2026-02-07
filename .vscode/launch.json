@@ -2,6 +2,21 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "plot_evaluation_results",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "eval_saved_models.py",
+      "console": "integratedTerminal",
+      "args": [
+        "--seeds",
+        "train",
+        "--eval-runs",
+        "1",
+        "--model-sample",
+        "0.1"
+      ]
+    },
+    {
       "name": "plot_training_results",
       "type": "debugpy",
       "request": "launch",
