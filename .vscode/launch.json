@@ -2,18 +2,32 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "plot_evaluation_results",
+      "name": "plot evaluation results",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "plot_eval_results.py",
+      "console": "integratedTerminal",
+      "args":[
+        "eval_results/evaluation_20260207_022752/evaluation_metrics.log",
+        "--ma-window",
+        "15",
+        "--baseline-log",
+        "baseline_train_seeds_v2000_ms1200_mwd240_mtd900_cap2.log"
+      ]
+    },
+    {
+      "name": "run_evaluation",
       "type": "debugpy",
       "request": "launch",
       "program": "eval_saved_models.py",
       "console": "integratedTerminal",
       "args": [
         "--seeds",
-        "train",
+        "eval",
         "--eval-runs",
         "1",
         "--model-sample",
-        "0.1"
+        "0.2"
       ]
     },
     {
