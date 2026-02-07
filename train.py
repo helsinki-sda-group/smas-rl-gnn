@@ -159,12 +159,16 @@ metrics_log_path = (
     f"mtd{int(MAX_TRAVEL_DELAY_S)}_cap{MAX_ROBOT_CAPACITY}.log"
 )
 
+# Directory to save models after each rollout
+model_save_dir = "runs/rp_gnn_debug/saved_models"
+
 callback = RPLoggerCallback(
     rp_logger,
     controller,
     metrics_log_path=metrics_log_path,
     num_robots=R,
     reset_fn=reset_fn,  # Pass reset_fn to get current seed
+    save_model_dir=model_save_dir,  # Enable model saving after each rollout
 )
 
 model.learn(total_timesteps=100_000, callback=callback)

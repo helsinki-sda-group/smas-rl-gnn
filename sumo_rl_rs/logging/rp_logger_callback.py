@@ -2,6 +2,7 @@
 from __future__ import annotations
 from typing import Optional, Dict, Any, List
 import numpy as np
+import os
 from stable_baselines3.common.callbacks import BaseCallback
 from utils.metrics_calculator import (
     compute_episode_metrics_from_logs,
@@ -11,7 +12,7 @@ from utils.metrics_calculator import (
 
 class RPLoggerCallback(BaseCallback):
     def __init__(self, rp_logger, controller, verbose: int = 0, metrics_log_path: str | None = None,
-                 num_robots: int | None = None, seed: int = 0, reset_fn = None):
+                 num_robots: int | None = None, seed: int = 0, reset_fn = None, save_model_dir: str | None = None):
         super().__init__(verbose)
         self.rp_logger = rp_logger                # RidepoolLogger
         self.controller = controller              # RLControllerAdapter
@@ -19,6 +20,7 @@ class RPLoggerCallback(BaseCallback):
         self.num_robots = num_robots
         self.seed = seed
         self.reset_fn = reset_fn  # Optional: RotatingSeedResetFn for dynamic seeds
+        self.save_model_dir = save_model_dir      # Directory to save models after each rollout
         self.ep_idx = 0
         self.sum_reward = 0.0
         self.steps_in_ep = 0
@@ -26,6 +28,21 @@ class RPLoggerCallback(BaseCallback):
     def _on_training_start(self) -> None:
         if self.metrics_log_path:
             ensure_metrics_log(self.metrics_log_path, overwrite=True)
+        
+        # Create save directory if specified
+        if self.save_model_dir:
+            os.makedirs(self.save_model_dir, exist_ok=True)
+    
+    def _on_rollout_end(self) -> None:
+        """Called after each rollout collection phase."""
+        if self.save_model_dir:
+            # Save model with episode and timestep information
+            model_filename = f"model_episode{self.ep_idx}_ts{self.num_timesteps}.zip"
+            model_path = os.path.join(self.save_model_dir, model_filename)
+            self.model.save(model_path)
+            if self.verbose > 0:
+                print(f"Model saved to {model_path}")
+        return True
 
     def _on_step(self) -> bool:
         # rewards is shape (n_envs,), we assume n_envs=1 unless you set otherwise
