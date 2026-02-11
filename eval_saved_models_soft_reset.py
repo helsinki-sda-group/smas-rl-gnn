@@ -1,16 +1,22 @@
 #!/usr/bin/env python
 """
-Evaluate all saved models from rp_gnn_debug/saved_models on train and eval seeds.
+Evaluate all saved models using soft reset (like training).
+
+This script uses the same reset mechanism as training:
+- Single persistent SUMO process
+- Soft reset via traci.load() between episodes
+- RandomSeedResetFn that samples from seed pool
+- Consistent RNG initialization
 
 Features:
-- Loads all model_episodeX_tsY.zip files from specified directory
-- Evaluates on both TRAIN_SEEDS and EVAL_SEEDS
-- Records detailed metrics (episode count, training step, seed, attempt, value)
-- Generates plots similar to plot_training_results.py
-- Creates separate results folder with logs and plots
+- Evaluates all model_episodeX_tsY.zip files
+- Can test on train seeds, eval seeds, or both
+- Multiple evaluation runs per seed
+- Records detailed metrics
+- Generates plots
 
 Usage:
-    python eval_saved_models.py --eval-runs 3 --seeds train eval --model-dir runs/rp_gnn_debug/saved_models --output-dir eval_results
+    python eval_saved_models_soft_reset.py --eval-runs 3 --seeds both
 """
 
 import os
@@ -33,23 +39,34 @@ from utils.feature_fns import make_feature_fn
 from utils.metrics_calculator import compute_episode_metrics_from_logs
 
 
-class FixedSeedResetFn:
-    """Reset function that uses a fixed seed for reproducibility."""
-    def __init__(self, sumocfg_path: str, use_gui: bool, seed: int):
+class RandomSeedResetFn:
+    """Reset function that samples from seed pool (like training)."""
+    def __init__(self, sumocfg_path: str, use_gui: bool, seeds: list, random_seed: int = 42):
         self.sumocfg_path = sumocfg_path
         self.use_gui = use_gui
-        self.seed = seed
+        self.seeds = list(seeds)
+        self.rng = np.random.RandomState(random_seed)
+        self.current_seed = self.seeds[0]
     
     def __call__(self) -> None:
-        extra_args = ["--seed", str(self.seed), "--device.taxi.dispatch-algorithm", "traci"]
-        traci_module, checkBinary = _imports()
+        # Sample a seed from the pool
+        self.current_seed = int(self.rng.choice(self.seeds))
+        extra_args = ["--seed", str(self.current_seed), "--device.taxi.dispatch-algorithm", "traci"]
+        
+        traci, checkBinary = _imports()
         args = _build_args(self.sumocfg_path, extra_args)
         
-        if traci_module.isLoaded():
-            traci_module.load(args)
+        if traci.isLoaded():
+            # Soft reset - reload in the same process
+            traci.load(args)
         else:
+            # First start
             binary = checkBinary("sumo-gui" if self.use_gui else "sumo")
-            traci_module.start([binary, *args])
+            traci.start([binary, *args])
+    
+    def get_current_seed(self) -> int:
+        """Get the seed used for the current episode."""
+        return self.current_seed
 
 
 class Tee(object):
@@ -93,7 +110,6 @@ def extract_episode_metrics(episode_dir, seed, attempt):
         )
         # Convert EpisodeMetrics dataclass to dict
         if hasattr(metrics, '__dataclass_fields__'):
-            # It's a dataclass - convert to dict
             return {
                 'rew': metrics.reward_sum,
                 'cap': metrics.capacity_sum,
@@ -104,7 +120,6 @@ def extract_episode_metrics(episode_dir, seed, attempt):
                 'nsv': metrics.nonserved_sum,
             }
         elif hasattr(metrics, '__dict__'):
-            # Convert object to dict
             d = metrics.__dict__
             return {
                 'rew': d.get('reward_sum', 0),
@@ -122,119 +137,6 @@ def extract_episode_metrics(episode_dir, seed, attempt):
     except Exception as e:
         print(f"Warning: Could not extract metrics: {e}")
         return {}
-
-
-def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_base):
-    """Evaluate a single model on one seed with fresh SUMO instance."""
-    try:
-        # Load model
-        model = PPO.load(model_path)
-        
-        # Setup logger with fresh instance
-        rp_logger = RidepoolLogger(
-            RidepoolLogConfig(
-                out_dir=config['eval_run_dir'],
-                run_name=f"model_ep{episode_idx}_ts{ts_idx}_seed{seed}_att{attempt}",
-                erase_run_dir_on_start=True,
-                erase_episode_dir_on_start=True,
-                console_debug=False
-            )
-        )
-        
-        # Start fresh SUMO instance with unique port
-        port = port_base + attempt
-        extra_args = ["--seed", str(seed), "--device.taxi.dispatch-algorithm", "traci"]
-        traci = start_sumo(config['sumo_cfg'], use_gui=config['use_gui'], extra_args=extra_args)
-        
-        # Setup reset function
-        reset_fn = FixedSeedResetFn(
-            config['sumo_cfg'],
-            use_gui=config['use_gui'],
-            seed=seed
-        )
-        
-        # Create controller with fresh SUMO
-        controller = RLControllerAdapter(
-            sumo=traci,
-            reset_fn=reset_fn,
-            k_max=config['k_max'],
-            vicinity_m=config['vicinity_m'],
-            completion_mode="dropoff",
-            max_steps=config['max_steps'],
-            min_episode_steps=config['min_episode_steps'],
-            serve_to_empty=True,
-            require_seen_reservation=True,
-            max_wait_delay_s=config['max_wait_delay_s'],
-            max_travel_delay_s=config['max_travel_delay_s'],
-            max_robot_capacity=config['max_robot_capacity'],
-            logger=rp_logger,
-        )
-        
-        feature_fn = make_feature_fn(controller)
-        
-        # Create environment
-        env = RidepoolRTEnv(
-            controller,
-            R=config['R'], K_max=config['k_max'], N_max=config['N_max'],
-            E_max=config['E_max'], F=config['F'], G=0,
-            feature_fn=feature_fn,
-            global_stats_fn=None,
-            decision_dt=config['decision_dt'],
-        )
-        
-        # Run single evaluation episode (one per fresh SUMO instance)
-        obs, info = env.reset()
-        ep_reward = 0.0
-        done = False
-        
-        while not done:
-            action, _states = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
-            ep_reward += reward
-        
-        # **FIX**: Flush logger files to ensure all data is written before extracting metrics
-        if hasattr(rp_logger, '_files'):
-            for f in rp_logger._files.values():
-                try:
-                    f.flush()
-                except Exception:
-                    pass
-        
-        # Extract detailed metrics
-        ep_dir = getattr(rp_logger, 'last_ep_dir', None) or rp_logger.ep_dir
-        metrics_dict = {}
-        if ep_dir and os.path.exists(ep_dir):
-            try:
-                # Check if episode CSV files exist
-                rewards_file = os.path.join(ep_dir, "rewards_macro.csv")
-                if os.path.exists(rewards_file):
-                    metrics = extract_episode_metrics(ep_dir, seed, attempt)
-                    if metrics:
-                        metrics_dict = metrics
-                else:
-                    # Fallback: just use the reward
-                    metrics_dict = {'rew': ep_reward, 'cap': 0, 'step': 0, 'mdl': 0, 'wait': 0, 'comp': 0, 'nsv': 0}
-            except Exception as e:
-                # Fallback: just use the reward
-                metrics_dict = {'rew': ep_reward, 'cap': 0, 'step': 0, 'mdl': 0, 'wait': 0, 'comp': 0, 'nsv': 0}
-        else:
-            # Fallback: just use the reward
-            metrics_dict = {'rew': ep_reward, 'cap': 0, 'step': 0, 'mdl': 0, 'wait': 0, 'comp': 0, 'nsv': 0}
-        
-        env.close()
-        rp_logger.close()
-        
-        return {
-            'reward': ep_reward,
-            'metrics_dict': metrics_dict
-        }
-    
-    except Exception as e:
-        print(f"ERROR evaluating model at {model_path}: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
 
 
 def ma(data, window):
@@ -276,7 +178,7 @@ def plot_evaluation_results(results_df, output_dir, ma_window=10):
     
     ax.set_xlabel('Training Steps', fontsize=11, fontweight='bold')
     ax.set_ylabel('Mean Evaluation Reward', fontsize=11, fontweight='bold')
-    ax.set_title('Model Performance vs Training Steps', fontsize=12, fontweight='bold')
+    ax.set_title('Model Performance vs Training Steps (Soft Reset)', fontsize=12, fontweight='bold')
     ax.legend(fontsize=10)
     ax.grid(alpha=0.25)
     ax.spines['top'].set_visible(False)
@@ -338,7 +240,7 @@ def plot_evaluation_results(results_df, output_dir, ma_window=10):
         
         ax.set_xlabel('Training Steps', fontsize=11, fontweight='bold')
         ax.set_ylabel('Evaluation Reward', fontsize=11, fontweight='bold')
-        ax.set_title(f'Model Performance for Seed {int(seed)}', fontsize=12, fontweight='bold')
+        ax.set_title(f'Model Performance for Seed {int(seed)} (Soft Reset)', fontsize=12, fontweight='bold')
         ax.legend(fontsize=10)
         ax.grid(alpha=0.25)
         ax.spines['top'].set_visible(False)
@@ -431,25 +333,27 @@ def plot_evaluation_results(results_df, output_dir, ma_window=10):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Evaluate all saved models')
+    parser = argparse.ArgumentParser(description='Evaluate all saved models with soft reset (like training)')
     parser.add_argument('--eval-runs', type=int, default=3,
                         help='Number of evaluation runs per seed (default: 3)')
     parser.add_argument('--ma-window', type=int, default=10,
                         help='Moving average window size (default: 10)')
     parser.add_argument('--model-sample', type=float, default=1.0,
-                        help='Fraction of models to evaluate (default: 1.0 = all). 0.1 = every 10th model')
+                        help='Fraction of models to evaluate (default: 1.0 = all)')
     parser.add_argument('--seeds', type=str, default='both', choices=['train', 'eval', 'both'],
                         help='Which seeds to evaluate on (default: both)')
+    parser.add_argument('--seed-sampler-rng', type=int, default=42,
+                        help='Random seed for the seed sampler RNG (default: 42)')
     parser.add_argument('--model-dir', type=str, default='runs/rp_gnn_debug/saved_models',
                         help='Directory containing model.zip files')
-    parser.add_argument('--output-dir', type=str, default='eval_results',
+    parser.add_argument('--output-dir', type=str, default='eval_results_soft_reset',
                         help='Output directory for results')
     parser.add_argument('--gui', action='store_true', help='Enable SUMO GUI (default: disabled)')
     args = parser.parse_args()
     
     # Seeds
-    TRAIN_SEEDS = [100]#, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
-                  # 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000]
+    TRAIN_SEEDS = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
+                   1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000]
     EVAL_SEEDS = [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
     
     if args.seeds == 'train':
@@ -459,7 +363,7 @@ def main():
     else:
         seeds_to_eval = TRAIN_SEEDS + EVAL_SEEDS
     
-    # Configuration
+    # Configuration (matching training setup)
     config = {
         'sumo_cfg': 'configs/small_net.sumocfg',
         'use_gui': args.gui,
@@ -475,14 +379,13 @@ def main():
         'max_robot_capacity': 2,
         'decision_dt': 60,
         'min_episode_steps': 100,
-        'eval_runs': args.eval_runs,
-        'eval_run_dir': os.path.join(args.output_dir, 'evaluation_runs')
     }
     
     # Create output directories
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_base = os.path.join(args.output_dir, f'evaluation_{timestamp}')
-    os.makedirs(config['eval_run_dir'], exist_ok=True)
+    eval_run_dir = os.path.join(output_base, 'runs')
+    os.makedirs(eval_run_dir, exist_ok=True)
     os.makedirs(output_base, exist_ok=True)
     
     # Setup logging
@@ -490,7 +393,7 @@ def main():
     tee = Tee(log_file)
     
     print("=" * 80)
-    print(f"EVALUATING SAVED MODELS")
+    print(f"EVALUATING SAVED MODELS (SOFT RESET - TRAINING-LIKE)")
     print("=" * 80)
     print(f"Timestamp: {timestamp}")
     print(f"Model directory: {args.model_dir}")
@@ -499,9 +402,11 @@ def main():
     print(f"Eval runs per seed: {args.eval_runs}")
     print(f"Moving average window: {args.ma_window}")
     print(f"Model sample rate: {args.model_sample*100:.1f}%")
+    print(f"Seed sampler RNG: {args.seed_sampler_rng}")
+    print(f"Reset mode: SOFT RESET (traci.load)")
     print()
     
-    # Find all models and sort by timestep (not by filename)
+    # Find all models and sort by timestep
     model_files = glob.glob(os.path.join(args.model_dir, 'model_episode*.zip'))
     
     # Parse and sort by timestep value
@@ -510,82 +415,194 @@ def main():
         filename = os.path.basename(mf)
         episode_idx, ts_idx = parse_model_filename(filename)
         if episode_idx is not None:
-            model_info.append((ts_idx, mf))
+            model_info.append((ts_idx, episode_idx, mf))
     
     # Sort by timestep (ascending order)
     model_info.sort(key=lambda x: x[0])
-    model_files = [mf for _, mf in model_info]
     
     # Sample models if requested
     if args.model_sample < 1.0:
-        sample_size = max(1, int(len(model_files) * args.model_sample))
-        sample_indices = np.linspace(0, len(model_files) - 1, sample_size, dtype=int)
-        model_files = [model_files[i] for i in sample_indices]
-        print(f"Sampling {len(model_files)} models ({args.model_sample*100:.1f}% of {len(model_info)} total)")
+        sample_size = max(1, int(len(model_info) * args.model_sample))
+        sample_indices = np.linspace(0, len(model_info) - 1, sample_size, dtype=int)
+        model_info = [model_info[i] for i in sample_indices]
+        print(f"Sampling {len(model_info)} models ({args.model_sample*100:.1f}% of total)")
     else:
-        print(f"Found {len(model_files)} model files (sorted by timestep)")
+        print(f"Found {len(model_info)} model files (sorted by timestep)")
     print()
     
-    if not model_files:
+    if not model_info:
         print(f"ERROR: No models found in {args.model_dir}")
         tee.close()
         return
     
+    # ============================================================================
+    # Initialize SUMO and environment ONCE (like training)
+    # ============================================================================
+    print("Initializing persistent SUMO process and environment...")
+    
+    # Create reset function that samples from seed pool
+    reset_fn = RandomSeedResetFn(
+        config['sumo_cfg'],
+        use_gui=args.gui,
+        seeds=seeds_to_eval,
+        random_seed=args.seed_sampler_rng
+    )
+    
+    # Start initial SUMO instance
+    initial_seed = seeds_to_eval[0]
+    traci = start_sumo(
+        config['sumo_cfg'],
+        use_gui=args.gui,
+        extra_args=["--seed", str(initial_seed), "--device.taxi.dispatch-algorithm", "traci"]
+    )
+    
+    # Setup logger
+    rp_logger = RidepoolLogger(
+        RidepoolLogConfig(
+            out_dir=eval_run_dir,
+            run_name="eval_soft_reset",
+            erase_run_dir_on_start=True,
+            erase_episode_dir_on_start=True,
+            console_debug=False
+        )
+    )
+    
+    # Create controller with soft reset function
+    controller = RLControllerAdapter(
+        sumo=traci,
+        reset_fn=reset_fn,
+        k_max=config['k_max'],
+        vicinity_m=config['vicinity_m'],
+        completion_mode="dropoff",
+        max_steps=config['max_steps'],
+        min_episode_steps=config['min_episode_steps'],
+        serve_to_empty=True,
+        require_seen_reservation=True,
+        max_wait_delay_s=config['max_wait_delay_s'],
+        max_travel_delay_s=config['max_travel_delay_s'],
+        max_robot_capacity=config['max_robot_capacity'],
+        logger=rp_logger,
+    )
+    
+    feature_fn = make_feature_fn(controller)
+    
+    # Create environment
+    env = RidepoolRTEnv(
+        controller,
+        R=config['R'], K_max=config['k_max'], N_max=config['N_max'],
+        E_max=config['E_max'], F=config['F'], G=0,
+        feature_fn=feature_fn,
+        global_stats_fn=None,
+        decision_dt=config['decision_dt'],
+    )
+    
+    print("[OK] Environment initialized with soft reset")
+    print()
+    
+    # ============================================================================
     # Evaluate all models
+    # ============================================================================
     results = []
-    metrics_file = os.path.join(output_base, f'evaluation_metrics.log')
+    metrics_file = os.path.join(output_base, 'evaluation_metrics.log')
     
     with open(metrics_file, 'w', encoding='utf-8') as mf:
         # Write header
         mf.write("episode | timesteps | seed | attempt | reward | reward_cap | reward_step | reward_mdl | reward_wait | reward_comp | nsv\n")
     
-    total_evals = len(model_files) * len(seeds_to_eval) * args.eval_runs
-    current_eval = 0
-    port_base = 8900
+    total_episodes = len(model_info) * args.eval_runs
+    episode_counter = 0
     
-    for model_idx, model_path in enumerate(model_files):
+    for model_idx, (ts_idx, episode_idx, model_path) in enumerate(model_info):
         filename = os.path.basename(model_path)
-        episode_idx, ts_idx = parse_model_filename(filename)
         
-        if episode_idx is None:
-            print(f"[SKIP] Skipping {filename} (could not parse)")
+        print(f"\n[Model {model_idx+1}/{len(model_info)}] {filename}")
+        
+        # Load model
+        try:
+            model = PPO.load(model_path)
+        except Exception as e:
+            print(f"[ERROR] Failed to load model: {e}")
             continue
         
-        print(f"\n[Model {model_idx+1}/{len(model_files)}] {filename}")
-        
-        for seed_idx, seed in enumerate(seeds_to_eval):
-            for attempt in range(args.eval_runs):
-                current_eval += 1
-                pct = 100.0 * current_eval / total_evals
-                print(f"  [{current_eval}/{total_evals} ({pct:.1f}%)] Seed {seed}, Attempt {attempt+1}/{args.eval_runs}...", end=' ')
+        # Run multiple evaluation episodes for this model
+        for run_idx in range(args.eval_runs):
+            episode_counter += 1
+            pct = 100.0 * episode_counter / total_episodes
+            
+            try:
+                # Reset environment (will sample a seed from the pool)
+                obs, info = env.reset()
+                current_seed = reset_fn.get_current_seed()
                 
-                result = evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_base)
+                print(f"  [{episode_counter}/{total_episodes} ({pct:.1f}%)] Run {run_idx+1}/{args.eval_runs}, Seed {current_seed}...", end=' ')
                 
-                if result:
-                    results.append({
-                        'episode': episode_idx,
-                        'ts_idx': ts_idx,
-                        'seed': seed,
-                        'attempt': attempt,
-                        'reward': result['reward'],
-                        'metrics_dict': result['metrics_dict'],
-                    })
-                    
-                    # Write to metrics file
-                    metrics_dict = result['metrics_dict']
-                    with open(metrics_file, 'a', encoding='utf-8') as mf:
-                        mf.write(f"{episode_idx} | {ts_idx} | {seed} | {attempt} | {result['reward']:.4f} | " +
-                                f"{metrics_dict.get('cap', 0):.4f} | {metrics_dict.get('step', 0):.4f} | {metrics_dict.get('mdl', 0):.4f} | " +
-                                f"{metrics_dict.get('wait', 0):.4f} | {metrics_dict.get('comp', 0):.4f} | {metrics_dict.get('nsv', 0):.4f}\n")
-                    
-                    print(f"[OK] reward={result['reward']:.4f}")
-                else:
-                    print(f"[FAIL]")
+                # Run episode
+                ep_reward = 0.0
+                done = False
+                
+                while not done:
+                    action, _states = model.predict(obs, deterministic=False)
+                    obs, reward, terminated, truncated, info = env.step(action)
+                    done = terminated or truncated
+                    ep_reward += reward
+                
+                # **FIX**: Flush logger files to ensure all data is written before extracting metrics
+                if hasattr(rp_logger, '_files'):
+                    for f in rp_logger._files.values():
+                        try:
+                            f.flush()
+                        except Exception:
+                            pass
+                
+                # Extract detailed metrics
+                ep_dir = getattr(rp_logger, 'last_ep_dir', None) or rp_logger.ep_dir
+                metrics_dict = {}
+                
+                if ep_dir and os.path.exists(ep_dir):
+                    try:
+                        rewards_file = os.path.join(ep_dir, "rewards_macro.csv")
+                        if os.path.exists(rewards_file):
+                            metrics = extract_episode_metrics(ep_dir, current_seed, run_idx)
+                            if metrics:
+                                metrics_dict = metrics
+                    except Exception as e:
+                        pass
+                
+                # Fallback if metrics not extracted
+                if not metrics_dict:
+                    metrics_dict = {'rew': ep_reward, 'cap': 0, 'step': 0, 'mdl': 0, 'wait': 0, 'comp': 0, 'nsv': 0}
+                
+                # Store result
+                results.append({
+                    'episode': episode_idx,
+                    'ts_idx': ts_idx,
+                    'seed': current_seed,
+                    'attempt': run_idx,
+                    'reward': ep_reward,
+                    'metrics_dict': metrics_dict,
+                })
+                
+                # Write to metrics file
+                with open(metrics_file, 'a', encoding='utf-8') as mf:
+                    mf.write(f"{episode_idx} | {ts_idx} | {current_seed} | {run_idx} | {ep_reward:.4f} | " +
+                            f"{metrics_dict.get('cap', 0):.4f} | {metrics_dict.get('step', 0):.4f} | {metrics_dict.get('mdl', 0):.4f} | " +
+                            f"{metrics_dict.get('wait', 0):.4f} | {metrics_dict.get('comp', 0):.4f} | {metrics_dict.get('nsv', 0):.4f}\n")
+                
+                print(f"[OK] reward={ep_reward:.4f}")
+                
+            except Exception as e:
+                print(f"[FAIL] {e}")
+                import traceback
+                traceback.print_exc()
+    
+    # Close environment
+    env.close()
+    rp_logger.close()
     
     print(f"\n{'='*80}")
     print(f"[OK] Evaluation complete. Processed {len(results)} evaluations")
     
-    # Create results DataFrame
+    # Create results DataFrame and generate plots
     if results:
         results_df = pd.DataFrame(results)
         
