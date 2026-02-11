@@ -34,6 +34,8 @@ MAX_ROBOT_CAPACITY = 2
 
 NUM_SEEDS = 10  # Number of seeds to use (first N from SEEDS list)
 SEEDS = [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
+#SEEDS = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
+                  # 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000]
 POLICIES = ["random", "greedy", "unique"]
 
 
@@ -58,95 +60,96 @@ for seed in SEEDS[:NUM_SEEDS]:
     traci = start_sumo(SUMO_CFG, use_gui=False,
                        extra_args=[f"--seed", str(seed), "--device.taxi.dispatch-algorithm", "traci"])
 
-    rp_logger = RidepoolLogger(
-        RidepoolLogConfig(
-            out_dir="runs",
-            run_name=f"rp_eval_seed{seed}",
-            erase_run_dir_on_start=True,
-            erase_episode_dir_on_start=True,
-            console_debug=False
-        )
-    )
-
-    controller = RLControllerAdapter(
-        sumo=traci,
-        reset_fn=make_reset_fn(SUMO_CFG, use_gui=False,
-                               extra_args=[f"--seed", str(seed), "--device.taxi.dispatch-algorithm", "traci"]),
-        k_max=K_max,
-        vicinity_m=VICINITY_M,
-        completion_mode="dropoff",
-        max_steps=MAX_STEPS,
-        min_episode_steps=100,
-        serve_to_empty=True,
-        require_seen_reservation=True,
-        max_wait_delay_s=MAX_WAIT_DELAY_S,
-        max_travel_delay_s=MAX_TRAVEL_DELAY_S,
-        max_robot_capacity=MAX_ROBOT_CAPACITY,
-        logger=rp_logger,
-        respect_sumo_end=True,
-    )
-    feature_fn = make_feature_fn(controller)
-
-    env = RidepoolRTEnv(
-        controller,
-        R=R, K_max=K_max, N_max=N_max, E_max=E_max,
-        F=F, G=0,
-        feature_fn=feature_fn,
-        global_stats_fn=None,
-        decision_dt=60,
-    )
-
-    NOOP = K_max
-
-    def greedy_nearest_action(action_mask: np.ndarray) -> np.ndarray:
-        a = np.full((R,), NOOP, dtype=np.int64)
-        for r in range(R):
-            if action_mask[r,0] == 1:
-                a[r] = 0
-            else:
-                a[r] = NOOP
-        return a
-
-    _rnd = np.random.default_rng(seed)
-
-    def random_valid_action(action_mask: np.ndarray) -> np.ndarray:
-        a = np.full((R,), NOOP, dtype=np.int64)
-        for r in range(R):
-            allowed = np.flatnonzero(action_mask[r] == 1)
-            if allowed.size > 0:
-                a[r] = int(_rnd.choice(allowed))
-            else:
-                a[r] = NOOP
-        return a
-
-    def greedy_unique_action(action_mask: np.ndarray) -> np.ndarray:
-        env0 = env.unwrapped
-        cand_ids = getattr(env0, "_last_cand_task_ids", None)
-        if cand_ids is None:
-            return greedy_nearest_action(action_mask)
-
-        chosen = set()
-        a = np.full((action_mask.shape[0],), NOOP, dtype=np.int64)
-
-        for r in range(action_mask.shape[0]):
-            for k in range(K_max):
-                if action_mask[r, k] != 1:
-                    continue
-                task_id = int(cand_ids[r][k])
-                if task_id < 0:
-                    continue
-                if task_id in chosen:
-                    continue
-                chosen.add(task_id)
-                a[r] = k
-                break
-
-        return a
-
-    # Run one episode per policy for this seed
+    # Policy loop moved here for per-policy logger/env
     for policy_name in POLICIES:
+        rp_logger = RidepoolLogger(
+            RidepoolLogConfig(
+                out_dir="runs",
+                run_name=f"rp_eval_seed{seed}_{policy_name}",
+                erase_run_dir_on_start=True,
+                erase_episode_dir_on_start=True,
+                console_debug=False
+            )
+        )
+
+        controller = RLControllerAdapter(
+            sumo=traci,
+            reset_fn=make_reset_fn(SUMO_CFG, use_gui=False,
+                                   extra_args=[f"--seed", str(seed), "--device.taxi.dispatch-algorithm", "traci"]),
+            k_max=K_max,
+            vicinity_m=VICINITY_M,
+            completion_mode="dropoff",
+            max_steps=MAX_STEPS,
+            min_episode_steps=100,
+            serve_to_empty=True,
+            require_seen_reservation=True,
+            max_wait_delay_s=MAX_WAIT_DELAY_S,
+            max_travel_delay_s=MAX_TRAVEL_DELAY_S,
+            max_robot_capacity=MAX_ROBOT_CAPACITY,
+            logger=rp_logger,
+            respect_sumo_end=True,
+        )
+        feature_fn = make_feature_fn(controller)
+
+        env = RidepoolRTEnv(
+            controller,
+            R=R, K_max=K_max, N_max=N_max, E_max=E_max,
+            F=F, G=0,
+            feature_fn=feature_fn,
+            global_stats_fn=None,
+            decision_dt=60,
+        )
+
+        # ...existing code for NOOP, action functions, and episode run...
+
+        # The rest of the per-policy loop (from 'def greedy_nearest_action' to metrics extraction and logging)
+        NOOP = K_max
+
+        def greedy_nearest_action(action_mask: np.ndarray) -> np.ndarray:
+            a = np.full((R,), NOOP, dtype=np.int64)
+            for r in range(R):
+                if action_mask[r,0] == 1:
+                    a[r] = 0
+                else:
+                    a[r] = NOOP
+            return a
+
+        _rnd = np.random.default_rng(seed)
+
+        def random_valid_action(action_mask: np.ndarray) -> np.ndarray:
+            a = np.full((R,), NOOP, dtype=np.int64)
+            for r in range(R):
+                allowed = np.flatnonzero(action_mask[r] == 1)
+                if allowed.size > 0:
+                    a[r] = int(_rnd.choice(allowed))
+                else:
+                    a[r] = NOOP
+            return a
+
+        def greedy_unique_action(action_mask: np.ndarray) -> np.ndarray:
+            env0 = env.unwrapped
+            cand_ids = getattr(env0, "_last_cand_task_ids", None)
+            if cand_ids is None:
+                return greedy_nearest_action(action_mask)
+
+            chosen = set()
+            a = np.full((action_mask.shape[0],), NOOP, dtype=np.int64)
+
+            for r in range(action_mask.shape[0]):
+                for k in range(K_max):
+                    if action_mask[r, k] != 1:
+                        continue
+                    task_id = int(cand_ids[r][k])
+                    if task_id < 0:
+                        continue
+                    if task_id in chosen:
+                        continue
+                    chosen.add(task_id)
+                    a[r] = k
+                    break
+            return a
+
         print(f"\n  Policy: {policy_name}")
-        
         obs, info = env.reset()
         done = False
         trunc = False
@@ -162,12 +165,21 @@ for seed in SEEDS[:NUM_SEEDS]:
                 action = greedy_unique_action(mask)
             else:
                 raise ValueError(f"Unknown policy: {policy_name}")
-            
+
             obs, reward, done, trunc, info = env.step(action)
 
         # Get episode directory from logger
         episode_dir = rp_logger.ep_dir
-        
+        print(f"[DEBUG] Using episode_dir: {episode_dir}")
+
+        # **FIX**: Flush logger files to ensure all data is written before extracting metrics
+        if hasattr(rp_logger, '_files'):
+            for f in rp_logger._files.values():
+                try:
+                    f.flush()
+                except Exception:
+                    pass
+
         # Compute metrics from CSV files
         metrics = compute_episode_metrics_from_logs(
             episode_dir,
@@ -176,12 +188,14 @@ for seed in SEEDS[:NUM_SEEDS]:
             seed,
             num_robots=R,
         )
+        print(f"[DEBUG] Computed reward_sum: {metrics.reward_sum}, completion_sum: {metrics.completion_sum}")
         all_metrics_by_policy[policy_name].append(metrics)
-        
+
         # Log to file
         with open(metrics_log_path, "a", encoding="utf-8") as f:
             f.write(metrics_to_string(metrics) + "\n")
-        
+            f.flush()
+
         print(f"    Reward: {metrics.reward_sum:.2f}")
         print(f"    Pickups: {metrics.picked_up_tasks}/{metrics.total_tasks} ({metrics.pickup_rate:.1%})")
         print(f"    Completed: {metrics.completed_tasks}/{metrics.total_tasks} ({metrics.completion_rate:.1%})")
