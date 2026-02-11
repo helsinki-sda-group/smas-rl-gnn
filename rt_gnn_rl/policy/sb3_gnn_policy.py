@@ -155,6 +155,36 @@ class RTGNNPolicy(ActorCriticPolicy):
         mask_full = th.cat([mask_k, ones], dim=-1)        # [B,R,K_max+1]
         return logits_full, mask_full
 
+    @staticmethod
+    def masked_logprob_entropy(logits: th.Tensor, actions: th.Tensor, active: th.Tensor):
+        """
+        logits: [B, R, K]
+        actions: [B,R] (int)
+        active: [B,R] (bool) True => include this taxi in actor loss
+        Returns:
+            log_prob: [B] (sum over active taxis)
+            entropy: [B] (sum over active taxis)
+        """
+        B, R, K = logits.shape
+
+        # Log probabilities for all actions
+        logp = th.log_softmax(logits, dim=-1)  # [B,R,K]
+        a = actions.long().unsqueeze(-1)          # [B,R,1]
+        # Log probabilities for selected actions
+        chosen_logp = logp.gather(-1, a).squeeze(-1)  # [B,R]
+
+        p = th.softmax(logits, dim=-1)  # [B,R,K]
+        ent = -th.sum(p * logp, dim=-1)  # [B,R]
+
+        # Include only active taxis
+        chosen_logp = chosen_logp * active.float()
+        ent = ent * active.float()
+
+        # return sum over taxis
+        return chosen_logp.sum(dim=1), ent.sum(dim=1)
+
+
+
     def _dist_from_logits(self, logits: th.Tensor, mask: th.Tensor):
         """
         Construct the SB3 action distribution.
@@ -164,7 +194,7 @@ class RTGNNPolicy(ActorCriticPolicy):
         The logits are flattened along the last two dimensions to match MultiDiscrete semantics.
         """
 
-        logits = logits.masked_fill(~mask, -10)
+        #logits = logits.masked_fill(~mask, -1e9)  # large negative to zero out invalid actions after softmax
         B = logits.size(0)
         logits_flat = logits.reshape(B, -1)                 # [B, R*K_out]
         return self.action_dist.proba_distribution(action_logits=logits_flat)
@@ -181,10 +211,13 @@ class RTGNNPolicy(ActorCriticPolicy):
         logits_k, values = self._build_batch_outputs(obs_dict_b)           # [B,R,K_max], [B,1]
         mask_k = obs_dict_b["cand_mask"]                                   # [B,R,K_max]
         logits, mask = self._append_noop(logits_k, mask_k)                 # [B,R,K_max+1] each
+        logits = logits.masked_fill(~mask, -1e9)
 
         dist = self._dist_from_logits(logits, mask)
         actions = dist.get_actions(deterministic=deterministic)            # [B, R]
-        log_prob = dist.log_prob(actions)                                  # [B]
+        #log_prob = dist.log_prob(actions)                                  # [B]
+        active = mask_k.any(dim=-1)  # [B,R] True if at least one valid action for this taxi
+        log_prob, _ = self.masked_logprob_entropy(logits, actions, active)  # [B] sum of log-probs over active taxis, used for actor loss
 
         return actions, values, log_prob
 
@@ -202,10 +235,14 @@ class RTGNNPolicy(ActorCriticPolicy):
         logits_k, values = self._build_batch_outputs(obs_dict_b)           # [B,R,K_max], [B,1]
         mask_k = obs_dict_b["cand_mask"]                                   # [B,R,K_max]
         logits, mask = self._append_noop(logits_k, mask_k)                 # [B,R,K_max+1]
+        logits = logits.masked_fill(~mask, -1e9)
 
-        dist = self._dist_from_logits(logits, mask)
-        log_prob = dist.log_prob(actions)                                  # [B]
-        entropy = dist.entropy()                                           # [B]
+        # dist = self._dist_from_logits(logits, mask)
+        # log_prob = dist.log_prob(actions)                                  # [B]
+        # entropy = dist.entropy()                                           # [B]
+
+        active = mask_k.any(dim=-1)  # [B,R] True if at least one valid action for this taxi
+        log_prob, entropy = self.masked_logprob_entropy(logits, actions, active)
         return values, log_prob, entropy
 
     def predict_values(self, obs: Any) -> th.Tensor:
