@@ -48,12 +48,13 @@ class RTGNNPolicy(ActorCriticPolicy):
         critic_aggregation: str = "joint_mean",
         **kwargs,
     ):
+        gnn_kwargs: Dict[str, Any] = kwargs.pop("gnn_kwargs", {})
         # Use the passthrough extractor to preserve the raw dict observation
         super().__init__(*args, features_extractor_class=DictPassthroughExtractor, **kwargs)
         self.k_max = k_max               # logits from GNN
         self.k_out = k_max + 1           # +1 explicit NO-OP per robot (matches env action space)
 
-        gnn_kwargs: Dict[str, Any] = kwargs.pop("gnn_kwargs", {})
+        
 
         # normalize aggregation aliases to the model's canonical set
         agg_aliases = {
@@ -251,3 +252,12 @@ class RTGNNPolicy(ActorCriticPolicy):
         assert obs_dict_b is not None
         _, values = self._build_batch_outputs(obs_dict_b)                  # [B,1]
         return values
+
+    def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
+        """
+        Override SB3 prediction path so model.predict uses the GNN logits/forward path.
+        observation is already a tensor from BasePolicy.predict.
+        Returns actions tensor [B, R].
+        """
+        actions, _, _ = self.forward(observation, deterministic=deterministic)
+        return actions
