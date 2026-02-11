@@ -346,6 +346,51 @@ def main():
     except Exception as e:
         print(f"[WARN] Could not generate component breakdown plot: {e}")
     
+    # --- Additional Plots: reward_mdl, reward_wait, reward_comp ---
+    for reward_key, ylabel, fname, baseline_key, color in [
+        ("mdl", "Middleware Reward", "reward_mdl_vs_timesteps.png", "mdl", "#e74c3c"),
+        ("wait", "Wait Reward", "reward_wait_vs_timesteps.png", "wait", "#f39c12"),
+        ("comp", "Completion Reward", "reward_comp_vs_timesteps.png", "comp", "#27ae60"),
+    ]:
+        grouped = df.groupby('ts')[reward_key].agg(['mean', 'std', 'count']).reset_index()
+        ts = grouped['ts'].values
+        means = grouped['mean'].values
+        sems = grouped['std'].values / np.sqrt(grouped['count'].values)
+
+        fig, ax = plt.subplots(figsize=(12, 6), facecolor='#fafafa')
+        ax.set_facecolor('#fafafa')
+        ax.errorbar(ts, means, yerr=sems, fmt='o-', alpha=0.6, label=f'Mean {reward_key} (Trained)', color=color, capsize=5, markersize=6)
+        if len(means) > 1:
+            ma_vals = ma(means, ma_window)
+            ax.plot(ts, ma_vals, 'r-', lw=2.5, alpha=0.7, label=f'Moving Average (w={ma_window})')
+
+        # Baseline horizontal lines (if available)
+        if baselines:
+            ts_range = [ts.min(), ts.max()] if len(ts) else [0, 1]
+            baseline_colors = {'random': '#d62728', 'greedy': '#ff7f0e', 'unique': '#8c564b'}
+            baseline_labels = {'random': 'Random', 'greedy': 'Greedy', 'unique': 'Greedy-Unique'}
+            for pol, stats in baselines.items():
+                mean_val = stats.get(f'{baseline_key}_mean', None)
+                std_val = stats.get(f'{baseline_key}_std', None)
+                if mean_val is not None and std_val is not None:
+                    color2 = baseline_colors.get(pol, '#95a5a6')
+                    label2 = baseline_labels.get(pol, pol.capitalize())
+                    ax.axhline(mean_val, color=color2, linestyle='--', linewidth=2.5, alpha=0.9, label=f'{label2} Baseline')
+                    ax.axhline(mean_val + std_val, color=color2, linestyle=':', linewidth=1.5, alpha=0.7)
+                    ax.axhline(mean_val - std_val, color=color2, linestyle=':', linewidth=1.5, alpha=0.7)
+
+        ax.set_xlabel('Training Steps', fontsize=11, fontweight='bold')
+        ax.set_ylabel(ylabel, fontsize=11, fontweight='bold')
+        ax.set_title(f'{ylabel} vs Training Steps', fontsize=12, fontweight='bold')
+        ax.legend(fontsize=9, loc='best')
+        ax.grid(alpha=0.25)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        plt.tight_layout()
+        output_file = os.path.join(output_dir, fname)
+        plt.savefig(output_file, dpi=150, bbox_inches='tight')
+        print(f"[OK] Saved {output_file}")
+        plt.close()
     print(f"\n[OK] All plots saved to {output_dir}")
 
 
