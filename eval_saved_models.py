@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+import torch as th
 
 from stable_baselines3 import PPO
 from sumo_rl_rs.environment.ridepool_rt_env import RidepoolRTEnv
@@ -186,12 +187,30 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
         obs, info = env.reset()
         ep_reward = 0.0
         done = False
+        step_idx = 0
         
         while not done:
-            action, _states = model.predict(obs, deterministic=True)
+            action, _states = model.predict(obs, deterministic=config.get('deterministic', False))
+            if config.get('print_steps', False):
+                try:
+                    with th.no_grad():
+                        obs_tensor, _ = model.policy.obs_to_tensor(obs)
+                        _ = model.policy.extract_features(obs_tensor, features_extractor=model.policy.features_extractor)
+                        obs_dict_b = model.policy.features_extractor.last_obs
+                        logits_k, _ = model.policy._build_batch_outputs(obs_dict_b)
+                        mask_k = obs_dict_b["cand_mask"]
+                        logits, mask = model.policy._append_noop(logits_k, mask_k)
+                        logits = logits.masked_fill(~mask, -1e9)
+                        logits_np = logits.squeeze(0).detach().cpu().numpy()
+                    #print(f"[STEP {step_idx}] obs={obs}")
+                    print(f"[STEP {step_idx}] logits={logits_np}")
+                    print(f"[STEP {step_idx}] action={action}")
+                except Exception as e:
+                    print(f"[STEP {step_idx}] print error: {e}")
             obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             ep_reward += reward
+            step_idx += 1
         
         # **FIX**: Flush logger files to ensure all data is written before extracting metrics
         if hasattr(rp_logger, '_files'):
@@ -445,6 +464,10 @@ def main():
     parser.add_argument('--output-dir', type=str, default='eval_results',
                         help='Output directory for results')
     parser.add_argument('--gui', action='store_true', help='Enable SUMO GUI (default: disabled)')
+    parser.add_argument('--print-steps', action='store_true',
+                        help='Print observation, logits, and action for each env step')
+    parser.add_argument('--deterministic', action='store_true',
+                        help='Use deterministic=True for model.predict')
     args = parser.parse_args()
     
     # Seeds
@@ -476,7 +499,9 @@ def main():
         'decision_dt': 60,
         'min_episode_steps': 100,
         'eval_runs': args.eval_runs,
-        'eval_run_dir': os.path.join(args.output_dir, 'evaluation_runs')
+        'eval_run_dir': os.path.join(args.output_dir, 'evaluation_runs'),
+        'print_steps': args.print_steps,
+        'deterministic': args.deterministic,
     }
     
     # Create output directories
