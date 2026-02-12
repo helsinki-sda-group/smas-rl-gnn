@@ -190,6 +190,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
         step_idx = 0
         
         while not done:
+            #model.policy.noop_logit.data.fill_(-1.0)
             action, _states = model.predict(obs, deterministic=config.get('deterministic', False))
             if config.get('print_steps', False):
                 try:
@@ -202,7 +203,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
                         logits, mask = model.policy._append_noop(logits_k, mask_k)
                         logits = logits.masked_fill(~mask, -1e9)
                         logits_np = logits.squeeze(0).detach().cpu().numpy()
-                    #print(f"[STEP {step_idx}] obs={obs}")
+                    print(f"[STEP {step_idx}] obs={obs}")
                     print(f"[STEP {step_idx}] logits={logits_np}")
                     print(f"[STEP {step_idx}] action={action}")
                 except Exception as e:
