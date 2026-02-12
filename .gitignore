@@ -10,3 +10,4 @@ sumo_output/tripinfo.xml
 *.txt
 tripinfo.xml
 *.zip
+.vscode/settings.json
