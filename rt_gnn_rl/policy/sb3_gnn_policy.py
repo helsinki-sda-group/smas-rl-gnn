@@ -87,7 +87,7 @@ class RTGNNPolicy(ActorCriticPolicy):
         )
 
         # # Single learnable NO-OP logit shared across robots and batch.
-        self.noop_logit = nn.Parameter(th.tensor(0.0))
+        self.noop_logit = nn.Parameter(th.tensor(-1.0))
 
         # === NEW: temperature to soften logits (no gradient needed) ===
         self.logit_temperature: float = 5.0 
