@@ -14,34 +14,79 @@ import re
 def parse_metrics_log(filepath):
     """Parse the evaluation metrics log file."""
     with open(filepath, 'r', encoding='utf-8') as f:
-        lines = [l.strip() for l in f.readlines() if l.strip() and not l.startswith('episode')]
-    
+        lines = [l.rstrip('\n') for l in f if l.strip()]
+
+    # Find header: first line with at least 2 columns separated by '|' and containing 'rew' or 'reward' or 'pol' or 'seed'
+    header_line = None
+    header_idx = None
+    for idx, line in enumerate(lines):
+        line_stripped = line.strip().lower()
+        if '|' in line and (
+            'rew' in line_stripped or 'reward' in line_stripped or 'pol' in line_stripped or 'seed' in line_stripped
+        ):
+            # Must have at least 2 columns
+            parts = [c.strip() for c in line.split('|') if c.strip()]
+            if len(parts) >= 2:
+                header_line = line
+                header_idx = idx
+                break
+
+    if header_line is None:
+        raise ValueError("Could not find header in metrics log file.")
+
+    # Parse header columns: split first segment by whitespace, then others by whitespace as well
+    segs = [seg.strip() for seg in header_line.split('|')]
+    columns = []
+    for i, seg in enumerate(segs):
+        if i == 0:
+            columns += seg.lower().split()
+        else:
+            columns += seg.lower().split()
+    columns = [c for c in columns if c]
+
+    # Read data lines
     data = []
-    for line in lines:
-        parts = re.split(r'\s*\|\s*', line)
-        if len(parts) < 5:
+    for line in lines[header_idx+1:]:
+        if not line.strip() or line.strip().startswith('#'):
             continue
-        
-        try:
-            data.append({
-                'episode': int(parts[0]),
-                'ts': int(parts[1]),
-                'seed': int(parts[2]),
-                'attempt': int(parts[3]),
-                'reward': float(parts[4]),
-                'cap': float(parts[5]) if len(parts) > 5 else 0,
-                'step': float(parts[6]) if len(parts) > 6 else 0,
-                'mdl': float(parts[7]) if len(parts) > 7 else 0,
-                'wait': float(parts[8]) if len(parts) > 8 else 0,
-                'comp': float(parts[9]) if len(parts) > 9 else 0,
-                'nsv': float(parts[10]) if len(parts) > 10 else 0,
-            })
-        except (ValueError, IndexError) as e:
-            print(f"Warning: Could not parse line: {line[:80]}")
+        segs = [seg.strip() for seg in line.split('|')]
+        parts = []
+        for i, seg in enumerate(segs):
+            if i == 0:
+                parts += seg.split()
+            else:
+                parts += seg.split()
+        if len(parts) < 2:
             continue
-    
+        # Pad parts if missing columns
+        if len(parts) < len(columns):
+            parts += [''] * (len(columns) - len(parts))
+        row = {}
+        for col, val in zip(columns, parts):
+            val = val.strip()
+            # Try to cast to int or float if possible
+            if col in ('episode', 'ts', 'seed', 'attempt'):
+                try:
+                    row[col] = int(val)
+                except Exception:
+                    row[col] = 0
+            else:
+                try:
+                    row[col] = float(val)
+                except Exception:
+                    row[col] = val
+        data.append(row)
+
     df = pd.DataFrame(data)
-    return df.sort_values('ts').reset_index(drop=True)
+    # Use 'ts' if present, else fallback to 'timestep' or 'step' for sorting
+    sort_col = None
+    for candidate in ['ts', 'timestep', 'step']:
+        if candidate in df.columns:
+            sort_col = candidate
+            break
+    if sort_col is None:
+        sort_col = df.columns[0]  # fallback to first column
+    return df.sort_values(sort_col).reset_index(drop=True)
 
 
 def ma(data, window):
@@ -153,9 +198,9 @@ def main():
     print("Generating plots...")
     fig, ax = plt.subplots(figsize=(12, 6), facecolor='#fafafa')
     ax.set_facecolor('#fafafa')
-    
+
     # Group by timestep
-    grouped = df.groupby('ts')['reward'].agg(['mean', 'std', 'count']).reset_index()
+    grouped = df.groupby('ts')['rew'].agg(['mean', 'std', 'count']).reset_index()
     ts = grouped['ts'].values
     means = grouped['mean'].values
     sems = grouped['std'].values / np.sqrt(grouped['count'].values)
@@ -172,17 +217,17 @@ def main():
         print(f"Rows: {len(df)}")
         print(f"TS min/max: {ts_min} / {ts_max} (unique: {unique_ts})")
         print(f"Max mean reward: {max_mean:.4f} at ts={max_ts}")
-        print(f"Mean reward (overall): {df['reward'].mean():.4f}")
-        print(f"Std reward (overall): {df['reward'].std():.4f}")
+        print(f"Mean reward (overall): {df['rew'].mean():.4f}")
+        print(f"Std reward (overall): {df['rew'].std():.4f}")
 
     # Export grouped data used for the plot
     grouped_out = os.path.join(output_dir, 'reward_vs_timesteps_data.csv')
     grouped.to_csv(grouped_out, index=False)
     print(f"[OK] Saved {grouped_out}")
-    
+
     ax.errorbar(ts, means, yerr=sems, fmt='o-', alpha=0.6, 
                 label='Mean Reward (Trained)', color='#3498db', capsize=5, markersize=6)
-    
+
     # Moving average
     if len(means) > 1:
         ma_rew = ma(means, ma_window)
@@ -230,14 +275,14 @@ def main():
     # Plot 2: Mean reward by seed
     fig, ax = plt.subplots(figsize=(14, 6), facecolor='#fafafa')
     ax.set_facecolor('#fafafa')
-    
-    seed_data = df.groupby('seed')['reward'].agg(['mean', 'std', 'count']).reset_index()
+
+    seed_data = df.groupby('seed')['rew'].agg(['mean', 'std', 'count']).reset_index()
     seeds = seed_data['seed'].values
     means = seed_data['mean'].values
     sems = seed_data['std'].values / np.sqrt(seed_data['count'].values)
-    
+
     ax.bar(range(len(seeds)), means, yerr=sems, capsize=5, alpha=0.7, color='#27ae60', edgecolor='black', linewidth=1.5)
-    
+
     # Add baseline horizontal lines
     if baselines:
         baseline_colors = {'random': '#d62728', 'greedy': '#ff7f0e', 'unique': '#8c564b'}
@@ -247,7 +292,7 @@ def main():
             label = baseline_labels.get(pol, pol.capitalize())
             mean_val = stats['mean']
             ax.axhline(mean_val, color=color, linestyle='--', linewidth=2.5, alpha=0.9, label=f'{label} Baseline')
-    
+
     ax.set_xticks(range(len(seeds)))
     ax.set_xticklabels([f'{int(s)}' for s in seeds], rotation=45, ha='right', fontsize=9)
     ax.set_xlabel('Seed', fontsize=11, fontweight='bold')
@@ -256,7 +301,7 @@ def main():
     ax.grid(alpha=0.25, axis='y')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    
+
     plt.tight_layout()
     output_file = os.path.join(output_dir, 'reward_by_seed.png')
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
@@ -272,7 +317,7 @@ def main():
         fig, ax = plt.subplots(figsize=(12, 6), facecolor='#fafafa')
         ax.set_facecolor('#fafafa')
         ts = seed_data['ts'].values
-        rew = seed_data['reward'].values
+        rew = seed_data['rew'].values
         ax.plot(ts, rew, 'o-', alpha=0.6, color='#3498db', markersize=5, label='Reward')
         # Moving average
         if len(rew) > 1:

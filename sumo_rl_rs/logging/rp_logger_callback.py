@@ -92,6 +92,9 @@ class RPLoggerCallback(BaseCallback):
                     seed=current_seed,
                     num_robots=self.num_robots,
                 )
+                # Set ts (timesteps) field for training log
+                if hasattr(metrics, '__dict__'):
+                    metrics.ts = getattr(self, 'num_timesteps', 0)
                 append_metrics_log(self.metrics_log_path, metrics)
             self.ep_idx += 1
             self.sum_reward = 0.0

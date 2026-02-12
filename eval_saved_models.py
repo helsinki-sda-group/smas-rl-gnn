@@ -213,6 +213,11 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
                 print(f"Warning: Could not extract episode metrics: {e}")
         if episode_metrics is None:
             episode_metrics = EpisodeMetrics(policy="eval", seed=seed, reward_sum=ep_reward)
+        # Inject ts (timesteps) field into EpisodeMetrics for logging
+        if hasattr(episode_metrics, '__dict__'):
+            episode_metrics.ts = ts_idx
+        elif isinstance(episode_metrics, dict):
+            episode_metrics['ts'] = ts_idx
         env.close()
         rp_logger.close()
         return {
