@@ -7,3 +7,6 @@ sumo_output/tripinfo.xml
 *.csv
 *.png
 *.log
+*.txt
+tripinfo.xml
+*.zip
