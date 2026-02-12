@@ -84,6 +84,7 @@ def parse_model_filename(filename):
 
 def extract_episode_metrics(episode_dir, seed, attempt):
     """Extract metrics from episode logs."""
+    from utils.metrics_calculator import EpisodeMetrics
     try:
         metrics = compute_episode_metrics_from_logs(
             episode_dir=episode_dir,
@@ -92,37 +93,13 @@ def extract_episode_metrics(episode_dir, seed, attempt):
             seed=seed,
             num_robots=5,
         )
-        # Convert EpisodeMetrics dataclass to dict
-        if hasattr(metrics, '__dataclass_fields__'):
-            # It's a dataclass - convert to dict
-            return {
-                'rew': metrics.reward_sum,
-                'cap': metrics.capacity_sum,
-                'step': metrics.step_sum,
-                'mdl': metrics.missed_deadline_sum,
-                'wait': metrics.wait_sum,
-                'comp': metrics.completion_sum,
-                'nsv': metrics.nonserved_sum,
-            }
-        elif hasattr(metrics, '__dict__'):
-            # Convert object to dict
-            d = metrics.__dict__
-            return {
-                'rew': d.get('reward_sum', 0),
-                'cap': d.get('capacity_sum', 0),
-                'step': d.get('step_sum', 0),
-                'mdl': d.get('missed_deadline_sum', 0),
-                'wait': d.get('wait_sum', 0),
-                'comp': d.get('completion_sum', 0),
-                'nsv': d.get('nonserved_sum', 0),
-            }
-        elif isinstance(metrics, dict):
+        if isinstance(metrics, EpisodeMetrics):
             return metrics
         else:
-            return {}
+            return EpisodeMetrics(policy="eval", seed=seed)
     except Exception as e:
         print(f"Warning: Could not extract metrics: {e}")
-        return {}
+        return EpisodeMetrics(policy="eval", seed=seed)
 
 
 def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_base):
@@ -222,32 +199,25 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
                     pass
         
         # Extract detailed metrics
+        from utils.metrics_calculator import EpisodeMetrics
         ep_dir = getattr(rp_logger, 'last_ep_dir', None) or rp_logger.ep_dir
-        metrics_dict = {}
+        episode_metrics = None
         if ep_dir and os.path.exists(ep_dir):
             try:
-                # Check if episode CSV files exist
                 rewards_file = os.path.join(ep_dir, "rewards_macro.csv")
                 if os.path.exists(rewards_file):
                     metrics = extract_episode_metrics(ep_dir, seed, attempt)
-                    if metrics:
-                        metrics_dict = metrics
-                else:
-                    # Fallback: just use the reward
-                    metrics_dict = {'rew': ep_reward, 'cap': 0, 'step': 0, 'mdl': 0, 'wait': 0, 'comp': 0, 'nsv': 0}
+                    if isinstance(metrics, EpisodeMetrics):
+                        episode_metrics = metrics
             except Exception as e:
-                # Fallback: just use the reward
-                metrics_dict = {'rew': ep_reward, 'cap': 0, 'step': 0, 'mdl': 0, 'wait': 0, 'comp': 0, 'nsv': 0}
-        else:
-            # Fallback: just use the reward
-            metrics_dict = {'rew': ep_reward, 'cap': 0, 'step': 0, 'mdl': 0, 'wait': 0, 'comp': 0, 'nsv': 0}
-        
+                print(f"Warning: Could not extract episode metrics: {e}")
+        if episode_metrics is None:
+            episode_metrics = EpisodeMetrics(policy="eval", seed=seed, reward_sum=ep_reward)
         env.close()
         rp_logger.close()
-        
         return {
             'reward': ep_reward,
-            'metrics_dict': metrics_dict
+            'episode_metrics': episode_metrics
         }
     
     except Exception as e:
@@ -272,10 +242,6 @@ def ma(data, window):
 def plot_evaluation_results(results_df, output_dir, ma_window=10):
     """Generate plots from evaluation results."""
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Plot 1: Mean evaluation reward vs training steps (with moving average)
-    fig, ax = plt.subplots(figsize=(12, 6), facecolor='#fafafa')
-    ax.set_facecolor('#fafafa')
     
     # Group by timestep, averaging across all seeds and attempts
     grouped = results_df.groupby(['ts_idx'])['reward'].agg(['mean', 'std', 'count']).reset_index()
@@ -560,10 +526,8 @@ def main():
     # Evaluate all models
     results = []
     metrics_file = os.path.join(output_base, f'evaluation_metrics.log')
-    
-    with open(metrics_file, 'w', encoding='utf-8') as mf:
-        # Write header
-        mf.write("episode | timesteps | seed | attempt | reward | reward_cap | reward_step | reward_mdl | reward_wait | reward_comp | nsv\n")
+    from utils.metrics_calculator import ensure_metrics_log
+    ensure_metrics_log(metrics_file, overwrite=True)
     
     total_evals = len(model_files) * len(seeds_to_eval) * args.eval_runs
     current_eval = 0
@@ -586,7 +550,6 @@ def main():
                 print(f"  [{current_eval}/{total_evals} ({pct:.1f}%)] Seed {seed}, Attempt {attempt+1}/{args.eval_runs}...", end=' ')
                 
                 result = evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_base)
-                
                 if result:
                     results.append({
                         'episode': episode_idx,
@@ -594,16 +557,10 @@ def main():
                         'seed': seed,
                         'attempt': attempt,
                         'reward': result['reward'],
-                        'metrics_dict': result['metrics_dict'],
+                        'episode_metrics': result['episode_metrics'],
                     })
-                    
-                    # Write to metrics file
-                    metrics_dict = result['metrics_dict']
-                    with open(metrics_file, 'a', encoding='utf-8') as mf:
-                        mf.write(f"{episode_idx} | {ts_idx} | {seed} | {attempt} | {result['reward']:.4f} | " +
-                                f"{metrics_dict.get('cap', 0):.4f} | {metrics_dict.get('step', 0):.4f} | {metrics_dict.get('mdl', 0):.4f} | " +
-                                f"{metrics_dict.get('wait', 0):.4f} | {metrics_dict.get('comp', 0):.4f} | {metrics_dict.get('nsv', 0):.4f}\n")
-                    
+                    from utils.metrics_calculator import append_metrics_log
+                    append_metrics_log(metrics_file, result['episode_metrics'])
                     print(f"[OK] reward={result['reward']:.4f}")
                 else:
                     print(f"[FAIL]")

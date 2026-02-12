@@ -8,3 +8,4 @@ sumo_output/tripinfo.xml
 tripinfo.xml
 settings.json
 *.png
+*.log
