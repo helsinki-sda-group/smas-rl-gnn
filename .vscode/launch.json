@@ -8,9 +8,9 @@
       "program": "plot_eval_results.py",
       "console": "integratedTerminal",
       "args":[
-        "eval_results/evaluation_20260207_022752/evaluation_metrics.log",
+        "eval_results/evaluation_20260210_154046/evaluation_metrics.log",
         "--ma-window",
-        "15",
+        "1",
         "--baseline-log",
         "baseline_train_seeds_v2000_ms1200_mwd240_mtd900_cap2.log"
       ]
@@ -23,11 +23,11 @@
       "console": "integratedTerminal",
       "args": [
         "--seeds",
-        "eval",
+        "train",
         "--eval-runs",
         "1",
         "--model-sample",
-        "0.2"
+        "0.5"
       ]
     },
     {

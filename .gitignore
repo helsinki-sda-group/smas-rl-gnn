@@ -9,3 +9,7 @@ tripinfo.xml
 settings.json
 *.png
 *.log
+*.txt
+tripinfo.xml
+*.zip
+.vscode/settings.json
