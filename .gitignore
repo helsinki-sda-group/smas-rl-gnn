@@ -4,3 +4,7 @@ runs/
 error.xml
 message.xml
 sumo_output/tripinfo.xml
+*.csv
+tripinfo.xml
+settings.json
+*.png
