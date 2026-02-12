@@ -6,3 +6,4 @@ message.xml
 sumo_output/tripinfo.xml
 *.csv
 *.png
+*.log
