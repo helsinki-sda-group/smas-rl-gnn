@@ -9,6 +9,8 @@ import pandas as pd
 
 @dataclass
 class EpisodeMetrics:
+    overlap_rate: float = 0.0
+    mean_shared_tasks_per_step: float = 0.0
     policy: str = ""
     seed: int = 0
     reward_sum: float = 0.0
@@ -224,13 +226,38 @@ def compute_episode_metrics_from_logs(
                     .sum()
                 )
                 metrics.decision_steps = int(decision_steps)
+
+                # --- Compute overlap_rate and mean_shared_tasks_per_step ---
+                overlap_steps = 0
+                shared_tasks_counts = []
+                grouped = df_candidates.groupby("time")
+                for _, group in grouped:
+                    # Build task-to-taxi mapping
+                    task_to_taxis = {}
+                    taxi_col = "taxi_id" if "taxi_id" in group.columns else "taxi"
+                    for taxi_id, cand_str in zip(group[taxi_col], group["cand_res_ids"]):
+                        if pd.isna(cand_str) or not str(cand_str).strip():
+                            continue
+                        for task_id in str(cand_str).split("|"):
+                            if task_id not in task_to_taxis:
+                                task_to_taxis[task_id] = set()
+                            task_to_taxis[task_id].add(taxi_id)
+                    shared_tasks = [t for t, taxis in task_to_taxis.items() if len(taxis) >= 2]
+                    if shared_tasks:
+                        overlap_steps += 1
+                    shared_tasks_counts.append(len(shared_tasks))
+                n_steps = len(shared_tasks_counts)
+                metrics.overlap_rate = overlap_steps / n_steps if n_steps > 0 else 0.0
+                metrics.mean_shared_tasks_per_step = float(sum(shared_tasks_counts)) / n_steps if n_steps > 0 else 0.0
             else:
                 metrics.mean_candidates_per_taxi = 0.0
                 metrics.cand_nonempty_frac = 0.0
                 metrics.cand_mean_nonempty = 0.0
                 metrics.decision_steps = 0
+                metrics.overlap_rate = 0.0
+                metrics.mean_shared_tasks_per_step = 0.0
         except Exception as e:
-            print(f"Warning: Could not compute mean_candidates_per_taxi: {e}")
+            print(f"Warning: Could not compute mean_candidates_per_taxi or overlap metrics: {e}")
 
     if os.path.exists(rewards_macro_path):
         try:
@@ -262,12 +289,13 @@ def metrics_to_string(metrics: EpisodeMetrics) -> str:
         f" {metrics.mean_candidates_per_taxi:>6.2f} {metrics.cand_nonempty_frac:>6.3f}"
         f" {metrics.cand_mean_nonempty:>6.2f} {metrics.decision_steps:>6}"
         f" {metrics.macro_reward_mean:>8.3f} {metrics.macro_steps_done:>6}"
+        f" {metrics.overlap_rate:>8.3f} {metrics.mean_shared_tasks_per_step:>8.3f}"
     )
 
 
 def get_metrics_header() -> str:
     return (
-        "pol        seed |      rew      cap     step      mdl     wait     comp      nsv |   pku    pkr obs  obsr   pkv   pkvr    mwt   cmp    cmr   anp   anpr     mtt   pnc    pncr |   noop  overld  mcand  cne_fr cne_mn   dstep    macmr    msd"
+        "pol        seed |      rew      cap     step      mdl     wait     comp      nsv |   pku    pkr obs  obsr   pkv   pkvr    mwt   cmp    cmr   anp   anpr     mtt   pnc    pncr |   noop  overld  mcand  cne_fr cne_mn   dstep    macmr    msd   ovrlap   shared"
     )
 
 
