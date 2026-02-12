@@ -9,6 +9,7 @@ import pandas as pd
 
 @dataclass
 class EpisodeMetrics:
+    ts: int = 0  # timesteps (from model filename)
     overlap_rate: float = 0.0
     mean_shared_tasks_per_step: float = 0.0
     policy: str = ""
@@ -273,7 +274,7 @@ def compute_episode_metrics_from_logs(
 
 def metrics_to_string(metrics: EpisodeMetrics) -> str:
     return (
-        f"{metrics.policy:<10} {metrics.seed:>4} | "
+        f"{metrics.policy:<10} {metrics.seed:>4} {metrics.ts:>8} | "
         f"{metrics.reward_sum:>8.2f} {metrics.capacity_sum:>8.2f} {metrics.step_sum:>8.2f}"
         f" {metrics.missed_deadline_sum:>8.2f} {metrics.wait_sum:>8.2f}"
         f" {metrics.completion_sum:>8.2f} {metrics.nonserved_sum:>8.2f} | "
@@ -295,7 +296,7 @@ def metrics_to_string(metrics: EpisodeMetrics) -> str:
 
 def get_metrics_header() -> str:
     return (
-        "pol        seed |      rew      cap     step      mdl     wait     comp      nsv |   pku    pkr obs  obsr   pkv   pkvr    mwt   cmp    cmr   anp   anpr     mtt   pnc    pncr |   noop  overld  mcand  cne_fr cne_mn   dstep    macmr    msd   ovrlap   shared"
+        "pol        seed      ts |      rew      cap     step      mdl     wait     comp      nsv |   pku    pkr obs  obsr   pkv   pkvr    mwt   cmp    cmr   anp   anpr     mtt   pnc    pncr |   noop  overld  mcand  cne_fr cne_mn   dstep    macmr    msd   ovrlap   shared"
     )
 
 
