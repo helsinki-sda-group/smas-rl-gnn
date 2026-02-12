@@ -138,6 +138,7 @@ env = Monitor(env, filename="monitor.csv", info_keywords=("episode_reward",))
 # 4) SB3 PPO with custom GNN policy
 policy_kwargs = dict(in_dim=F, hidden=128, k_max=K_max)
 model = PPO(
+
     RTGNNPolicy,
     env,
     policy_kwargs=policy_kwargs,
@@ -154,13 +155,17 @@ model = PPO(
     verbose=1
 )
 
+print("Initial noop_logit:", model.policy.noop_logit.item())
+model.policy.noop_logit.data.fill_(-1.0)
+print("Forced noop_logit:", model.policy.noop_logit.item())
+
 metrics_log_path = (
     f"training_metrics_v{int(VICINITY_M)}_ms{MAX_STEPS}_mwd{int(MAX_WAIT_DELAY_S)}_"
     f"mtd{int(MAX_TRAVEL_DELAY_S)}_cap{MAX_ROBOT_CAPACITY}.log"
 )
 
 # Directory to save models after each rollout
-model_save_dir = "runs/rp_gnn_debug/saved_models"
+model_save_dir = "runs/rp_gnn_debug/!saved_models"
 
 callback = RPLoggerCallback(
     rp_logger,

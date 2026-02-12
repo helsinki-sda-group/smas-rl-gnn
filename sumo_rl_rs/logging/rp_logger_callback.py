@@ -40,6 +40,15 @@ class RPLoggerCallback(BaseCallback):
             model_filename = f"model_episode{self.ep_idx}_ts{self.num_timesteps}.zip"
             model_path = os.path.join(self.save_model_dir, model_filename)
             self.model.save(model_path)
+            # Log noop_logit value
+            try:
+                noop_logit = self.model.policy.noop_logit.item()
+                log_path = os.path.join(self.save_model_dir, "noop_logit.log")
+                with open(log_path, "a") as log_file:
+                    log_file.write(f"episode={self.ep_idx}, ts={self.num_timesteps}, noop_logit={noop_logit}\n")
+            except Exception as e:
+                if self.verbose > 0:
+                    print(f"[WARN] Could not log noop_logit: {e}")
             if self.verbose > 0:
                 print(f"Model saved to {model_path}")
         return True

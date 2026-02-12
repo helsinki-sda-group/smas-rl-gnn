@@ -59,34 +59,39 @@ def ma(data, window):
 def parse_baseline_log(filepath):
     """Parse baseline log file to extract mean and std for each policy."""
     baselines = {}
-    
+    import re
     with open(filepath, 'r', encoding='utf-8') as f:
-        in_summary = False
-        for line in f:
-            line = line.strip()
-            
-            # Detect summary section
-            if line.startswith('# SUMMARY STATISTICS'):
-                in_summary = True
+        lines = [line.strip() for line in f if line.strip()]
+    # Find the summary table (last one in file)
+    summary_start = None
+    for i, line in enumerate(lines):
+        if line.startswith('pol') and 'rew±std' in line:
+            summary_start = i
+    if summary_start is not None:
+        metric_names = ['rew', 'cap', 'step', 'mdl', 'wait', 'comp', 'nsv']
+        for line in lines[summary_start+1:]:
+            if not line or line.startswith('#'):
+                break
+            if '±' not in line:
                 continue
-            
-            # Parse summary statistics
-            if in_summary and line and not line.startswith('pol'):
-                parts = re.split(r'\s+', line)
-                if len(parts) >= 2:
-                    pol_name = parts[0]
-                    # Extract rew±std (e.g., "3.78±1.59")
-                    rew_field = parts[1]
-                    if '±' in rew_field:
-                        try:
-                            mean_str, std_str = rew_field.split('±')
-                            baselines[pol_name] = {
-                                'mean': float(mean_str),
-                                'std': float(std_str)
-                            }
-                        except ValueError:
-                            pass
-    
+            # Use regex to extract: policy name, then all value±std pairs
+            m = re.match(r'^(\w+)', line)
+            if not m:
+                continue
+            pol_name = m.group(1)
+            # Find all value±std pairs (including negatives and decimals)
+            pairs = re.findall(r'([-+]?\d*\.\d+|\d+)[\s]*±[\s]*([-+]?\d*\.\d+|\d+)', line)
+            baseline = {}
+            for idx, metric in enumerate(metric_names):
+                if idx < len(pairs):
+                    mean_str, std_str = pairs[idx]
+                    baseline[f'{metric}_mean'] = float(mean_str)
+                    baseline[f'{metric}_std'] = float(std_str)
+            # For backward compatibility, also set 'mean' and 'std' for reward
+            if 'rew_mean' in baseline and 'rew_std' in baseline:
+                baseline['mean'] = baseline['rew_mean']
+                baseline['std'] = baseline['rew_std']
+            baselines[pol_name] = baseline
     return baselines
 
 
@@ -99,13 +104,24 @@ def main():
     metrics_log = sys.argv[1]
     ma_window = 10
     baseline_log = None
-    
+    baseline_std = False
+
     # Parse arguments
-    for i, arg in enumerate(sys.argv[2:]):
-        if arg == '--ma-window' and i + 2 < len(sys.argv):
-            ma_window = int(sys.argv[i + 3])
-        elif arg == '--baseline-log' and i + 2 < len(sys.argv):
-            baseline_log = sys.argv[i + 3]
+    args = sys.argv[2:]
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == '--ma-window' and i + 1 < len(args):
+            ma_window = int(args[i + 1])
+            i += 2
+        elif arg == '--baseline-log' and i + 1 < len(args):
+            baseline_log = args[i + 1]
+            i += 2
+        elif arg == '--baseline-std':
+            baseline_std = True
+            i += 1
+        else:
+            i += 1
     
     print(f"Loading evaluation metrics from: {metrics_log}")
     df = parse_metrics_log(metrics_log)
@@ -119,7 +135,10 @@ def main():
             baselines = parse_baseline_log(baseline_log)
             print(f"Loaded baselines from: {baseline_log}")
             for pol, stats in baselines.items():
-                print(f"  {pol}: mean={stats['mean']:.3f}, std={stats['std']:.3f}")
+                if 'mean' in stats and 'std' in stats:
+                    print(f"  {pol}: mean={stats['mean']:.3f}, std={stats['std']:.3f}")
+                else:
+                    print(f"  {pol}: keys={list(stats.keys())} (no 'mean'/'std')")
             print()
         else:
             print(f"[WARN] Baseline log not found: {baseline_log}\n")
@@ -174,19 +193,23 @@ def main():
         ts_range = [ts.min(), ts.max()] if len(ts) else [0, 1]
         baseline_colors = {'random': '#d62728', 'greedy': '#ff7f0e', 'unique': '#8c564b'}
         baseline_labels = {'random': 'Random', 'greedy': 'Greedy', 'unique': 'Greedy-Unique'}
-        
+        random_baseline_mean = None
         for pol, stats in baselines.items():
             color = baseline_colors.get(pol, '#95a5a6')
             label = baseline_labels.get(pol, pol.capitalize())
             mean_val = stats['mean']
             std_val = stats['std']
-            
+            if pol == 'random':
+                random_baseline_mean = mean_val
             # Horizontal line for mean
             ax.axhline(mean_val, color=color, linestyle='--', linewidth=2.5, alpha=0.9, label=f'{label} Baseline')
-            
-            # Dotted lines for ±1 std
-            ax.axhline(mean_val + std_val, color=color, linestyle=':', linewidth=1.5, alpha=0.7)
-            ax.axhline(mean_val - std_val, color=color, linestyle=':', linewidth=1.5, alpha=0.7)
+            # Dotted lines for ±1 std only if baseline_std is set
+            if baseline_std:
+                ax.axhline(mean_val + std_val, color=color, linestyle=':', linewidth=1.5, alpha=0.7)
+                ax.axhline(mean_val - std_val, color=color, linestyle=':', linewidth=1.5, alpha=0.7)
+        # Set ylim if no baseline_std and random baseline present
+        if not baseline_std and random_baseline_mean is not None:
+            ax.set_ylim(bottom=random_baseline_mean - 0.8)
     
     ax.set_xlabel('Training Steps', fontsize=11, fontweight='bold')
     ax.set_ylabel('Mean Evaluation Reward', fontsize=11, fontweight='bold')
@@ -219,12 +242,10 @@ def main():
     if baselines:
         baseline_colors = {'random': '#d62728', 'greedy': '#ff7f0e', 'unique': '#8c564b'}
         baseline_labels = {'random': 'Random', 'greedy': 'Greedy', 'unique': 'Greedy-Unique'}
-        
         for pol, stats in baselines.items():
             color = baseline_colors.get(pol, '#95a5a6')
             label = baseline_labels.get(pol, pol.capitalize())
             mean_val = stats['mean']
-            
             ax.axhline(mean_val, color=color, linestyle='--', linewidth=2.5, alpha=0.9, label=f'{label} Baseline')
     
     ax.set_xticks(range(len(seeds)))
@@ -246,23 +267,27 @@ def main():
     seeds_unique = sorted(df['seed'].unique())
     for seed in seeds_unique:
         seed_data = df[df['seed'] == seed].sort_values('ts')
-        
         if len(seed_data) == 0:
             continue
-        
         fig, ax = plt.subplots(figsize=(12, 6), facecolor='#fafafa')
         ax.set_facecolor('#fafafa')
-        
         ts = seed_data['ts'].values
         rew = seed_data['reward'].values
-        
         ax.plot(ts, rew, 'o-', alpha=0.6, color='#3498db', markersize=5, label='Reward')
-        
         # Moving average
         if len(rew) > 1:
             ma_rew = ma(rew, ma_window)
             ax.plot(ts, ma_rew, 'r-', lw=2.5, alpha=0.7, label=f'Moving Average (w={ma_window})')
-        
+        # Add baseline horizontal lines
+        if baselines:
+            baseline_colors = {'random': '#d62728', 'greedy': '#ff7f0e', 'unique': '#8c564b'}
+            baseline_labels = {'random': 'Random', 'greedy': 'Greedy', 'unique': 'Greedy-Unique'}
+            for pol, stats in baselines.items():
+                mean_val = stats.get('mean', None)
+                if mean_val is not None:
+                    color = baseline_colors.get(pol, '#95a5a6')
+                    label = baseline_labels.get(pol, pol.capitalize())
+                    ax.axhline(mean_val, color=color, linestyle='--', linewidth=2.5, alpha=0.9, label=f'{label} Baseline')
         ax.set_xlabel('Training Steps', fontsize=11, fontweight='bold')
         ax.set_ylabel('Evaluation Reward', fontsize=11, fontweight='bold')
         ax.set_title(f'Model Performance for Seed {int(seed)}', fontsize=12, fontweight='bold')
@@ -270,12 +295,10 @@ def main():
         ax.grid(alpha=0.25)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-        
         plt.tight_layout()
         output_file = os.path.join(output_dir, f'reward_seed{int(seed)}.png')
         plt.savefig(output_file, dpi=150, bbox_inches='tight')
         plt.close()
-    
     print(f"[OK] Saved {len(seeds_unique)} per-seed plots")
     
     # Plot 4: Component breakdown
@@ -370,14 +393,15 @@ def main():
             baseline_colors = {'random': '#d62728', 'greedy': '#ff7f0e', 'unique': '#8c564b'}
             baseline_labels = {'random': 'Random', 'greedy': 'Greedy', 'unique': 'Greedy-Unique'}
             for pol, stats in baselines.items():
-                mean_val = stats.get(f'{baseline_key}_mean', None)
-                std_val = stats.get(f'{baseline_key}_std', None)
-                if mean_val is not None and std_val is not None:
+                mean_val = stats.get(f'{reward_key}_mean', None)
+                std_val = stats.get(f'{reward_key}_std', None)
+                if mean_val is not None:
                     color2 = baseline_colors.get(pol, '#95a5a6')
                     label2 = baseline_labels.get(pol, pol.capitalize())
                     ax.axhline(mean_val, color=color2, linestyle='--', linewidth=2.5, alpha=0.9, label=f'{label2} Baseline')
-                    ax.axhline(mean_val + std_val, color=color2, linestyle=':', linewidth=1.5, alpha=0.7)
-                    ax.axhline(mean_val - std_val, color=color2, linestyle=':', linewidth=1.5, alpha=0.7)
+                    if baseline_std and std_val is not None:
+                        ax.axhline(mean_val + std_val, color=color2, linestyle=':', linewidth=1.5, alpha=0.7)
+                        ax.axhline(mean_val - std_val, color=color2, linestyle=':', linewidth=1.5, alpha=0.7)
 
         ax.set_xlabel('Training Steps', fontsize=11, fontweight='bold')
         ax.set_ylabel(ylabel, fontsize=11, fontweight='bold')
