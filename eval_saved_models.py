@@ -32,6 +32,12 @@ from sumo_rl_rs.logging.ridepool_logger import RidepoolLogger, RidepoolLogConfig
 from utils.sumo_bootstrap import start_sumo, _imports, _build_args
 from utils.feature_fns import make_feature_fn
 from utils.metrics_calculator import compute_episode_metrics_from_logs
+from utils.logit_metrics_logger import (
+    compute_logit_step_metrics,
+    aggregate_episode_logit_metrics,
+    append_logit_metrics_log,
+    LogitStepMetrics
+)
 
 
 class FixedSeedResetFn:
@@ -166,25 +172,47 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
         done = False
         step_idx = 0
         
+        # Collect logit metrics for each decision step
+        logit_step_metrics = []
+        
         while not done:
             #model.policy.noop_logit.data.fill_(-1.0)
+            
+            # Capture logits before prediction
+            try:
+                with th.no_grad():
+                    obs_tensor, _ = model.policy.obs_to_tensor(obs)
+                    _ = model.policy.extract_features(obs_tensor, features_extractor=model.policy.features_extractor)
+                    obs_dict_b = model.policy.features_extractor.last_obs
+                    logits_k, _ = model.policy._build_batch_outputs(obs_dict_b)
+                    mask_k = obs_dict_b["cand_mask"]
+                    logits, mask = model.policy._append_noop(logits_k, mask_k)
+                    
+                    # Extract logits and mask as numpy arrays
+                    logits_np = logits.squeeze(0).detach().cpu().numpy()  # [R, K_max+1]
+                    mask_np = mask.squeeze(0).detach().cpu().numpy()  # [R, K_max+1]
+                    noop_logit_value = float(model.policy.noop_logit.item())
+                    
+                    # Compute step logit metrics
+                    step_metrics = compute_logit_step_metrics(logits_np, mask_np, noop_logit_value)
+                    step_metrics.step = step_idx
+                    logit_step_metrics.append(step_metrics)
+                    
+                    if config.get('print_steps', False):
+                        logits_masked = logits.masked_fill(~mask, -1e9)
+                        logits_masked_np = logits_masked.squeeze(0).detach().cpu().numpy()
+                        print(f"[STEP {step_idx}] obs={obs}")
+                        print(f"[STEP {step_idx}] logits={logits_masked_np}")
+                        print(f"[STEP {step_idx}] logit_metrics: best_cand={step_metrics.best_cand_logit:.4f}, "
+                              f"noop={step_metrics.noop_logit:.4f}, margin={step_metrics.margin:.4f}")
+            except Exception as e:
+                print(f"[STEP {step_idx}] logit capture error: {e}")
+            
             action, _states = model.predict(obs, deterministic=config.get('deterministic', False))
+            
             if config.get('print_steps', False):
-                try:
-                    with th.no_grad():
-                        obs_tensor, _ = model.policy.obs_to_tensor(obs)
-                        _ = model.policy.extract_features(obs_tensor, features_extractor=model.policy.features_extractor)
-                        obs_dict_b = model.policy.features_extractor.last_obs
-                        logits_k, _ = model.policy._build_batch_outputs(obs_dict_b)
-                        mask_k = obs_dict_b["cand_mask"]
-                        logits, mask = model.policy._append_noop(logits_k, mask_k)
-                        logits = logits.masked_fill(~mask, -1e9)
-                        logits_np = logits.squeeze(0).detach().cpu().numpy()
-                    print(f"[STEP {step_idx}] obs={obs}")
-                    print(f"[STEP {step_idx}] logits={logits_np}")
-                    print(f"[STEP {step_idx}] action={action}")
-                except Exception as e:
-                    print(f"[STEP {step_idx}] print error: {e}")
+                print(f"[STEP {step_idx}] action={action}")
+            
             obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             ep_reward += reward
@@ -218,11 +246,17 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             episode_metrics.ts = ts_idx
         elif isinstance(episode_metrics, dict):
             episode_metrics['ts'] = ts_idx
+        
+        # Aggregate logit metrics
+        policy_type = "deterministic" if config.get('deterministic', False) else "stochastic"
+        logit_episode_metrics = aggregate_episode_logit_metrics(logit_step_metrics, policy_type, seed, ts_idx)
+        
         env.close()
         rp_logger.close()
         return {
             'reward': ep_reward,
-            'episode_metrics': episode_metrics
+            'episode_metrics': episode_metrics,
+            'logit_metrics': logit_episode_metrics
         }
     
     except Exception as e:
@@ -443,9 +477,9 @@ def main():
     args = parser.parse_args()
     
     # Seeds
-    TRAIN_SEEDS = [100]#, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
-                  # 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000]
-    EVAL_SEEDS = [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
+    TRAIN_SEEDS = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
+                   1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000]
+    EVAL_SEEDS = [42]#, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
     
     if args.seeds == 'train':
         seeds_to_eval = TRAIN_SEEDS
@@ -531,8 +565,11 @@ def main():
     # Evaluate all models
     results = []
     metrics_file = os.path.join(output_base, f'evaluation_metrics.log')
+    logit_metrics_file = os.path.join(output_base, f'logit_metrics.log')
     from utils.metrics_calculator import ensure_metrics_log
     ensure_metrics_log(metrics_file, overwrite=True)
+    from utils.logit_metrics_logger import ensure_logit_metrics_log
+    ensure_logit_metrics_log(logit_metrics_file)
     
     total_evals = len(model_files) * len(seeds_to_eval) * args.eval_runs
     current_eval = 0
@@ -563,9 +600,15 @@ def main():
                         'attempt': attempt,
                         'reward': result['reward'],
                         'episode_metrics': result['episode_metrics'],
+                        'logit_metrics': result.get('logit_metrics', None),
                     })
                     from utils.metrics_calculator import append_metrics_log
                     append_metrics_log(metrics_file, result['episode_metrics'])
+                    
+                    # Log logit metrics if available
+                    if 'logit_metrics' in result and result['logit_metrics'] is not None:
+                        append_logit_metrics_log(logit_metrics_file, result['logit_metrics'])
+                    
                     print(f"[OK] reward={result['reward']:.4f}")
                 else:
                     print(f"[FAIL]")
