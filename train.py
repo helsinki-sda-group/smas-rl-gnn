@@ -1,5 +1,6 @@
 # scripts/train_gnn_ppo.py
 import os
+import argparse
 import gymnasium as gym
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
@@ -15,6 +16,11 @@ from utils.feature_fns import make_feature_fn
 
 # to write PPO output to txt file
 import sys
+
+parser = argparse.ArgumentParser(description="Train GNN PPO with SUMO")
+parser.add_argument("--sumoport", type=int, default=None, help="SUMO remote port (default: SUMO default)")
+args = parser.parse_args()
+SUMO_PORT = args.sumoport
 
 class Tee(object):
     def __init__(self, filename):
@@ -58,12 +64,13 @@ SEED = TRAIN_SEEDS[0]
 # Create a class to randomly sample seeds from pool
 class RandomSeedResetFn:
     """Reset function that randomly samples from training seeds pool on each episode."""
-    def __init__(self, sumocfg_path: str, use_gui: bool, seeds: list[int], random_seed: int = 42):
+    def __init__(self, sumocfg_path: str, use_gui: bool, seeds: list[int], random_seed: int = 42, sumo_port: int | None = None):
         self.sumocfg_path = sumocfg_path
         self.use_gui = use_gui
         self.seeds = seeds
         self.rng = np.random.RandomState(random_seed)  # Separate RNG for seed selection
         self.current_seed = seeds[0]
+        self.sumo_port = sumo_port
     
     def __call__(self) -> None:
         # Randomly sample a seed from the pool
@@ -80,17 +87,17 @@ class RandomSeedResetFn:
             traci.load(args)
         else:
             binary = checkBinary("sumo-gui" if self.use_gui else "sumo")
-            traci.start([binary, *args])
+            traci.start([binary, *args], port=self.sumo_port)
     
     def get_current_seed(self) -> int:
         """Get the seed that was used for the current episode."""
         return self.current_seed
 
 # Create rotating reset function
-reset_fn = RandomSeedResetFn(SUMO_CFG, use_gui=False, seeds=TRAIN_SEEDS, random_seed=42)
+reset_fn = RandomSeedResetFn(SUMO_CFG, use_gui=False, seeds=TRAIN_SEEDS, random_seed=42, sumo_port=SUMO_PORT)
 
-traci = start_sumo(SUMO_CFG, use_gui=False,
-                   extra_args=["--seed", str(SEED), "--device.taxi.dispatch-algorithm", "traci"])
+extra_args = ["--seed", str(SEED), "--device.taxi.dispatch-algorithm", "traci"]
+traci = start_sumo(SUMO_CFG, use_gui=False, extra_args=extra_args, remote_port=SUMO_PORT)
 
 rp_logger = RidepoolLogger(
     RidepoolLogConfig(
@@ -155,9 +162,12 @@ model = PPO(
     verbose=1
 )
 
+
 print("Initial noop_logit:", model.policy.noop_logit.item())
 model.policy.noop_logit.data.fill_(-1.0)
 print("Forced noop_logit:", model.policy.noop_logit.item())
+
+model.save("init_model/model_episode0_ts0.zip")
 
 metrics_log_path = (
     f"training_metrics_v{int(VICINITY_M)}_ms{MAX_STEPS}_mwd{int(MAX_WAIT_DELAY_S)}_"
@@ -176,5 +186,5 @@ callback = RPLoggerCallback(
     save_model_dir=model_save_dir,  # Enable model saving after each rollout
 )
 
-model.learn(total_timesteps=100_000, callback=callback)
+model.learn(total_timesteps=50_000, callback=callback)
 model.save("ppo_rp_gnn.zip")

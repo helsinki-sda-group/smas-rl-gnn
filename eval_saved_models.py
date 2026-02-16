@@ -42,10 +42,11 @@ from utils.logit_metrics_logger import (
 
 class FixedSeedResetFn:
     """Reset function that uses a fixed seed for reproducibility."""
-    def __init__(self, sumocfg_path: str, use_gui: bool, seed: int):
+    def __init__(self, sumocfg_path: str, use_gui: bool, seed: int, sumo_port: int | None = None):
         self.sumocfg_path = sumocfg_path
         self.use_gui = use_gui
         self.seed = seed
+        self.sumo_port = sumo_port
     
     def __call__(self) -> None:
         extra_args = ["--seed", str(self.seed), "--device.taxi.dispatch-algorithm", "traci"]
@@ -56,7 +57,7 @@ class FixedSeedResetFn:
             traci_module.load(args)
         else:
             binary = checkBinary("sumo-gui" if self.use_gui else "sumo")
-            traci_module.start([binary, *args])
+            traci_module.start([binary, *args], port=self.sumo_port)
 
 
 class Tee(object):
@@ -128,13 +129,14 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
         # Start fresh SUMO instance with unique port
         port = port_base + attempt
         extra_args = ["--seed", str(seed), "--device.taxi.dispatch-algorithm", "traci"]
-        traci = start_sumo(config['sumo_cfg'], use_gui=config['use_gui'], extra_args=extra_args)
+        traci = start_sumo(config['sumo_cfg'], use_gui=config['use_gui'], extra_args=extra_args, remote_port=port)
         
         # Setup reset function
         reset_fn = FixedSeedResetFn(
             config['sumo_cfg'],
             use_gui=config['use_gui'],
-            seed=seed
+            seed=seed,
+            sumo_port=port,
         )
         
         # Create controller with fresh SUMO
@@ -469,6 +471,8 @@ def main():
                         help='Directory containing model.zip files')
     parser.add_argument('--output-dir', type=str, default='eval_results',
                         help='Output directory for results')
+    parser.add_argument('--sumoport', type=int, default=None,
+                        help='Base SUMO remote port (default: 8900)')
     parser.add_argument('--gui', action='store_true', help='Enable SUMO GUI (default: disabled)')
     parser.add_argument('--print-steps', action='store_true',
                         help='Print observation, logits, and action for each env step')
@@ -573,7 +577,7 @@ def main():
     
     total_evals = len(model_files) * len(seeds_to_eval) * args.eval_runs
     current_eval = 0
-    port_base = 8900
+    port_base = args.sumoport if args.sumoport is not None else 8900
     
     for model_idx, model_path in enumerate(model_files):
         filename = os.path.basename(model_path)

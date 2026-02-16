@@ -1,4 +1,5 @@
 import numpy as np
+import argparse
 from stable_baselines3.common.monitor import Monitor
 from typing import Dict, List
 import pandas as pd
@@ -15,6 +16,11 @@ from utils.metrics_calculator import (
     metrics_to_string,
     get_metrics_header,
 )
+
+parser = argparse.ArgumentParser(description="Evaluate baseline policies")
+parser.add_argument("--sumoport", type=int, default=None, help="SUMO remote port (default: SUMO default)")
+args = parser.parse_args()
+SUMO_PORT = args.sumoport
 
 # 1) SUMO/controller setup (example; adapt to your config)
 SUMO_CFG = "configs/small_net.sumocfg"
@@ -57,8 +63,8 @@ for seed in SEEDS[:NUM_SEEDS]:
     print(f"Starting seed {seed}")
     print(f"{'='*80}")
     
-    traci = start_sumo(SUMO_CFG, use_gui=False,
-                       extra_args=[f"--seed", str(seed), "--device.taxi.dispatch-algorithm", "traci"])
+    extra_args = [f"--seed", str(seed), "--device.taxi.dispatch-algorithm", "traci"]
+    traci = start_sumo(SUMO_CFG, use_gui=False, extra_args=extra_args, remote_port=SUMO_PORT)
 
     # Policy loop moved here for per-policy logger/env
     for policy_name in POLICIES:
@@ -74,8 +80,12 @@ for seed in SEEDS[:NUM_SEEDS]:
 
         controller = RLControllerAdapter(
             sumo=traci,
-            reset_fn=make_reset_fn(SUMO_CFG, use_gui=False,
-                                   extra_args=[f"--seed", str(seed), "--device.taxi.dispatch-algorithm", "traci"]),
+            reset_fn=make_reset_fn(
+                SUMO_CFG,
+                use_gui=False,
+                extra_args=extra_args,
+                remote_port=SUMO_PORT,
+            ),
             k_max=K_max,
             vicinity_m=VICINITY_M,
             completion_mode="dropoff",
