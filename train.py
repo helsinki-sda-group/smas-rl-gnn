@@ -45,7 +45,7 @@ R = 5           # number of robots (taxis) expected. # should match to taxis.rou
 K_max = 3        # candidates per robot
 N_max = 16        # max nodes per ego-graph (robot + tasks in its neighborhood)
 E_max = 64        # max edges per ego-graph
-F = 9            # node feature dimension (robot node and task node should have the same dimensionality, padding is applied)
+F = 11           # node feature dimension (robot node and task node should have the same dimensionality, padding is applied)
 G = 0             # global stats dim
 
 VICINITY_M = 2000.0

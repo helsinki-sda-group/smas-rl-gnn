@@ -80,7 +80,7 @@ def main():
     K_max = 3       # candidates per robot
     N_max = 16      # max nodes per ego-graph
     E_max = 64      # max edges per ego-graph
-    F = 9           # node feature dimension
+    F = 11          # node feature dimension
     G = 0           # global stats dim
 
     VICINITY_M = 2000.0
