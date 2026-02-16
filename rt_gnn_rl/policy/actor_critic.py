@@ -179,7 +179,8 @@ class EgoActorCritic(nn.Module):
             
             if cand_i.numel() > 0 and scores_i.numel() > 0:
                 raw_logits = scores_i[cand_i]
-                li = torch.tanh(raw_logits) * 5.0         # logits in [-5, +5]
+                li = raw_logits
+                # li = torch.tanh(raw_logits) * 5.0         # logits in [-5, +5]
             else:
                 li = torch.empty(0, device=device)
 

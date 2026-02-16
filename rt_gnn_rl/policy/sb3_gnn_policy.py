@@ -91,13 +91,13 @@ class RTGNNPolicy(ActorCriticPolicy):
         # self.noop_logit = nn.Parameter(th.tensor(-0.5))
 
         # === NEW: temperature to soften logits (no gradient needed) ===
-        self.logit_temperature: float = 5.0 
+        self.logit_temperature: float = 1.0 
 
         # --- Ensure GNN + NOOP parameters are optimized by PPO's optimizer ---
         # At this point, super().__init__ has already created `self.optimizer`
         # using the base policy parameters. We must explicitly add the new
         # GNN parameters and the NOOP logit to the optimizer param groups.
-        extra_params = list(self.gnn_ac.parameters()) + [self.noop_logit]
+        extra_params = list(self.gnn_ac.parameters()) # + [self.noop_logit]
         # Avoid adding empty groups in case of weird configs
         if len(extra_params) > 0:
             self.optimizer.add_param_group({"params": extra_params})
