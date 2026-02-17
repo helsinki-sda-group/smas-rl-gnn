@@ -153,9 +153,9 @@ def logit_metrics_to_string(metrics: LogitEpisodeMetrics) -> str:
     )
 
 
-def ensure_logit_metrics_log(log_path: str) -> None:
+def ensure_logit_metrics_log(log_path: str, overwrite: bool = False) -> None:
     """Ensure the logit metrics log file exists with proper header."""
-    if not os.path.exists(log_path):
+    if overwrite or not os.path.exists(log_path):
         with open(log_path, 'w') as f:
             f.write(get_logit_metrics_header() + "\n")
 

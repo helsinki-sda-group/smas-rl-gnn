@@ -173,6 +173,10 @@ metrics_log_path = (
     f"training_metrics_v{int(VICINITY_M)}_ms{MAX_STEPS}_mwd{int(MAX_WAIT_DELAY_S)}_"
     f"mtd{int(MAX_TRAVEL_DELAY_S)}_cap{MAX_ROBOT_CAPACITY}.log"
 )
+logit_metrics_log_path = (
+    f"training_logit_metrics_v{int(VICINITY_M)}_ms{MAX_STEPS}_mwd{int(MAX_WAIT_DELAY_S)}_"
+    f"mtd{int(MAX_TRAVEL_DELAY_S)}_cap{MAX_ROBOT_CAPACITY}.log"
+)
 
 # Directory to save models after each rollout
 model_save_dir = "runs/rp_gnn_debug/!saved_models"
@@ -181,6 +185,7 @@ callback = RPLoggerCallback(
     rp_logger,
     controller,
     metrics_log_path=metrics_log_path,
+    logit_metrics_log_path=logit_metrics_log_path,
     num_robots=R,
     reset_fn=reset_fn,  # Pass reset_fn to get current seed
     save_model_dir=model_save_dir,  # Enable model saving after each rollout

@@ -9,14 +9,22 @@ from utils.metrics_calculator import (
     append_metrics_log,
     ensure_metrics_log,
 )
+from utils.logit_metrics_logger import (
+    compute_logit_step_metrics,
+    aggregate_episode_logit_metrics,
+    append_logit_metrics_log,
+    ensure_logit_metrics_log,
+)
 
 class RPLoggerCallback(BaseCallback):
     def __init__(self, rp_logger, controller, verbose: int = 0, metrics_log_path: str | None = None,
-                 num_robots: int | None = None, seed: int = 0, reset_fn = None, save_model_dir: str | None = None):
+                 num_robots: int | None = None, seed: int = 0, reset_fn = None, save_model_dir: str | None = None,
+                 logit_metrics_log_path: str | None = None):
         super().__init__(verbose)
         self.rp_logger = rp_logger                # RidepoolLogger
         self.controller = controller              # RLControllerAdapter
         self.metrics_log_path = metrics_log_path
+        self.logit_metrics_log_path = logit_metrics_log_path
         self.num_robots = num_robots
         self.seed = seed
         self.reset_fn = reset_fn  # Optional: RotatingSeedResetFn for dynamic seeds
@@ -24,10 +32,13 @@ class RPLoggerCallback(BaseCallback):
         self.ep_idx = 0
         self.sum_reward = 0.0
         self.steps_in_ep = 0
+        self.logit_step_metrics = []
 
     def _on_training_start(self) -> None:
         if self.metrics_log_path:
             ensure_metrics_log(self.metrics_log_path, overwrite=True)
+        if self.logit_metrics_log_path:
+            ensure_logit_metrics_log(self.logit_metrics_log_path, overwrite=True)
         
         # Create save directory if specified
         if self.save_model_dir:
@@ -59,6 +70,35 @@ class RPLoggerCallback(BaseCallback):
         if rews is not None:
             self.sum_reward += float(np.sum(rews))
         self.steps_in_ep += 1
+
+        if self.logit_metrics_log_path:
+            obs = self.locals.get("new_obs", None)
+            if obs is None:
+                obs = self.locals.get("obs", None)
+            if obs is not None:
+                try:
+                    import torch as th
+                    with th.no_grad():
+                        obs_tensor, _ = self.model.policy.obs_to_tensor(obs)
+                        _ = self.model.policy.extract_features(
+                            obs_tensor,
+                            features_extractor=self.model.policy.features_extractor,
+                        )
+                        obs_dict_b = self.model.policy.features_extractor.last_obs
+                        logits_k, _ = self.model.policy._build_batch_outputs(obs_dict_b)
+                        mask_k = obs_dict_b["cand_mask"]
+                        logits, mask = self.model.policy._append_noop(logits_k, mask_k)
+
+                        logits_np = logits.squeeze(0).detach().cpu().numpy()
+                        mask_np = mask.squeeze(0).detach().cpu().numpy()
+                        noop_logit_value = float(self.model.policy.noop_logit.item())
+
+                        step_metrics = compute_logit_step_metrics(logits_np, mask_np, noop_logit_value)
+                        step_metrics.step = self.steps_in_ep - 1
+                        self.logit_step_metrics.append(step_metrics)
+                except Exception as e:
+                    if self.verbose > 0:
+                        print(f"[WARN] Could not capture logit metrics: {e}")
 
         # detect episode end from dones
         dones = self.locals.get("dones", None)
@@ -96,9 +136,21 @@ class RPLoggerCallback(BaseCallback):
                 if hasattr(metrics, '__dict__'):
                     metrics.ts = getattr(self, 'num_timesteps', 0)
                 append_metrics_log(self.metrics_log_path, metrics)
+            if self.logit_metrics_log_path:
+                current_seed = self.seed
+                if self.reset_fn and hasattr(self.reset_fn, 'get_current_seed'):
+                    current_seed = self.reset_fn.get_current_seed()
+                logit_metrics = aggregate_episode_logit_metrics(
+                    self.logit_step_metrics,
+                    policy="train",
+                    seed=current_seed,
+                    ts=getattr(self, 'num_timesteps', 0),
+                )
+                append_logit_metrics_log(self.logit_metrics_log_path, logit_metrics)
             self.ep_idx += 1
             self.sum_reward = 0.0
             self.steps_in_ep = 0
+            self.logit_step_metrics = []
         return True
 
     def _on_training_end(self) -> None:
