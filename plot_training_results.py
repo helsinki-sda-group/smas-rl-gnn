@@ -169,15 +169,15 @@ def plot_reward_components(df, output_file='reward_components.png'):
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     
-    # ── Middleware penalty ──────────────────────────────────────────────────
+    # ── Deadline penalty ──────────────────────────────────────────────────
     ax = fig.add_subplot(gs[1, 1])
     ax.set_facecolor('#fafafa')
     #ax.plot(eps, mdl, 'o', markersize=scatter_size//2, alpha=scatter_alpha, color='#e74c3c')
     ax.plot(eps, ma(mdl, 20), lw=2.5, color='#e74c3c', alpha=0.9)
     ax.axhline(0, color='black', lw=1, alpha=0.5)
     ax.axhline(mdl.mean(), color='#c0392b', lw=2, ls='--', alpha=0.6)
-    ax.set_ylabel('Middleware Penalty', fontsize=10, fontweight='bold')
-    ax.set_title(f'Middleware (mean: {mdl.mean():.2f})', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Deadline Penalty', fontsize=10, fontweight='bold')
+    ax.set_title(f'Deadline Penalty (mean: {mdl.mean():.2f})', fontsize=11, fontweight='bold')
     ax.grid(alpha=0.25)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -202,7 +202,7 @@ def plot_reward_components(df, output_file='reward_components.png'):
     
     baseline = np.zeros(len(eps))
     ax.fill_between(eps, baseline, baseline + mdl,
-                    color='#e74c3c', alpha=0.4, label='Middleware')
+                    color='#e74c3c', alpha=0.4, label='Deadline')
     ax.fill_between(eps, baseline + mdl, baseline + mdl + wait,
                     color='#f39c12', alpha=0.4, label='Wait')
     ax.fill_between(eps, baseline + mdl + wait, baseline + mdl + wait + comp,
@@ -277,13 +277,15 @@ def plot_ppo_metrics(train_df, output_file='ppo_metrics.png'):
     ax = fig.add_subplot(gs[1, 0])
     ax.set_facecolor('#fafafa')
     
-    ax.axhspan(-10, 0, alpha=0.08, color='red')
+    ax.axhspan(-0.25, 0, alpha=0.08, color='red')
     ax.axhspan(0, 0.5, alpha=0.08, color='gold')
     ax.axhspan(0.5, 1, alpha=0.08, color='green')
     
     ax.plot(iters, ev, 'o-', lw=2, markersize=marker_size, color='#e74c3c', alpha=0.7)
     ax.axhline(0, color='black', lw=1, alpha=0.5)
     ax.axhline(0.5, color='green', lw=1.5, ls='--', alpha=0.5)
+
+    ax.set_ylim(-0.25, 1)
     
     ax.set_xlabel('Iteration', fontsize=11, fontweight='bold')
     ax.set_ylabel('Explained Variance', fontsize=10, fontweight='bold')
