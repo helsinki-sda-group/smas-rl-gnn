@@ -158,6 +158,8 @@ class EgoActorCritic(nn.Module):
 
 
     def forward(self, obs):
+        # Convert padded obs (x is [R, N_max, F], edge_index is [R, 2, E_max], etc.) 
+        # into ragged lists: x_list[i] is [n_i, F], ei_list[i] is [2, e_i], cand_loc_idx[i] is [k_i]
         x_list, ei_list, cand_loc_idx, R = self._build_graph_lists(obs)
         K_max = obs["cand_mask"].shape[1]
         device = obs["x"].device
@@ -167,8 +169,11 @@ class EgoActorCritic(nn.Module):
         #scores = self.actor_head(h_a).squeeze(-1)                      # [sum_nodes]
 
          # === Actor (with normalization) ===
+        # Assume that we have 3 ego graphs with 2, 3, and 1 nodes respectively. 
+        # Then h_a is [6, H] and batch_a.batch is [6] with values [0,0,1,1,1,2].
         h_a, batch_a = self.enc_actor.encode_graphs(x_list, ei_list)   # [sum_nodes, H]
-        h_a = self.actor_norm(h_a)                                     # NEW
+        h_a = self.actor_norm(h_a)                                     # normalize within one embedding vector
+        # score is a preference score for each node, but we will only use the scores of the candidate nodes for action selection
         scores = self.actor_head(h_a).squeeze(-1)                      # [sum_nodes]
 
         logits_list: List[torch.Tensor] = []
@@ -179,8 +184,9 @@ class EgoActorCritic(nn.Module):
             
             if cand_i.numel() > 0 and scores_i.numel() > 0:
                 raw_logits = scores_i[cand_i]
+                #li = torch.tanh(raw_logits) * 5.0         # logits in [-5, +5]
                 li = raw_logits
-                # li = torch.tanh(raw_logits) * 5.0         # logits in [-5, +5]
+                # li = (raw_logits - raw_logits.mean()).clamp(-10,10)  # normalize logits to have mean 0 and be in a reasonable range
             else:
                 li = torch.empty(0, device=device)
 
