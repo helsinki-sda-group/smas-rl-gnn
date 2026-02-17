@@ -64,7 +64,7 @@ for seed in SEEDS[:NUM_SEEDS]:
     print(f"{'='*80}")
     
     extra_args = [f"--seed", str(seed), "--device.taxi.dispatch-algorithm", "traci"]
-    traci = start_sumo(SUMO_CFG, use_gui=False, extra_args=extra_args, remote_port=SUMO_PORT)
+    traci = start_sumo(SUMO_CFG, use_gui=USE_GUI, extra_args=extra_args, remote_port=SUMO_PORT)
 
     # Policy loop moved here for per-policy logger/env
     for policy_name in POLICIES:
