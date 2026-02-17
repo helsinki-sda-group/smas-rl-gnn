@@ -56,6 +56,7 @@ def _run_single_eval_episode(
     port: int,
     use_gui: bool,
     deterministic: bool,
+    sorted_candidates: bool,
 ) -> str:
     eval_conn = start_sumo(
         sumo_cfg,
@@ -81,6 +82,7 @@ def _run_single_eval_episode(
             reset_fn=reset_fn,
             k_max=k_max,
             vicinity_m=vicinity_m,
+            sorted_candidates=sorted_candidates,
             completion_mode="dropoff",
             max_steps=max_steps,
             min_episode_steps=min_episode_steps,
@@ -100,7 +102,7 @@ def _run_single_eval_episode(
             K_max=k_max,
             N_max=16,
             E_max=64,
-            F=9,
+            F=11,
             G=0,
             feature_fn=feature_fn,
             global_stats_fn=None,
@@ -179,6 +181,7 @@ def _eval_model(
     port_base: int,
     deterministic: bool,
     device: str,
+    sorted_candidates: bool,
 ) -> None:
     run_name = model_path.parent.name if model_path.name == "model.zip" else model_path.stem
     run_dir = out_base_dir / f"holdout_{run_name}"
@@ -220,6 +223,7 @@ def _eval_model(
             port=port_base + idx,
             use_gui=use_gui,
             deterministic=deterministic,
+            sorted_candidates=sorted_candidates,
         )
 
         metrics = compute_episode_metrics_from_logs(
@@ -262,6 +266,7 @@ def main() -> None:
     parser.add_argument("--decision-dt", type=int, default=60)
     parser.add_argument("--port-base", type=int, default=8816)
     parser.add_argument("--deterministic", action="store_true", help="Use deterministic policy actions.")
+    parser.add_argument("--sorted", action="store_true", help="Sort candidates by pickup distance (default: randomized)")
     parser.add_argument("--device", default="auto")
 
     args = parser.parse_args()
@@ -293,6 +298,7 @@ def main() -> None:
             decision_dt=args.decision_dt,
             port_base=args.port_base,
             deterministic=args.deterministic,
+            sorted_candidates=args.sorted,
             device=args.device,
         )
 

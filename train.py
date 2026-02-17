@@ -19,6 +19,7 @@ import sys
 
 parser = argparse.ArgumentParser(description="Train GNN PPO with SUMO")
 parser.add_argument("--sumoport", type=int, default=None, help="SUMO remote port (default: SUMO default)")
+parser.add_argument("--sorted", action="store_true", help="Sort candidates by pickup distance (default: randomized)")
 args = parser.parse_args()
 SUMO_PORT = args.sumoport
 
@@ -114,6 +115,7 @@ controller = RLControllerAdapter(
     reset_fn=reset_fn,  # Use rotating seed reset function
     k_max=K_max,
     vicinity_m=VICINITY_M,      # vicinity in meters
+    sorted_candidates=args.sorted,
     completion_mode="dropoff", # task is marked as completed at dropoff
     max_steps=MAX_STEPS,
     min_episode_steps = 100,

@@ -46,6 +46,7 @@ class RLControllerAdapter:
         *,
         k_max: int = 8,
         vicinity_m: float = 2_000.0,
+        sorted_candidates: bool = False,
         max_steps: Optional[int] = None,
         min_episode_steps: int = 0,            # warmup; don't allow done before this many steps
         idle_patience_steps:int = 600,       # how long whole-fleet idle must persist
@@ -65,6 +66,7 @@ class RLControllerAdapter:
             sumo: the TraCI handle/module (usually `traci`).
             k_max: cap on candidates per robot.
             vicinity_m: maximum road-network distance (meters) robot→task pickup to be a valid candidate.
+            sorted_candidates: if True, candidates are sorted by pickup distance; if False, randomized.
             max_steps: hard episode max length.
             min_episode_steps: minimum episode length.
             idle_patience_steps: end if whole fleet is idle for that long
@@ -82,6 +84,7 @@ class RLControllerAdapter:
         self.sumo = sumo
         self.k_max = int(k_max)
         self.vicinity_m = float(vicinity_m)
+        self.sorted_candidates = bool(sorted_candidates)
         self.max_steps = max_steps
         self.completion_mode = completion_mode.lower().strip()
         assert self.completion_mode in {"pickup", "dropoff"}, "completion_mode must be 'pickup' or 'dropoff'"
@@ -532,8 +535,8 @@ class RLControllerAdapter:
 
     def get_tasks_and_candidate_lists(self, K: Optional[int] = None) -> tuple[List[Task], List[List[int]]]:
         """
-        For each robot, return viable task list and list of candidates - up to K nearest tasks by pickup distance,
-        filtered by road-network distance <= vicinity_m.
+        For each robot, return viable task list and list of candidates - up to K tasks within vicinity_m,
+        randomized by default to avoid ordering leakage (or sorted by pickup distance if enabled).
         Output indices reference viable task list.
         """
         if not self._last_robot_ids:
@@ -574,7 +577,11 @@ class RLControllerAdapter:
                 d = self._road_distance(r_edge, t.fromEdge)
                 if np.isfinite(d) and d <= self.vicinity_m:
                     dist_idx.append((float(d), j))
-            dist_idx.sort(key=lambda x: x[0])
+            if dist_idx:
+                if self.sorted_candidates:
+                    dist_idx.sort(key=lambda x: x[0])
+                else:
+                    self._rng.shuffle(dist_idx)
             cand_lists.append([j for _, j in dist_idx[:K]])
         
    

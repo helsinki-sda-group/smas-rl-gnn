@@ -145,6 +145,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             reset_fn=reset_fn,
             k_max=config['k_max'],
             vicinity_m=config['vicinity_m'],
+            sorted_candidates=config.get('sorted_candidates', False),
             completion_mode="dropoff",
             max_steps=config['max_steps'],
             min_episode_steps=config['min_episode_steps'],
@@ -474,6 +475,8 @@ def main():
     parser.add_argument('--sumoport', type=int, default=None,
                         help='Base SUMO remote port (default: 8900)')
     parser.add_argument('--gui', action='store_true', help='Enable SUMO GUI (default: disabled)')
+    parser.add_argument('--sorted', action='store_true',
+                        help='Sort candidates by pickup distance (default: randomized)')
     parser.add_argument('--print-steps', action='store_true',
                         help='Print observation, logits, and action for each env step')
     parser.add_argument('--deterministic', action='store_true',
@@ -483,7 +486,7 @@ def main():
     # Seeds
     TRAIN_SEEDS = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
                    1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000]
-    EVAL_SEEDS = [42]#, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
+    EVAL_SEEDS = [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
     
     if args.seeds == 'train':
         seeds_to_eval = TRAIN_SEEDS
@@ -500,7 +503,7 @@ def main():
         'k_max': 3,
         'N_max': 16,
         'E_max': 64,
-        'F': 9,
+        'F': 11,
         'vicinity_m': 2000.0,
         'max_steps': 1200,
         'max_wait_delay_s': 240.0,
@@ -512,6 +515,7 @@ def main():
         'eval_run_dir': os.path.join(args.output_dir, 'evaluation_runs'),
         'print_steps': args.print_steps,
         'deterministic': args.deterministic,
+        'sorted_candidates': args.sorted,
     }
     
     # Create output directories
