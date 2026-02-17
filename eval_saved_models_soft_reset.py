@@ -353,6 +353,8 @@ def main():
                         help='Print observation, logits, and action for each env step')
     parser.add_argument('--deterministic', action='store_true',
                         help='Use deterministic=True for model.predict')
+    parser.add_argument('--sorted', action='store_true',
+                        help='Sort candidates by pickup distance (default: randomized)')
     args = parser.parse_args()
     
     # Seeds
@@ -375,7 +377,7 @@ def main():
         'k_max': 3,
         'N_max': 16,
         'E_max': 64,
-        'F': 9,
+        'F': 11,
         'vicinity_m': 2000.0,
         'max_steps': 1200,
         'max_wait_delay_s': 240.0,
@@ -479,6 +481,7 @@ def main():
         reset_fn=reset_fn,
         k_max=config['k_max'],
         vicinity_m=config['vicinity_m'],
+        sorted_candidates=config.get('sorted_candidates', False),
         completion_mode="dropoff",
         max_steps=config['max_steps'],
         min_episode_steps=config['min_episode_steps'],
@@ -528,7 +531,7 @@ def main():
             model = PPO.load(model_path)
         except Exception as e:
             print(f"[ERROR] Failed to load model: {e}")
-            continue
+            config = {
         
         # Run multiple evaluation episodes for this model
         for run_idx in range(args.eval_runs):
@@ -547,6 +550,7 @@ def main():
                 done = False
                 step_idx = 0
                 
+                'sorted_candidates': args.sorted,
                 while not done:
                     action, _states = model.predict(obs, deterministic=config.get('deterministic', False))
                     if config.get('print_steps', False):

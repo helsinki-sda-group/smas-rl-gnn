@@ -19,6 +19,7 @@ from utils.metrics_calculator import (
 
 parser = argparse.ArgumentParser(description="Evaluate baseline policies")
 parser.add_argument("--sumoport", type=int, default=None, help="SUMO remote port (default: SUMO default)")
+parser.add_argument("--sorted", action="store_true", help="Sort candidates by pickup distance (default: randomized)")
 args = parser.parse_args()
 SUMO_PORT = args.sumoport
 
@@ -88,6 +89,7 @@ for seed in SEEDS[:NUM_SEEDS]:
             ),
             k_max=K_max,
             vicinity_m=VICINITY_M,
+            sorted_candidates=args.sorted,
             completion_mode="dropoff",
             max_steps=MAX_STEPS,
             min_episode_steps=100,
