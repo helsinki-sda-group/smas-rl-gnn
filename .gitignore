@@ -13,3 +13,4 @@ settings.json
 tripinfo.xml
 *.zip
 .vscode/settings.json
+configs/rp_gnn.yaml
