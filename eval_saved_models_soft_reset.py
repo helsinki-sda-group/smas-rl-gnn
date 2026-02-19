@@ -334,6 +334,8 @@ def plot_evaluation_results(results_df, output_dir, ma_window=10):
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate all saved models with soft reset (like training)')
+    parser.add_argument('--config', type=str, default='configs/rp_gnn.yaml',
+                        help='Path to config YAML')
     parser.add_argument('--eval-runs', type=int, default=3,
                         help='Number of evaluation runs per seed (default: 3)')
     parser.add_argument('--ma-window', type=int, default=10,
@@ -355,12 +357,14 @@ def main():
                         help='Use deterministic=True for model.predict')
     parser.add_argument('--sorted', action='store_true',
                         help='Sort candidates by pickup distance (default: randomized)')
-    args = parser.parse_args()
+    from utils.config import Config
+    cfg = Config(parser)
+    opt = cfg.opt
+    args = opt
     
     # Seeds
-    TRAIN_SEEDS = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
-                   1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000]
-    EVAL_SEEDS = [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
+    TRAIN_SEEDS = list(opt.seeds.train)
+    EVAL_SEEDS = list(opt.seeds.eval)
     
     if args.seeds == 'train':
         seeds_to_eval = TRAIN_SEEDS
@@ -371,22 +375,23 @@ def main():
     
     # Configuration (matching training setup)
     config = {
-        'sumo_cfg': 'configs/small_net.sumocfg',
-        'use_gui': args.gui,
-        'R': 5,
-        'k_max': 3,
-        'N_max': 16,
-        'E_max': 64,
-        'F': 11,
-        'vicinity_m': 2000.0,
-        'max_steps': 1200,
-        'max_wait_delay_s': 240.0,
-        'max_travel_delay_s': 900.0,
-        'max_robot_capacity': 2,
-        'decision_dt': 60,
-        'min_episode_steps': 100,
-        'print_steps': args.print_steps,
-        'deterministic': args.deterministic,
+        'sumo_cfg': opt.env.sumo_cfg,
+        'use_gui': bool(opt.env.use_gui) or bool(args.gui),
+        'R': int(opt.env.R),
+        'k_max': int(opt.env.K_max),
+        'N_max': int(opt.env.N_max),
+        'E_max': int(opt.env.E_max),
+        'F': int(opt.env.F),
+        'vicinity_m': float(opt.env.vicinity_m),
+        'max_steps': int(opt.env.max_steps),
+        'max_wait_delay_s': float(opt.env.max_wait_delay_s),
+        'max_travel_delay_s': float(opt.env.max_travel_delay_s),
+        'max_robot_capacity': int(opt.env.max_robot_capacity),
+        'decision_dt': int(opt.env.decision_dt),
+        'min_episode_steps': int(opt.env.min_episode_steps),
+        'print_steps': bool(args.print_steps),
+        'deterministic': bool(args.deterministic),
+        'sorted_candidates': bool(args.sorted) or bool(opt.env.sorted_candidates),
     }
     
     # Create output directories

@@ -44,6 +44,8 @@ class RTGNNPolicy(ActorCriticPolicy):
         in_dim: int,
         hidden: int,
         k_max: int,
+        logit_temperature: float = 5.0,
+        noop_init: float = -1.0,
         backbone: str = "sage",
         critic_aggregation: str = "joint_mean",
         **kwargs,
@@ -87,11 +89,11 @@ class RTGNNPolicy(ActorCriticPolicy):
         )
 
         # # Single learnable NO-OP logit shared across robots and batch.
-        self.noop_logit = nn.Parameter(th.tensor(-1.0))
+        self.noop_logit = nn.Parameter(th.tensor(noop_init))
         # self.noop_logit = nn.Parameter(th.tensor(-0.5))
 
         # === NEW: temperature to soften logits (no gradient needed) ===
-        self.logit_temperature: float = 1.0 
+        self.logit_temperature = float(logit_temperature)
 
         # --- Ensure GNN + NOOP parameters are optimized by PPO's optimizer ---
         # At this point, super().__init__ has already created `self.optimizer`

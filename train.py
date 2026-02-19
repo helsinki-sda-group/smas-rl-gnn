@@ -18,10 +18,13 @@ from utils.feature_fns import make_feature_fn
 import sys
 
 parser = argparse.ArgumentParser(description="Train GNN PPO with SUMO")
+parser.add_argument("--config", type=str, default="configs/rp_gnn.yaml", help="Path to config YAML")
 parser.add_argument("--sumoport", type=int, default=None, help="SUMO remote port (default: SUMO default)")
 parser.add_argument("--sorted", action="store_true", help="Sort candidates by pickup distance (default: randomized)")
-args = parser.parse_args()
-SUMO_PORT = args.sumoport
+from utils.config import Config
+cfg = Config(parser)
+opt = cfg.opt
+SUMO_PORT = opt.sumoport
 
 class Tee(object):
     def __init__(self, filename):
@@ -40,24 +43,23 @@ class Tee(object):
 Tee("train_output.txt")
 
 # 1) SUMO/controller setup (example; adapt to your config)
-SUMO_CFG = "configs/small_net.sumocfg"
-USE_GUI = False
-R = 5           # number of robots (taxis) expected. # should match to taxis.rou.xml
-K_max = 3        # candidates per robot
-N_max = 16        # max nodes per ego-graph (robot + tasks in its neighborhood)
-E_max = 64        # max edges per ego-graph
-F = 11           # node feature dimension (robot node and task node should have the same dimensionality, padding is applied)
-G = 0             # global stats dim
+SUMO_CFG = opt.env.sumo_cfg
+USE_GUI = bool(opt.env.use_gui)
+R = int(opt.env.R)
+K_max = int(opt.env.K_max)
+N_max = int(opt.env.N_max)
+E_max = int(opt.env.E_max)
+F = int(opt.env.F)
+G = int(opt.env.G)
 
-VICINITY_M = 2000.0
-MAX_STEPS = 1200
-MAX_WAIT_DELAY_S = 240.0
-MAX_TRAVEL_DELAY_S = 900.0
-MAX_ROBOT_CAPACITY = 2
+VICINITY_M = float(opt.env.vicinity_m)
+MAX_STEPS = int(opt.env.max_steps)
+MAX_WAIT_DELAY_S = float(opt.env.max_wait_delay_s)
+MAX_TRAVEL_DELAY_S = float(opt.env.max_travel_delay_s)
+MAX_ROBOT_CAPACITY = int(opt.env.max_robot_capacity)
 
 # Training seeds - different from evaluation seeds [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
-TRAIN_SEEDS = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
-               1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000]
+TRAIN_SEEDS = list(opt.seeds.train)
 
 # Initial seed for first episode
 SEED = TRAIN_SEEDS[0]
@@ -95,17 +97,17 @@ class RandomSeedResetFn:
         return self.current_seed
 
 # Create rotating reset function
-reset_fn = RandomSeedResetFn(SUMO_CFG, use_gui=False, seeds=TRAIN_SEEDS, random_seed=42, sumo_port=SUMO_PORT)
+reset_fn = RandomSeedResetFn(SUMO_CFG, use_gui=USE_GUI, seeds=TRAIN_SEEDS, random_seed=42, sumo_port=SUMO_PORT)
 
 extra_args = ["--seed", str(SEED), "--device.taxi.dispatch-algorithm", "traci"]
-traci = start_sumo(SUMO_CFG, use_gui=False, extra_args=extra_args, remote_port=SUMO_PORT)
+traci = start_sumo(SUMO_CFG, use_gui=USE_GUI, extra_args=extra_args, remote_port=SUMO_PORT)
 
 rp_logger = RidepoolLogger(
     RidepoolLogConfig(
-        out_dir="runs",
-        run_name="rp_gnn_debug",        # run dir will be: runs/rp_gnn_debug
-        erase_run_dir_on_start=True,    # <-- nukes runs/rp_gnn_debug at startup
-        erase_episode_dir_on_start=True,# optional: also clear episode_XXXX on start
+        out_dir=str(opt.logging.out_dir),
+        run_name=str(opt.logging.run_name),        # run dir will be: runs/rp_gnn_debug
+        erase_run_dir_on_start=True,
+        erase_episode_dir_on_start=True,
         console_debug=True
     )
 )
@@ -115,7 +117,7 @@ controller = RLControllerAdapter(
     reset_fn=reset_fn,  # Use rotating seed reset function
     k_max=K_max,
     vicinity_m=VICINITY_M,      # vicinity in meters
-    sorted_candidates=args.sorted,
+    sorted_candidates=bool(opt.sorted),
     completion_mode="dropoff", # task is marked as completed at dropoff
     max_steps=MAX_STEPS,
     min_episode_steps = 100,
@@ -140,33 +142,39 @@ env = RidepoolRTEnv(
     F=F, G=0,
     feature_fn=feature_fn,
     global_stats_fn=None, 
-    decision_dt=60,  
+    decision_dt=int(opt.env.decision_dt),  
 )
 env = Monitor(env, filename="monitor.csv", info_keywords=("episode_reward",))
 
 # 4) SB3 PPO with custom GNN policy
-policy_kwargs = dict(in_dim=F, hidden=128, k_max=K_max)
+policy_kwargs = dict(
+    in_dim=F,
+    hidden=int(opt.ppo.policy_kwargs.hidden),
+    k_max=int(opt.ppo.policy_kwargs.k_max),
+    logit_temperature=float(opt.ppo.policy_kwargs.logit_temperature),
+    noop_init=float(opt.ppo.policy_kwargs.noop_init),
+)
 model = PPO(
 
     RTGNNPolicy,
     env,
     policy_kwargs=policy_kwargs,
-    n_steps=256,
-    batch_size=64,
-    learning_rate=3e-4,
-    gamma=0.99, # was 0.95
-    clip_range=0.2,
-    clip_range_vf=None,
-    vf_coef=0.35,
-    ent_coef=0.003, # was 0.03
-    gae_lambda=0.95, # was 0.9
-    n_epochs=5,
+    n_steps=int(opt.ppo.n_steps),
+    batch_size=int(opt.ppo.batch_size),
+    learning_rate=float(opt.ppo.learning_rate),
+    gamma=float(opt.ppo.gamma),
+    clip_range=float(opt.ppo.clip_range),
+    clip_range_vf=opt.ppo.clip_range_vf,
+    vf_coef=float(opt.ppo.vf_coef),
+    ent_coef=float(opt.ppo.ent_coef),
+    gae_lambda=float(opt.ppo.gae_lambda),
+    n_epochs=int(opt.ppo.n_epochs),
     verbose=1
 )
 
 
 print("Initial noop_logit:", model.policy.noop_logit.item())
-model.policy.noop_logit.data.fill_(-1.0)
+model.policy.noop_logit.data.fill_(float(opt.ppo.policy_kwargs.noop_init))
 print("Forced noop_logit:", model.policy.noop_logit.item())
 
 model.save("init_model/model_episode0_ts0.zip")
@@ -181,7 +189,7 @@ logit_metrics_log_path = (
 )
 
 # Directory to save models after each rollout
-model_save_dir = "runs/rp_gnn_debug/!saved_models"
+model_save_dir = str(opt.logging.model_save_dir)
 
 callback = RPLoggerCallback(
     rp_logger,
@@ -193,5 +201,5 @@ callback = RPLoggerCallback(
     save_model_dir=model_save_dir,  # Enable model saving after each rollout
 )
 
-model.learn(total_timesteps=50_000, callback=callback)
+model.learn(total_timesteps=int(opt.ppo.total_timesteps), callback=callback)
 model.save("ppo_rp_gnn.zip")
