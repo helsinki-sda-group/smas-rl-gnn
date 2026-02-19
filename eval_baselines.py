@@ -33,7 +33,9 @@ R = int(opt.env.R)
 K_max = int(opt.env.K_max)
 N_max = int(opt.env.N_max)
 E_max = int(opt.env.E_max)
-F = int(opt.env.F)
+F = int(opt.features.base_dim)
+if bool(opt.features.use_xy_pickup):
+    F += 2
 G = int(opt.env.G)
 
 VICINITY_M = float(opt.env.vicinity_m)
@@ -104,7 +106,7 @@ for seed in SEEDS[:NUM_SEEDS]:
             logger=rp_logger,
             respect_sumo_end=True,
         )
-        feature_fn = make_feature_fn(controller)
+        feature_fn = make_feature_fn(controller, use_xy_pickup=bool(opt.features.use_xy_pickup))
 
         env = RidepoolRTEnv(
             controller,
