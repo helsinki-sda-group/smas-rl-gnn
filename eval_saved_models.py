@@ -284,6 +284,9 @@ def plot_evaluation_results(results_df, output_dir, ma_window=10):
     """Generate plots from evaluation results."""
     os.makedirs(output_dir, exist_ok=True)
     
+    fig, ax = plt.subplots(figsize=(12, 6), facecolor='#fafafa')
+    ax.set_facecolor('#fafafa')
+    
     # Group by timestep, averaging across all seeds and attempts
     grouped = results_df.groupby(['ts_idx'])['reward'].agg(['mean', 'std', 'count']).reset_index()
     
