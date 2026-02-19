@@ -92,7 +92,7 @@ for seed in SEEDS[:NUM_SEEDS]:
             ),
             k_max=K_max,
             vicinity_m=VICINITY_M,
-            sorted_candidates=bool(opt.sorted),
+            sorted_candidates=True,
             completion_mode="dropoff",
             max_steps=MAX_STEPS,
             min_episode_steps=100,
