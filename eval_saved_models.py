@@ -156,7 +156,11 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             logger=rp_logger,
         )
         
-        feature_fn = make_feature_fn(controller, use_xy_pickup=bool(config.get('use_xy_pickup', False)))
+        feature_fn = make_feature_fn(
+            controller,
+            use_xy_pickup=bool(config.get('use_xy_pickup', False)),
+            normalize_features=bool(config.get('normalize_features', False)),
+        )
         
         # Create environment
         env = RidepoolRTEnv(
@@ -517,7 +521,8 @@ def main():
         'N_max': int(opt.env.N_max),
         'E_max': int(opt.env.E_max),
         'F': feature_dim,
-            'use_xy_pickup': bool(opt.features.use_xy_pickup),
+        'use_xy_pickup': bool(opt.features.use_xy_pickup),
+        'normalize_features': bool(getattr(opt.features, "normalize_features", False)),
         'vicinity_m': float(opt.env.vicinity_m),
         'max_steps': int(opt.env.max_steps),
         'max_wait_delay_s': float(opt.env.max_wait_delay_s),

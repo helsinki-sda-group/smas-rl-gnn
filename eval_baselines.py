@@ -106,7 +106,11 @@ for seed in SEEDS[:NUM_SEEDS]:
             logger=rp_logger,
             respect_sumo_end=True,
         )
-        feature_fn = make_feature_fn(controller, use_xy_pickup=bool(opt.features.use_xy_pickup))
+        feature_fn = make_feature_fn(
+            controller,
+            use_xy_pickup=bool(opt.features.use_xy_pickup),
+            normalize_features=bool(getattr(opt.features, "normalize_features", False)),
+        )
 
         env = RidepoolRTEnv(
             controller,

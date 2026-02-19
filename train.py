@@ -130,7 +130,11 @@ controller = RLControllerAdapter(
     max_robot_capacity=MAX_ROBOT_CAPACITY, # should match to taxis.rou.xml
     logger= rp_logger,
 )
-feature_fn = make_feature_fn(controller, use_xy_pickup=bool(opt.features.use_xy_pickup))
+feature_fn = make_feature_fn(
+    controller,
+    use_xy_pickup=bool(opt.features.use_xy_pickup),
+    normalize_features=bool(getattr(opt.features, "normalize_features", False)),
+)
 
 # not implemented yet, will raise error for G > 0
 def global_stats_fn(world_state):
