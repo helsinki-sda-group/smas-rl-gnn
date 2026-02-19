@@ -853,6 +853,17 @@ class RLControllerAdapter:
                     owners[r] = rid_win
             owners.update(onboard_by_res)           # onboard has highest precedence
 
+            for res_id, rid_win in winners.items():
+                self._res_owner_by_res[res_id] = rid_win
+
+            for rid0 in robots:
+                seq0 = self._shadow_plan_by_robot.get(rid0, [])
+                if not seq0:
+                    continue
+                pruned = [r for r in seq0 if owners.get(r) == rid0]
+                if pruned != seq0:
+                    self._shadow_plan_by_robot[rid0] = pruned
+
             # track task assignment
             for rid, res_id in enumerate(chosen):
                 if res_id and rid < len(robots):
@@ -1505,17 +1516,28 @@ class RLControllerAdapter:
         cap = self._get_vehicle_capacity(rid)
         if cap <= 0:
             return 0
-        
+
         res_index = self._reservation_index()
         planned_unique = list(dict.fromkeys(self._shadow_plan_by_robot.get(rid, [])))
-        load = 0
+
+        planned_ids: set[str] = set()
         for r in planned_unique:
             obj = res_index.get(r)
             if obj is None:
                 continue
             if self._is_completed(obj):
                 continue
-            load += 1
+            planned_ids.add(r)
+
+        p2r = self._person_to_res_index(res_index)
+        onboard_ids = set(self._current_reservation_ids_onboard(rid, p2r))
+
+        if onboard_ids:
+            load = len(planned_ids | onboard_ids)
+        else:
+            onboard_count = len(self._get_current_customers(rid))
+            load = max(len(planned_ids), onboard_count)
+
         return max(0, cap - load)
 
 
@@ -1739,9 +1761,10 @@ class RLControllerAdapter:
 
             # Only log if not already logged (dropoffs are logged immediately)
             if not lifecycle.get("_logged", False):
-                log_data = {k: v for k, v in lifecycle.items() 
-                       if not k.startswith("_")}  # Skip _logged, _assignment_distance, etc.
-                self.logger.log_task_lifecycle(**lifecycle)
+              log_data = {k: v for k, v in lifecycle.items()
+                  if not k.startswith("_")}  # Skip _logged, _assignment_distance, etc.
+              self.logger.log_task_lifecycle(**log_data)
+              lifecycle["_logged"] = True
 
     def _normalize_task_id(self, task_id: str) -> str:
         """
