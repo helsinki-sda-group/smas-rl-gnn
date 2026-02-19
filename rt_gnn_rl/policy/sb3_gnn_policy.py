@@ -46,6 +46,7 @@ class RTGNNPolicy(ActorCriticPolicy):
         k_max: int,
         logit_temperature: float = 5.0,
         noop_init: float = -1.0,
+        freeze_noop_logit: bool = False,
         backbone: str = "sage",
         critic_aggregation: str = "joint_mean",
         **kwargs,
@@ -99,7 +100,9 @@ class RTGNNPolicy(ActorCriticPolicy):
         # At this point, super().__init__ has already created `self.optimizer`
         # using the base policy parameters. We must explicitly add the new
         # GNN parameters and the NOOP logit to the optimizer param groups.
-        extra_params = list(self.gnn_ac.parameters()) + [self.noop_logit]
+        extra_params = list(self.gnn_ac.parameters())
+        if not freeze_noop_logit:
+            extra_params.append(self.noop_logit)
         # Avoid adding empty groups in case of weird configs
         if len(extra_params) > 0:
             self.optimizer.add_param_group({"params": extra_params})

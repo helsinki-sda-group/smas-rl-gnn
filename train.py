@@ -159,6 +159,7 @@ policy_kwargs = dict(
     k_max=int(opt.ppo.policy_kwargs.k_max),
     logit_temperature=float(opt.ppo.policy_kwargs.logit_temperature),
     noop_init=float(opt.ppo.policy_kwargs.noop_init),
+    freeze_noop_logit=bool(getattr(opt.ppo.policy_kwargs, "freeze_noop_logit", False)),
 )
 model = PPO(
 
