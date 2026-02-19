@@ -1,0 +1,51 @@
+env:
+  sumo_cfg: configs/small_net.sumocfg
+  use_gui: false
+  R: 5
+  K_max: 3
+  N_max: 16
+  E_max: 64
+  F: 9
+  G: 0
+  vicinity_m: 2000.0
+  max_steps: 1200
+  min_episode_steps: 100
+  decision_dt: 60
+  max_wait_delay_s: 240.0
+  max_travel_delay_s: 900.0
+  max_robot_capacity: 2
+  sorted_candidates: false
+
+seeds:
+  train: [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000]
+  eval: [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
+
+ppo:
+  policy_kwargs:
+    hidden: 128
+    k_max: 3
+    logit_temperature: 5.0
+    noop_init: -1.0
+  n_steps: 256
+  batch_size: 64
+  learning_rate: 3e-4
+  gamma: 0.99
+  clip_range: 0.2
+  clip_range_vf: null
+  vf_coef: 0.35
+  ent_coef: 0.003
+  gae_lambda: 0.95
+  n_epochs: 5
+  total_timesteps: 50000
+
+logging:
+  run_name: rp_gnn_debug
+  out_dir: runs
+  model_save_dir: runs/rp_gnn_debug/!saved_models
+
+baselines:
+  policies: [random, greedy, unique]
+  num_seeds: 10
+
+sorted: false
+sumoport: 8813

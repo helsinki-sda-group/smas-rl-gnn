@@ -18,32 +18,35 @@ from utils.metrics_calculator import (
 )
 
 parser = argparse.ArgumentParser(description="Evaluate baseline policies")
+parser.add_argument("--config", type=str, default="configs/rp_gnn.yaml", help="Path to config YAML")
 parser.add_argument("--sumoport", type=int, default=None, help="SUMO remote port (default: SUMO default)")
 parser.add_argument("--sorted", action="store_true", help="Sort candidates by pickup distance (default: randomized)")
-args = parser.parse_args()
-SUMO_PORT = args.sumoport
+from utils.config import Config
+cfg = Config(parser)
+opt = cfg.opt
+SUMO_PORT = opt.sumoport
 
 # 1) SUMO/controller setup (example; adapt to your config)
-SUMO_CFG = "configs/small_net.sumocfg"
-USE_GUI = False
-R = 5           # number of robots (taxis) expected. # should match to taxis.rou.xml
-K_max = 3        # candidates per robot
-N_max = 16        # max nodes per ego-graph (robot + tasks in its neighborhood)
-E_max = 64        # max edges per ego-graph
-F = 9            # node feature dimension (robot node and task node should have the same dimensionality, padding is applied)
-G = 0             # global stats dim 
+SUMO_CFG = opt.env.sumo_cfg
+USE_GUI = bool(opt.env.use_gui)
+R = int(opt.env.R)
+K_max = int(opt.env.K_max)
+N_max = int(opt.env.N_max)
+E_max = int(opt.env.E_max)
+F = int(opt.env.F)
+G = int(opt.env.G)
 
-VICINITY_M = 2000.0
-MAX_STEPS = 1200
-MAX_WAIT_DELAY_S = 240.0
-MAX_TRAVEL_DELAY_S = 900.0
-MAX_ROBOT_CAPACITY = 2
+VICINITY_M = float(opt.env.vicinity_m)
+MAX_STEPS = int(opt.env.max_steps)
+MAX_WAIT_DELAY_S = float(opt.env.max_wait_delay_s)
+MAX_TRAVEL_DELAY_S = float(opt.env.max_travel_delay_s)
+MAX_ROBOT_CAPACITY = int(opt.env.max_robot_capacity)
 
-NUM_SEEDS = 10  # Number of seeds to use (first N from SEEDS list)
-SEEDS = [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
+NUM_SEEDS = int(opt.baselines.num_seeds)
+SEEDS = list(opt.seeds.eval)
 #SEEDS = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
                   # 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000]
-POLICIES = ["random", "greedy", "unique"]
+POLICIES = list(opt.baselines.policies)
 
 
 # Initialize metrics log file
@@ -83,13 +86,13 @@ for seed in SEEDS[:NUM_SEEDS]:
             sumo=traci,
             reset_fn=make_reset_fn(
                 SUMO_CFG,
-                use_gui=False,
+                use_gui=USE_GUI,
                 extra_args=extra_args,
                 remote_port=SUMO_PORT,
             ),
             k_max=K_max,
             vicinity_m=VICINITY_M,
-            sorted_candidates=args.sorted,
+            sorted_candidates=bool(opt.sorted),
             completion_mode="dropoff",
             max_steps=MAX_STEPS,
             min_episode_steps=100,
@@ -109,7 +112,7 @@ for seed in SEEDS[:NUM_SEEDS]:
             F=F, G=0,
             feature_fn=feature_fn,
             global_stats_fn=None,
-            decision_dt=60,
+            decision_dt=int(opt.env.decision_dt),
         )
 
         # ...existing code for NOOP, action functions, and episode run...

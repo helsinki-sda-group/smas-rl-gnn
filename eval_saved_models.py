@@ -145,7 +145,6 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             reset_fn=reset_fn,
             k_max=config['k_max'],
             vicinity_m=config['vicinity_m'],
-            sorted_candidates=config.get('sorted_candidates', False),
             completion_mode="dropoff",
             max_steps=config['max_steps'],
             min_episode_steps=config['min_episode_steps'],
@@ -220,7 +219,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             done = terminated or truncated
             ep_reward += reward
             step_idx += 1
-        
+
         # **FIX**: Flush logger files to ensure all data is written before extracting metrics
         if hasattr(rp_logger, '_files'):
             for f in rp_logger._files.values():
@@ -460,13 +459,15 @@ def plot_evaluation_results(results_df, output_dir, ma_window=10):
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate all saved models')
+    parser.add_argument('--config', type=str, default='configs/rp_gnn.yaml',
+                        help='Path to config YAML')
     parser.add_argument('--eval-runs', type=int, default=3,
                         help='Number of evaluation runs per seed (default: 3)')
     parser.add_argument('--ma-window', type=int, default=10,
                         help='Moving average window size (default: 10)')
     parser.add_argument('--model-sample', type=float, default=1.0,
                         help='Fraction of models to evaluate (default: 1.0 = all). 0.1 = every 10th model')
-    parser.add_argument('--seeds', type=str, default='both', choices=['train', 'eval', 'both'],
+    parser.add_argument('--seeds', dest='seed_set', type=str, default='both', choices=['train', 'eval', 'both'],
                         help='Which seeds to evaluate on (default: both)')
     parser.add_argument('--model-dir', type=str, default='runs/rp_gnn_debug/saved_models',
                         help='Directory containing model.zip files')
@@ -481,46 +482,51 @@ def main():
                         help='Print observation, logits, and action for each env step')
     parser.add_argument('--deterministic', action='store_true',
                         help='Use deterministic=True for model.predict')
-    args = parser.parse_args()
+    from utils.config import Config
+    cfg = Config(parser)
+    opt = cfg.opt
+    args = opt
     
     # Seeds
-    TRAIN_SEEDS = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
-                   1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000]
-    EVAL_SEEDS = [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
+    TRAIN_SEEDS = list(opt.seeds.train)
+    EVAL_SEEDS = list(opt.seeds.eval)
     
-    if args.seeds == 'train':
+    if args.seed_set == 'train':
         seeds_to_eval = TRAIN_SEEDS
-    elif args.seeds == 'eval':
+    elif args.seed_set == 'eval':
         seeds_to_eval = EVAL_SEEDS
     else:
         seeds_to_eval = TRAIN_SEEDS + EVAL_SEEDS
     
+    output_dir = str(getattr(args, "output_dir", "eval_results"))
+    model_dir = str(getattr(args, "model_dir", "runs/rp_gnn_debug/saved_models"))
+
     # Configuration
     config = {
-        'sumo_cfg': 'configs/small_net.sumocfg',
-        'use_gui': args.gui,
-        'R': 5,
-        'k_max': 3,
-        'N_max': 16,
-        'E_max': 64,
-        'F': 11,
-        'vicinity_m': 2000.0,
-        'max_steps': 1200,
-        'max_wait_delay_s': 240.0,
-        'max_travel_delay_s': 900.0,
-        'max_robot_capacity': 2,
-        'decision_dt': 60,
-        'min_episode_steps': 100,
-        'eval_runs': args.eval_runs,
-        'eval_run_dir': os.path.join(args.output_dir, 'evaluation_runs'),
-        'print_steps': args.print_steps,
-        'deterministic': args.deterministic,
-        'sorted_candidates': args.sorted,
+        'sumo_cfg': opt.env.sumo_cfg,
+        'use_gui': bool(opt.env.use_gui) or bool(getattr(args, "gui", False)),
+        'R': int(opt.env.R),
+        'k_max': int(opt.env.K_max),
+        'N_max': int(opt.env.N_max),
+        'E_max': int(opt.env.E_max),
+        'F': int(opt.env.F),
+        'vicinity_m': float(opt.env.vicinity_m),
+        'max_steps': int(opt.env.max_steps),
+        'max_wait_delay_s': float(opt.env.max_wait_delay_s),
+        'max_travel_delay_s': float(opt.env.max_travel_delay_s),
+        'max_robot_capacity': int(opt.env.max_robot_capacity),
+        'decision_dt': int(opt.env.decision_dt),
+        'min_episode_steps': int(opt.env.min_episode_steps),
+        'eval_runs': int(getattr(args, "eval_runs", 3)),
+        'eval_run_dir': os.path.join(output_dir, 'evaluation_runs'),
+        'print_steps': bool(getattr(args, "print_steps", False)),
+        'deterministic': bool(getattr(args, "deterministic", False)),
+        'sorted_candidates': bool(getattr(args, "sorted", False)) or bool(opt.env.sorted_candidates),
     }
     
     # Create output directories
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_base = os.path.join(args.output_dir, f'evaluation_{timestamp}')
+    output_base = os.path.join(output_dir, f'evaluation_{timestamp}')
     os.makedirs(config['eval_run_dir'], exist_ok=True)
     os.makedirs(output_base, exist_ok=True)
     
@@ -532,16 +538,16 @@ def main():
     print(f"EVALUATING SAVED MODELS")
     print("=" * 80)
     print(f"Timestamp: {timestamp}")
-    print(f"Model directory: {args.model_dir}")
+    print(f"Model directory: {model_dir}")
     print(f"Output directory: {output_base}")
-    print(f"Seeds: {args.seeds} ({len(seeds_to_eval)} seeds)")
-    print(f"Eval runs per seed: {args.eval_runs}")
-    print(f"Moving average window: {args.ma_window}")
-    print(f"Model sample rate: {args.model_sample*100:.1f}%")
+    print(f"Seeds: {args.seed_set} ({len(seeds_to_eval)} seeds)")
+    print(f"Eval runs per seed: {getattr(args, 'eval_runs', 3)}")
+    print(f"Moving average window: {getattr(args, 'ma_window', 10)}")
+    print(f"Model sample rate: {getattr(args, 'model_sample', 1.0)*100:.1f}%")
     print()
     
     # Find all models and sort by timestep (not by filename)
-    model_files = glob.glob(os.path.join(args.model_dir, 'model_episode*.zip'))
+    model_files = glob.glob(os.path.join(model_dir, 'model_episode*.zip'))
     
     # Parse and sort by timestep value
     model_info = []
@@ -556,17 +562,18 @@ def main():
     model_files = [mf for _, mf in model_info]
     
     # Sample models if requested
-    if args.model_sample < 1.0:
-        sample_size = max(1, int(len(model_files) * args.model_sample))
+    model_sample = float(getattr(args, "model_sample", 1.0))
+    if model_sample < 1.0:
+        sample_size = max(1, int(len(model_files) * model_sample))
         sample_indices = np.linspace(0, len(model_files) - 1, sample_size, dtype=int)
         model_files = [model_files[i] for i in sample_indices]
-        print(f"Sampling {len(model_files)} models ({args.model_sample*100:.1f}% of {len(model_info)} total)")
+        print(f"Sampling {len(model_files)} models ({model_sample*100:.1f}% of {len(model_info)} total)")
     else:
         print(f"Found {len(model_files)} model files (sorted by timestep)")
     print()
     
     if not model_files:
-        print(f"ERROR: No models found in {args.model_dir}")
+        print(f"ERROR: No models found in {model_dir}")
         tee.close()
         return
     
@@ -579,9 +586,10 @@ def main():
     from utils.logit_metrics_logger import ensure_logit_metrics_log
     ensure_logit_metrics_log(logit_metrics_file)
     
-    total_evals = len(model_files) * len(seeds_to_eval) * args.eval_runs
+    eval_runs = int(getattr(args, "eval_runs", 3))
+    total_evals = len(model_files) * len(seeds_to_eval) * eval_runs
     current_eval = 0
-    port_base = args.sumoport if args.sumoport is not None else 8900
+    port_base = getattr(args, "sumoport", None) if getattr(args, "sumoport", None) is not None else 8900
     
     for model_idx, model_path in enumerate(model_files):
         filename = os.path.basename(model_path)
@@ -594,10 +602,10 @@ def main():
         print(f"\n[Model {model_idx+1}/{len(model_files)}] {filename}")
         
         for seed_idx, seed in enumerate(seeds_to_eval):
-            for attempt in range(args.eval_runs):
+            for attempt in range(eval_runs):
                 current_eval += 1
                 pct = 100.0 * current_eval / total_evals
-                print(f"  [{current_eval}/{total_evals} ({pct:.1f}%)] Seed {seed}, Attempt {attempt+1}/{args.eval_runs}...", end=' ')
+                print(f"  [{current_eval}/{total_evals} ({pct:.1f}%)] Seed {seed}, Attempt {attempt+1}/{eval_runs}...", end=' ')
                 
                 result = evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_base)
                 if result:
@@ -635,7 +643,7 @@ def main():
         
         # Generate plots
         print("\nGenerating plots...")
-        plot_evaluation_results(results_df, output_base, ma_window=args.ma_window)
+        plot_evaluation_results(results_df, output_base, ma_window=int(getattr(args, "ma_window", 10)))
     
     print(f"\n[OK] All results saved to {output_base}")
     tee.close()
