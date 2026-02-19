@@ -1761,9 +1761,10 @@ class RLControllerAdapter:
 
             # Only log if not already logged (dropoffs are logged immediately)
             if not lifecycle.get("_logged", False):
-                log_data = {k: v for k, v in lifecycle.items() 
-                       if not k.startswith("_")}  # Skip _logged, _assignment_distance, etc.
-                self.logger.log_task_lifecycle(**lifecycle)
+              log_data = {k: v for k, v in lifecycle.items()
+                  if not k.startswith("_")}  # Skip _logged, _assignment_distance, etc.
+              self.logger.log_task_lifecycle(**log_data)
+              lifecycle["_logged"] = True
 
     def _normalize_task_id(self, task_id: str) -> str:
         """
