@@ -10,7 +10,7 @@ BASE_ROBOT_FEATURE_NAMES: List[str] = [
 BASE_TASK_FEATURE_NAMES: List[str] = [
     "release_time_s", "waiting_time_s", "est_travel_time_s",
     "pickup_loc_x", "pickup_loc_y", "drop_loc_x", "drop_loc_y",
-      "is_obsolete", "is_assigned",
+    "is_obsolete", "is_assigned",
 ]
 
 ROBOT_FEATURE_NAMES_BY_FLAG = {
@@ -142,7 +142,6 @@ def make_feature_fn(
         #     waitingTime,
         #     estTravelTime,
         #     pickup_x, pickup_y,
-        #     pickup_dx, pickup_dy,
         #     drop_x, drop_y,
         #     is_obsolete,
         #     is_assigned
