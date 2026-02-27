@@ -145,6 +145,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             reset_fn=reset_fn,
             k_max=config['k_max'],
             vicinity_m=config['vicinity_m'],
+            sorted_candidates=config.get('sorted_candidates', False),
             completion_mode="dropoff",
             max_steps=config['max_steps'],
             min_episode_steps=config['min_episode_steps'],
