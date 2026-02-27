@@ -49,7 +49,9 @@ R = int(opt.env.R)
 K_max = int(opt.env.K_max)
 N_max = int(opt.env.N_max)
 E_max = int(opt.env.E_max)
-F = int(opt.env.F)
+F = int(opt.features.base_dim)
+if bool(opt.features.use_xy_pickup):
+    F += 2
 G = int(opt.env.G)
 
 VICINITY_M = float(opt.env.vicinity_m)
@@ -128,7 +130,11 @@ controller = RLControllerAdapter(
     max_robot_capacity=MAX_ROBOT_CAPACITY, # should match to taxis.rou.xml
     logger= rp_logger,
 )
-feature_fn = make_feature_fn(controller)
+feature_fn = make_feature_fn(
+    controller,
+    use_xy_pickup=bool(opt.features.use_xy_pickup),
+    normalize_features=bool(getattr(opt.features, "normalize_features", False)),
+)
 
 # not implemented yet, will raise error for G > 0
 def global_stats_fn(world_state):
@@ -153,6 +159,7 @@ policy_kwargs = dict(
     k_max=int(opt.ppo.policy_kwargs.k_max),
     logit_temperature=float(opt.ppo.policy_kwargs.logit_temperature),
     noop_init=float(opt.ppo.policy_kwargs.noop_init),
+    freeze_noop_logit=bool(getattr(opt.ppo.policy_kwargs, "freeze_noop_logit", False)),
 )
 model = PPO(
 

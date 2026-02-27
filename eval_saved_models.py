@@ -157,7 +157,11 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             logger=rp_logger,
         )
         
-        feature_fn = make_feature_fn(controller)
+        feature_fn = make_feature_fn(
+            controller,
+            use_xy_pickup=bool(config.get('use_xy_pickup', False)),
+            normalize_features=bool(config.get('normalize_features', False)),
+        )
         
         # Create environment
         env = RidepoolRTEnv(
@@ -284,6 +288,9 @@ def ma(data, window):
 def plot_evaluation_results(results_df, output_dir, ma_window=10):
     """Generate plots from evaluation results."""
     os.makedirs(output_dir, exist_ok=True)
+    
+    fig, ax = plt.subplots(figsize=(12, 6), facecolor='#fafafa')
+    ax.set_facecolor('#fafafa')
     
     # Group by timestep, averaging across all seeds and attempts
     grouped = results_df.groupby(['ts_idx'])['reward'].agg(['mean', 'std', 'count']).reset_index()
@@ -502,6 +509,10 @@ def main():
     output_dir = str(getattr(args, "output_dir", "eval_results"))
     model_dir = str(getattr(args, "model_dir", "runs/rp_gnn_debug/saved_models"))
 
+    feature_dim = int(opt.features.base_dim)
+    if bool(opt.features.use_xy_pickup):
+        feature_dim += 2
+
     # Configuration
     config = {
         'sumo_cfg': opt.env.sumo_cfg,
@@ -510,7 +521,9 @@ def main():
         'k_max': int(opt.env.K_max),
         'N_max': int(opt.env.N_max),
         'E_max': int(opt.env.E_max),
-        'F': int(opt.env.F),
+        'F': feature_dim,
+        'use_xy_pickup': bool(opt.features.use_xy_pickup),
+        'normalize_features': bool(getattr(opt.features, "normalize_features", False)),
         'vicinity_m': float(opt.env.vicinity_m),
         'max_steps': int(opt.env.max_steps),
         'max_wait_delay_s': float(opt.env.max_wait_delay_s),

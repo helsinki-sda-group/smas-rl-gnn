@@ -3,20 +3,41 @@ import numpy as np
 from typing import Any, Optional, Tuple, List, cast
 from sumo_rl_rs.environment.rl_controller_adapter import RLControllerAdapter, Task
 
-ROBOT_FEATURE_NAMES: List[str] = [
+BASE_ROBOT_FEATURE_NAMES: List[str] = [
     "taxi_loc_x", "taxi_loc_y", "taxi_current_capacity",
     "pad4", "pad5", "pad6", "pad7", "pad8", "pad9", "pad10", "pad11",
 ]
-TASK_FEATURE_NAMES: List[str] = [
+BASE_TASK_FEATURE_NAMES: List[str] = [
     "release_time_s", "waiting_time_s", "est_travel_time_s",
     "pickup_loc_x", "pickup_loc_y", "pickup_dx", "pickup_dy",
     "drop_loc_x", "drop_loc_y", "is_obsolete", "is_assigned",
 ]
-# robot node and task node should have the same dimensionality, so robot features are padded with zeros
-F = 11
 
-def make_feature_fn(ctrl: RLControllerAdapter):
-    # ---- static scaling -------------------------------------------------
+ROBOT_FEATURE_NAMES_BY_FLAG = {
+    False: list(BASE_ROBOT_FEATURE_NAMES),
+    True: list(BASE_ROBOT_FEATURE_NAMES) + ["pad10", "pad11"],
+}
+TASK_FEATURE_NAMES_BY_FLAG = {
+    False: list(BASE_TASK_FEATURE_NAMES),
+    True: [
+        "release_time_s", "waiting_time_s", "est_travel_time_s",
+        "pickup_loc_x", "pickup_loc_y", "pickup_dx", "pickup_dy",
+        "drop_loc_x", "drop_loc_y", "is_obsolete", "is_assigned",
+    ],
+}
+
+def get_feature_names(use_xy_pickup: bool = False) -> tuple[List[str], List[str]]:
+    return (
+        list(ROBOT_FEATURE_NAMES_BY_FLAG[use_xy_pickup]),
+        list(TASK_FEATURE_NAMES_BY_FLAG[use_xy_pickup]),
+    )
+
+def make_feature_fn(
+    ctrl: RLControllerAdapter,
+    use_xy_pickup: bool = False,
+    normalize_features: bool = False,
+):
+    feature_dim = 9 + (2 if use_xy_pickup else 0)
     pos_scale = max(1.0, float(getattr(ctrl, "vicinity_m", 1000.0)))
     cap_scale = max(1.0, float(getattr(ctrl, "max_robot_capacity", 1)))
     wait_scale = max(1.0, float(getattr(ctrl, "max_wait_delay_s", 1.0)))
@@ -25,7 +46,6 @@ def make_feature_fn(ctrl: RLControllerAdapter):
         time_scale = max(1.0, float(getattr(ctrl, "max_steps", 1.0)))
     else:
         time_scale = wait_scale
-
     def _normalize_rid(x: Any) -> Optional[str]:
         # Accept only real str ids; filter out None and the literal string "None"
         if isinstance(x, str) and x and x.lower() != "none":
@@ -83,7 +103,7 @@ def make_feature_fn(ctrl: RLControllerAdapter):
 
     # ---- main fn -------------------------------------------------------
     def feature_fn(obj_a, obj_b, node_type: str) -> np.ndarray:
-        out = np.zeros((F,), dtype=np.float32)
+        out = np.zeros((feature_dim,), dtype=np.float32)
         now = ctrl._now()
 
         # robot features are [ robot_x_coordinate, robot_y_coordinate, free_capacity, 0, 0, 0, 0, 0, 0, 0, 0 ]
@@ -96,8 +116,11 @@ def make_feature_fn(ctrl: RLControllerAdapter):
 
             rid_s = cast(str, rid)
 
-            rx, ry = _robot_xy(rid_s)         
-            out[0], out[1] = rx / pos_scale, ry / pos_scale
+            rx, ry = _robot_xy(rid_s)
+            if normalize_features:
+                out[0], out[1] = rx / pos_scale, ry / pos_scale
+            else:
+                out[0], out[1] = rx, ry
 
             try:
                 cap = max(1, ctrl._get_vehicle_capacity(rid_s))
@@ -107,7 +130,10 @@ def make_feature_fn(ctrl: RLControllerAdapter):
                 onboard = len(ctrl._get_current_customers(rid_s))
             except Exception:
                 onboard = 0
-            out[2] = float(max(0, cap - onboard)) / cap_scale
+            if normalize_features:
+                out[2] = float(max(0, cap - onboard)) / cap_scale
+            else:
+                out[2] = float(max(0, cap - onboard))
             return out
 
         # task features are:
@@ -127,9 +153,14 @@ def make_feature_fn(ctrl: RLControllerAdapter):
             if t is None:
                 return out
 
-            out[0] = float(t.reservationTime) / time_scale
-            out[1] = float(max(0.0, now - float(t.reservationTime))) / wait_scale
-            out[2] = float(getattr(t, "estTravelTime", 0.0)) / travel_scale
+            if normalize_features:
+                out[0] = float(t.reservationTime) / time_scale
+                out[1] = float(max(0.0, now - float(t.reservationTime))) / wait_scale
+                out[2] = float(getattr(t, "estTravelTime", 0.0)) / travel_scale
+            else:
+                out[0] = float(t.reservationTime)
+                out[1] = float(max(0.0, now - float(t.reservationTime)))
+                out[2] = float(getattr(t, "estTravelTime", 0.0))
 
             # fromEdge = getattr(t, "fromEdge", None)
             # toEdge = getattr(t, "toEdge", None)
@@ -139,16 +170,29 @@ def make_feature_fn(ctrl: RLControllerAdapter):
 
             px, py = _edge_xy(getattr(t, "fromEdge", None))
             dx, dy = _edge_xy(getattr(t, "toEdge", None))
-            out[3], out[4] = px / pos_scale, py / pos_scale
-
-            rx, ry = _robot_xy(_normalize_rid(obj_a))
-            out[5] = float(px - rx) / pos_scale
-            out[6] = float(py - ry) / pos_scale
-
-            out[7], out[8] = dx / pos_scale, dy / pos_scale
-
-            out[9] = 1.0 if bool(getattr(t, "is_obsolete", False)) else 0.0
-            out[10] = 1.0 if bool(getattr(t, "is_assigned", False)) else 0.0
+            if normalize_features:
+                out[3], out[4] = px / pos_scale, py / pos_scale
+            else:
+                out[3], out[4] = px, py
+            if use_xy_pickup:
+                rx, ry = _robot_xy(_normalize_rid(obj_a))
+                if normalize_features:
+                    out[5] = float(px - rx) / pos_scale
+                    out[6] = float(py - ry) / pos_scale
+                    out[7], out[8] = dx / pos_scale, dy / pos_scale
+                else:
+                    out[5] = float(px - rx)
+                    out[6] = float(py - ry)
+                    out[7], out[8] = dx, dy
+                out[9] = 1.0 if bool(getattr(t, "is_obsolete", False)) else 0.0
+                out[10] = 1.0 if bool(getattr(t, "is_assigned", False)) else 0.0
+            else:
+                if normalize_features:
+                    out[5], out[6] = dx / pos_scale, dy / pos_scale
+                else:
+                    out[5], out[6] = dx, dy
+                out[7] = 1.0 if bool(getattr(t, "is_obsolete", False)) else 0.0
+                out[8] = 1.0 if bool(getattr(t, "is_assigned", False)) else 0.0
 
             return out
 
