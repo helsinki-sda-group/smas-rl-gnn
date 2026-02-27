@@ -5,12 +5,12 @@ from sumo_rl_rs.environment.rl_controller_adapter import RLControllerAdapter, Ta
 
 BASE_ROBOT_FEATURE_NAMES: List[str] = [
     "taxi_loc_x", "taxi_loc_y", "taxi_current_capacity",
-    "pad4", "pad5", "pad6", "pad7", "pad8", "pad9", "pad10", "pad11",
+    "pad4", "pad5", "pad6", "pad7", "pad8", "pad9",
 ]
 BASE_TASK_FEATURE_NAMES: List[str] = [
     "release_time_s", "waiting_time_s", "est_travel_time_s",
-    "pickup_loc_x", "pickup_loc_y", "pickup_dx", "pickup_dy",
-    "drop_loc_x", "drop_loc_y", "is_obsolete", "is_assigned",
+    "pickup_loc_x", "pickup_loc_y", "drop_loc_x", "drop_loc_y",
+      "is_obsolete", "is_assigned",
 ]
 
 ROBOT_FEATURE_NAMES_BY_FLAG = {
@@ -106,8 +106,8 @@ def make_feature_fn(
         out = np.zeros((feature_dim,), dtype=np.float32)
         now = ctrl._now()
 
-        # robot features are [ robot_x_coordinate, robot_y_coordinate, free_capacity, 0, 0, 0, 0, 0, 0, 0, 0 ]
-        # example: [2.0107662e+03 2.4869739e+03 2.0000000e+00 0. 0. 0. 0. 0. 0. 0. 0.]
+        # robot features are [ robot_x_coordinate, robot_y_coordinate, free_capacity, 0, 0, 0, 0, 0, 0 ]
+        # example: [2.0107662e+03 2.4869739e+03 2.0000000e+00 0. 0. 0. 0. 0. 0.]
 
         if node_type == "robot":
             rid = _normalize_rid(obj_a)
