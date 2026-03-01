@@ -171,6 +171,8 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             feature_fn=feature_fn,
             global_stats_fn=None,
             decision_dt=config['decision_dt'],
+            two_hop=bool(config.get('two_hop', False)),
+            normalize_features=bool(config.get('normalize_features', False)),
         )
         
         # Run single evaluation episode (one per fresh SUMO instance)
@@ -524,6 +526,7 @@ def main():
         'F': feature_dim,
         'use_xy_pickup': bool(opt.features.use_xy_pickup),
         'normalize_features': bool(getattr(opt.features, "normalize_features", False)),
+        'two_hop': bool(getattr(opt.env, "two_hop", False)),
         'vicinity_m': float(opt.env.vicinity_m),
         'max_steps': int(opt.env.max_steps),
         'max_wait_delay_s': float(opt.env.max_wait_delay_s),

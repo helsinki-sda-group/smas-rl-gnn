@@ -148,7 +148,9 @@ env = RidepoolRTEnv(
     F=F, G=0,
     feature_fn=feature_fn,
     global_stats_fn=None, 
-    decision_dt=int(opt.env.decision_dt),  
+    decision_dt=int(opt.env.decision_dt),
+    two_hop=bool(getattr(opt.env, "two_hop", False)),
+    normalize_features=bool(getattr(opt.features, "normalize_features", False)),
 )
 env = Monitor(env, filename="monitor.csv", info_keywords=("episode_reward",))
 

@@ -20,6 +20,9 @@ def build_padded_ego_batch(
     F: int,
     G: int,
     feature_fn: Callable[[Any, Any, str], np.ndarray],
+    two_hop: bool = False,
+    normalize_features: bool = False,
+    vicinity_m: float = 0.0,
     # global_stats_fn: Optional[Callable[[Any], np.ndarray]] = None,
 ) -> Tuple[Dict[str, np.ndarray], List[List[Optional[str]]]]:
     """
@@ -85,6 +88,19 @@ def build_padded_ego_batch(
     # map slot -> task_id used this step (to feed controller in step())
     cand_task_ids: List[List[Optional[str]]] = [[None] * K_max for _ in range(R)]
 
+    if normalize_features:
+        vicinity_threshold = 1.0
+    else:
+        vicinity_threshold = float(vicinity_m)
+
+    robot_xy_cache: List[Tuple[float, float]] = []
+    for rid in robots:
+        try:
+            rf = feature_fn(rid, None, "robot")
+            robot_xy_cache.append((float(rf[0]), float(rf[1])))
+        except Exception:
+            robot_xy_cache.append((0.0, 0.0))
+
     for i in range(R):
         rid = robots[i]
         # Robot node at index 0 (even if rid is None, create a dummy vector)
@@ -103,6 +119,8 @@ def build_padded_ego_batch(
 
         # Add nodes and edges
         e_ptr = 0
+        next_node_id = 1 + len(cands)
+        competitor_nodes: Dict[str, int] = {}
         for local_slot, task_idx in enumerate(cands):
             node_id = 1 + local_slot  # node indices for tasks
             if node_id >= N_max:
@@ -115,6 +133,14 @@ def build_padded_ego_batch(
             except Exception:
                 pass
             node_mask[i, node_id] = 1
+
+            task_xy = None
+            if two_hop:
+                try:
+                    tf = feature_fn(rid, t, "task")
+                    task_xy = (float(tf[3]), float(tf[4]))
+                except Exception:
+                    task_xy = None
 
             # cand slot mapping: slot `local_slot` → node index `node_id`
             cand_idx[i, local_slot] = node_id
@@ -137,6 +163,42 @@ def build_padded_ego_batch(
                 edge_index[i, 1, e_ptr] = 0
                 edge_mask[i, e_ptr] = 1
                 e_ptr += 1
+
+            if two_hop and task_xy is not None:
+                for j, other_rid in enumerate(robots):
+                    if other_rid is None or j == i:
+                        continue
+                    rx, ry = robot_xy_cache[j]
+                    dx = rx - task_xy[0]
+                    dy = ry - task_xy[1]
+                    if (dx * dx + dy * dy) > (vicinity_threshold * vicinity_threshold):
+                        continue
+
+                    other_key = str(other_rid)
+                    if other_key in competitor_nodes:
+                        other_node_id = competitor_nodes[other_key]
+                    else:
+                        if next_node_id >= N_max:
+                            continue
+                        other_node_id = next_node_id
+                        next_node_id += 1
+                        competitor_nodes[other_key] = other_node_id
+                        try:
+                            x[i, other_node_id, :] = feature_fn(other_rid, None, "robot")
+                        except Exception:
+                            pass
+                        node_mask[i, other_node_id] = 1
+
+                    if e_ptr + 2 <= E_max:
+                        edge_index[i, 0, e_ptr] = node_id
+                        edge_index[i, 1, e_ptr] = other_node_id
+                        edge_mask[i, e_ptr] = 1
+                        e_ptr += 1
+
+                        edge_index[i, 0, e_ptr] = other_node_id
+                        edge_index[i, 1, e_ptr] = node_id
+                        edge_mask[i, e_ptr] = 1
+                        e_ptr += 1
         # any remaining cand slots are already 0/False (padding)
 
     obs = dict(

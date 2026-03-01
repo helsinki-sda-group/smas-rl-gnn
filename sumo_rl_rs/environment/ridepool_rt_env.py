@@ -32,6 +32,8 @@ class RidepoolRTEnv(gym.Env):
         feature_fn,
         global_stats_fn=None,
         decision_dt: int = 15, # seconds between policy decisions (1 = every second)
+        two_hop: bool = False,
+        normalize_features: bool = False,
     ):
         super().__init__()
         self.controller = controller
@@ -40,6 +42,8 @@ class RidepoolRTEnv(gym.Env):
         self.F, self.G = int(F), int(G)
         self.feature_fn = feature_fn
         self.global_stats_fn = global_stats_fn  # can be None (ignored)
+        self.two_hop = bool(two_hop)
+        self.normalize_features = bool(normalize_features)
         self._episode_reward = 0
         self._macro_step = 0
 
@@ -93,6 +97,9 @@ class RidepoolRTEnv(gym.Env):
             N_max=self.N_max, E_max=self.E_max, K_max=self.K_max,
             F=self.F, G=self.G,
             feature_fn=self.feature_fn,
+            two_hop=self.two_hop,
+            normalize_features=self.normalize_features,
+            vicinity_m=float(getattr(self.controller, "vicinity_m", 0.0)),
             # global_stats_fn=self.global_stats_fn,  # currently unused
         )
         # Save the exact ids used for slots this step (for action mapping)
