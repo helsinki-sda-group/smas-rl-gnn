@@ -21,14 +21,15 @@ parser = argparse.ArgumentParser(description="Train GNN PPO with SUMO")
 parser.add_argument("--config", type=str, default="configs/rp_gnn.yaml", help="Path to config YAML")
 parser.add_argument("--sumoport", type=int, default=None, help="SUMO remote port (default: SUMO default)")
 parser.add_argument("--sorted", action="store_true", help="Sort candidates by pickup distance (default: randomized)")
+parser.add_argument("--continue-training", action="store_true", help="Continue training from latest saved model")
 from utils.config import Config
 cfg = Config(parser)
 opt = cfg.opt
 SUMO_PORT = opt.sumoport
 
 class Tee(object):
-    def __init__(self, filename):
-        self.file = open(filename, "w")
+    def __init__(self, filename, mode: str = "w"):
+        self.file = open(filename, mode)
         self.stdout = sys.stdout
         sys.stdout = self
 
@@ -40,7 +41,8 @@ class Tee(object):
         self.stdout.flush()
         self.file.flush()
 
-Tee("train_output.txt")
+continue_training = bool(getattr(opt, "continue_training", False) or bool(getattr(opt, "continue_training", False)))
+Tee("train_output.txt", mode="a" if continue_training else "w")
 
 # 1) SUMO/controller setup (example; adapt to your config)
 SUMO_CFG = opt.env.sumo_cfg
@@ -108,8 +110,8 @@ rp_logger = RidepoolLogger(
     RidepoolLogConfig(
         out_dir=str(opt.logging.out_dir),
         run_name=str(opt.logging.run_name),        # run dir will be: runs/rp_gnn_debug
-        erase_run_dir_on_start=True,
-        erase_episode_dir_on_start=True,
+        erase_run_dir_on_start=not continue_training,
+        erase_episode_dir_on_start=not continue_training,
         console_debug=True
     )
 )
@@ -163,30 +165,54 @@ policy_kwargs = dict(
     noop_init=float(opt.ppo.policy_kwargs.noop_init),
     freeze_noop_logit=bool(getattr(opt.ppo.policy_kwargs, "freeze_noop_logit", False)),
 )
-model = PPO(
 
-    RTGNNPolicy,
-    env,
-    policy_kwargs=policy_kwargs,
-    n_steps=int(opt.ppo.n_steps),
-    batch_size=int(opt.ppo.batch_size),
-    learning_rate=float(opt.ppo.learning_rate),
-    gamma=float(opt.ppo.gamma),
-    clip_range=float(opt.ppo.clip_range),
-    clip_range_vf=opt.ppo.clip_range_vf,
-    vf_coef=float(opt.ppo.vf_coef),
-    ent_coef=float(opt.ppo.ent_coef),
-    gae_lambda=float(opt.ppo.gae_lambda),
-    n_epochs=int(opt.ppo.n_epochs),
-    verbose=1
-)
+def _latest_model_path(model_dir: str) -> tuple[str, int, int]:
+    import re
+    import glob
+    pattern = os.path.join(model_dir, "model_episode*_ts*.zip")
+    candidates = []
+    for path in glob.glob(pattern):
+        m = re.search(r"model_episode(\d+)_ts(\d+)\.zip$", os.path.basename(path))
+        if m:
+            ep = int(m.group(1))
+            ts = int(m.group(2))
+            candidates.append((ts, ep, path))
+    if not candidates:
+        raise FileNotFoundError(f"No saved models found in {model_dir}")
+    candidates.sort(key=lambda x: x[0])
+    ts, ep, path = candidates[-1]
+    return path, ep, ts
 
+if continue_training:
+    latest_path, last_ep, last_ts = _latest_model_path(str(opt.logging.model_save_dir))
+    print(f"[CONTINUE] Loading model: {latest_path}")
+    model = PPO.load(latest_path, env=env)
+    model.num_timesteps = int(last_ts)
+    rp_logger.cfg.episode_index = int(last_ep) + 1
+    controller._ep_idx = int(last_ep)
+else:
+    model = PPO(
+        RTGNNPolicy,
+        env,
+        policy_kwargs=policy_kwargs,
+        n_steps=int(opt.ppo.n_steps),
+        batch_size=int(opt.ppo.batch_size),
+        learning_rate=float(opt.ppo.learning_rate),
+        gamma=float(opt.ppo.gamma),
+        clip_range=float(opt.ppo.clip_range),
+        clip_range_vf=opt.ppo.clip_range_vf,
+        vf_coef=float(opt.ppo.vf_coef),
+        ent_coef=float(opt.ppo.ent_coef),
+        gae_lambda=float(opt.ppo.gae_lambda),
+        n_epochs=int(opt.ppo.n_epochs),
+        verbose=1
+    )
 
-print("Initial noop_logit:", model.policy.noop_logit.item())
-model.policy.noop_logit.data.fill_(float(opt.ppo.policy_kwargs.noop_init))
-print("Forced noop_logit:", model.policy.noop_logit.item())
+    print("Initial noop_logit:", model.policy.noop_logit.item())
+    model.policy.noop_logit.data.fill_(float(opt.ppo.policy_kwargs.noop_init))
+    print("Forced noop_logit:", model.policy.noop_logit.item())
 
-model.save("init_model/model_episode0_ts0.zip")
+    model.save("init_model/model_episode0_ts0.zip")
 
 metrics_log_path = (
     f"training_metrics_v{int(VICINITY_M)}_ms{MAX_STEPS}_mwd{int(MAX_WAIT_DELAY_S)}_"
@@ -208,7 +234,11 @@ callback = RPLoggerCallback(
     num_robots=R,
     reset_fn=reset_fn,  # Pass reset_fn to get current seed
     save_model_dir=model_save_dir,  # Enable model saving after each rollout
+    continue_training=continue_training,
 )
 
-model.learn(total_timesteps=int(opt.ppo.total_timesteps), callback=callback)
+if continue_training:
+    callback.ep_idx = rp_logger.cfg.episode_index
+
+model.learn(total_timesteps=int(opt.ppo.total_timesteps), callback=callback, reset_num_timesteps=not continue_training)
 model.save("ppo_rp_gnn.zip")
