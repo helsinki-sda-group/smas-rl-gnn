@@ -88,16 +88,19 @@ def build_padded_ego_batch(
     # map slot -> task_id used this step (to feed controller in step())
     cand_task_ids: List[List[Optional[str]]] = [[None] * K_max for _ in range(R)]
 
-    if normalize_features:
-        vicinity_threshold = 1.0
-    else:
-        vicinity_threshold = float(vicinity_m)
+    vicinity_threshold = float(vicinity_m)
+    pos_scale = max(1.0, float(vicinity_m))
+
+    def _to_meters(xy: Tuple[float, float]) -> Tuple[float, float]:
+        if normalize_features:
+            return xy[0] * pos_scale, xy[1] * pos_scale
+        return xy
 
     robot_xy_cache: List[Tuple[float, float]] = []
     for rid in robots:
         try:
             rf = feature_fn(rid, None, "robot")
-            robot_xy_cache.append((float(rf[0]), float(rf[1])))
+            robot_xy_cache.append(_to_meters((float(rf[0]), float(rf[1]))))
         except Exception:
             robot_xy_cache.append((0.0, 0.0))
 
@@ -138,7 +141,7 @@ def build_padded_ego_batch(
             if two_hop:
                 try:
                     tf = feature_fn(rid, t, "task")
-                    task_xy = (float(tf[3]), float(tf[4]))
+                    task_xy = _to_meters((float(tf[3]), float(tf[4])))
                 except Exception:
                     task_xy = None
 
