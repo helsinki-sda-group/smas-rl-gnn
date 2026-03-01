@@ -119,6 +119,8 @@ for seed in SEEDS[:NUM_SEEDS]:
             feature_fn=feature_fn,
             global_stats_fn=None,
             decision_dt=int(opt.env.decision_dt),
+            two_hop=bool(getattr(opt.env, "two_hop", False)),
+            normalize_features=bool(getattr(opt.features, "normalize_features", False)),
         )
 
         # ...existing code for NOOP, action functions, and episode run...
