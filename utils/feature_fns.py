@@ -196,6 +196,8 @@ def make_feature_fn(
             eta = dist / 10.0 if np.isfinite(dist) else 0.0
         except Exception:
             eta = 0.0
+        if normalize_features:
+            eta = float(np.clip(eta / travel_scale, 0.0, 1.0))
 
         for i, name in enumerate(edge_features):
             if name == "dx":

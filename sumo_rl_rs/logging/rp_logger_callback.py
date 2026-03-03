@@ -34,6 +34,12 @@ class RPLoggerCallback(BaseCallback):
         self.sum_reward = 0.0
         self.steps_in_ep = 0
         self.logit_step_metrics = []
+        self._edge_sum = np.zeros((3,), dtype=np.float64)
+        self._edge_sumsq = np.zeros((3,), dtype=np.float64)
+        self._edge_min = np.full((3,), np.inf, dtype=np.float64)
+        self._edge_max = np.full((3,), -np.inf, dtype=np.float64)
+        self._edge_count = 0
+        self._edge_logged = False
 
     def _on_training_start(self) -> None:
         if self.metrics_log_path:
@@ -47,6 +53,27 @@ class RPLoggerCallback(BaseCallback):
     
     def _on_rollout_end(self) -> None:
         """Called after each rollout collection phase."""
+        if not self._edge_logged and self._edge_count > 0:
+            mean = self._edge_sum / float(self._edge_count)
+            var = (self._edge_sumsq / float(self._edge_count)) - np.square(mean)
+            std = np.sqrt(np.maximum(var, 0.0))
+            min_v = self._edge_min
+            max_v = self._edge_max
+            print(
+                "[EdgeAttr rollout] count={} mean={} std={} min={} max={}".format(
+                    int(self._edge_count),
+                    np.round(mean, 6).tolist(),
+                    np.round(std, 6).tolist(),
+                    np.round(min_v, 6).tolist(),
+                    np.round(max_v, 6).tolist(),
+                )
+            )
+            self._edge_logged = True
+        self._edge_sum[:] = 0.0
+        self._edge_sumsq[:] = 0.0
+        self._edge_min[:] = np.inf
+        self._edge_max[:] = -np.inf
+        self._edge_count = 0
         if self.save_model_dir:
             # Save model with episode and timestep information
             model_filename = f"model_episode{self.ep_idx}_ts{self.num_timesteps}.zip"
@@ -100,6 +127,28 @@ class RPLoggerCallback(BaseCallback):
                 except Exception as e:
                     if self.verbose > 0:
                         print(f"[WARN] Could not capture logit metrics: {e}")
+        if not self._edge_logged:
+            obs = self.locals.get("new_obs", None)
+            if obs is None:
+                obs = self.locals.get("obs", None)
+            if obs is not None and isinstance(obs, dict):
+                edge_attr = obs.get("edge_attr", None)
+                if edge_attr is not None:
+                    try:
+                        if hasattr(edge_attr, "detach"):
+                            edge_attr = edge_attr.detach().cpu().numpy()
+                        ea = np.asarray(edge_attr)
+                        if ea.ndim >= 2:
+                            slice_ea = ea[..., 0:3].reshape(-1, 3)
+                            if slice_ea.size > 0:
+                                self._edge_sum += slice_ea.sum(axis=0)
+                                self._edge_sumsq += np.square(slice_ea).sum(axis=0)
+                                self._edge_min = np.minimum(self._edge_min, slice_ea.min(axis=0))
+                                self._edge_max = np.maximum(self._edge_max, slice_ea.max(axis=0))
+                                self._edge_count += slice_ea.shape[0]
+                    except Exception as e:
+                        if self.verbose > 0:
+                            print(f"[WARN] Could not compute edge_attr stats: {e}")
 
         # detect episode end from dones
         dones = self.locals.get("dones", None)

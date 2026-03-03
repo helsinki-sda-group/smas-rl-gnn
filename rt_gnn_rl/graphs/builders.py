@@ -209,11 +209,21 @@ def build_padded_ego_batch(
                         edge_index[i, 0, e_ptr] = node_id
                         edge_index[i, 1, e_ptr] = other_node_id
                         edge_mask[i, e_ptr] = 1
+                        if edge_attr is not None and use_edge_rt:
+                            try:
+                                edge_attr[i, e_ptr, :] = feature_fn(other_rid, t, "edge_rt")
+                            except Exception:
+                                pass
                         e_ptr += 1
 
                         edge_index[i, 0, e_ptr] = other_node_id
                         edge_index[i, 1, e_ptr] = node_id
                         edge_mask[i, e_ptr] = 1
+                        if edge_attr is not None and use_edge_rt:
+                            try:
+                                edge_attr[i, e_ptr, :] = feature_fn(other_rid, t, "edge_rt")
+                            except Exception:
+                                pass
                         e_ptr += 1
         # any remaining cand slots are already 0/False (padding)
 
