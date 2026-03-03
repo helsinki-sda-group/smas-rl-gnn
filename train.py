@@ -12,7 +12,7 @@ from sumo_rl_rs.logging.ridepool_logger import RidepoolLogger, RidepoolLogConfig
 from sumo_rl_rs.logging.rp_logger_callback import RPLoggerCallback
 from utils.sumo_bootstrap import start_sumo, make_reset_fn
 import numpy as np
-from utils.feature_fns import make_feature_fn
+from utils.feature_fns import make_feature_fn, compute_feature_dim
 
 # to write PPO output to txt file
 import sys
@@ -51,9 +51,21 @@ R = int(opt.env.R)
 K_max = int(opt.env.K_max)
 N_max = int(opt.env.N_max)
 E_max = int(opt.env.E_max)
-F = int(opt.features.base_dim)
-if bool(opt.features.use_xy_pickup):
-    F += 2
+use_xy_pickup = bool(opt.features.use_xy_pickup)
+use_node_type = bool(getattr(opt.features, "use_node_type", False))
+use_edge_rt = bool(getattr(opt.features, "use_edge_rt", False))
+edge_features = list(getattr(opt.features, "edge_features", []))
+robot_commitment = str(getattr(opt.features, "robot_commitment", "none"))
+route_slots_k = int(getattr(opt.features, "route_slots_k", 2))
+
+F = compute_feature_dim(
+    use_xy_pickup=use_xy_pickup,
+    use_node_type=use_node_type,
+    use_edge_rt=use_edge_rt,
+    robot_commitment=robot_commitment,
+    route_slots_k=route_slots_k,
+)
+edge_feat_dim = len(edge_features) if use_edge_rt else 0
 G = int(opt.env.G)
 
 VICINITY_M = float(opt.env.vicinity_m)
@@ -134,8 +146,13 @@ controller = RLControllerAdapter(
 )
 feature_fn = make_feature_fn(
     controller,
-    use_xy_pickup=bool(opt.features.use_xy_pickup),
+    use_xy_pickup=use_xy_pickup,
     normalize_features=bool(getattr(opt.features, "normalize_features", False)),
+    use_node_type=use_node_type,
+    use_edge_rt=use_edge_rt,
+    edge_features=edge_features,
+    robot_commitment=robot_commitment,
+    route_slots_k=route_slots_k,
 )
 
 # not implemented yet, will raise error for G > 0
@@ -153,6 +170,8 @@ env = RidepoolRTEnv(
     decision_dt=int(opt.env.decision_dt),
     two_hop=bool(getattr(opt.env, "two_hop", False)),
     normalize_features=bool(getattr(opt.features, "normalize_features", False)),
+    use_edge_rt=use_edge_rt,
+    edge_feat_dim=edge_feat_dim,
 )
 env = Monitor(env, filename="monitor.csv", info_keywords=("episode_reward",))
 
@@ -164,6 +183,7 @@ policy_kwargs = dict(
     logit_temperature=float(opt.ppo.policy_kwargs.logit_temperature),
     noop_init=float(opt.ppo.policy_kwargs.noop_init),
     freeze_noop_logit=bool(getattr(opt.ppo.policy_kwargs, "freeze_noop_logit", False)),
+    edge_dim=edge_feat_dim,
 )
 
 def _latest_model_path(model_dir: str) -> tuple[str, int, int]:

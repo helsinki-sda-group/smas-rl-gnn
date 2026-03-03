@@ -23,6 +23,8 @@ def build_padded_ego_batch(
     two_hop: bool = False,
     normalize_features: bool = False,
     vicinity_m: float = 0.0,
+    use_edge_rt: bool = False,
+    edge_feat_dim: int = 0,
     # global_stats_fn: Optional[Callable[[Any], np.ndarray]] = None,
 ) -> Tuple[Dict[str, np.ndarray], List[List[Optional[str]]]]:
     """
@@ -82,6 +84,7 @@ def build_padded_ego_batch(
     node_mask = np.zeros((R, N_max), np.uint8)
     edge_index = np.zeros((R, 2, E_max), np.int64)
     edge_mask = np.zeros((R, E_max), np.uint8)
+    edge_attr = np.zeros((R, E_max, edge_feat_dim), np.float32) if edge_feat_dim > 0 else None
     cand_idx = np.zeros((R, K_max), np.int64)
     cand_mask = np.zeros((R, K_max), np.uint8)
 
@@ -160,11 +163,21 @@ def build_padded_ego_batch(
                 edge_index[i, 0, e_ptr] = 0
                 edge_index[i, 1, e_ptr] = node_id
                 edge_mask[i, e_ptr] = 1
+                if edge_attr is not None and use_edge_rt:
+                    try:
+                        edge_attr[i, e_ptr, :] = feature_fn(rid, t, "edge_rt")
+                    except Exception:
+                        pass
                 e_ptr += 1
 
                 edge_index[i, 0, e_ptr] = node_id
                 edge_index[i, 1, e_ptr] = 0
                 edge_mask[i, e_ptr] = 1
+                if edge_attr is not None and use_edge_rt:
+                    try:
+                        edge_attr[i, e_ptr, :] = feature_fn(rid, t, "edge_rt")
+                    except Exception:
+                        pass
                 e_ptr += 1
 
             if two_hop and task_xy is not None:
@@ -209,6 +222,7 @@ def build_padded_ego_batch(
         node_mask=node_mask,
         edge_index=edge_index,
         edge_mask=edge_mask,
+        **({"edge_attr": edge_attr} if edge_attr is not None else {}),
         cand_idx=cand_idx,
         cand_mask=cand_mask,
         # global_stats=(global_stats_fn() if global_stats_fn else np.zeros((G,), np.float32)),
