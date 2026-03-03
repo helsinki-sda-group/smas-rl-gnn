@@ -13,31 +13,72 @@ BASE_TASK_FEATURE_NAMES: List[str] = [
     "is_obsolete", "is_assigned",
 ]
 
-ROBOT_FEATURE_NAMES_BY_FLAG = {
-    False: list(BASE_ROBOT_FEATURE_NAMES),
-    True: list(BASE_ROBOT_FEATURE_NAMES) + ["pad10", "pad11"],
-}
-TASK_FEATURE_NAMES_BY_FLAG = {
-    False: list(BASE_TASK_FEATURE_NAMES),
-    True: [
-        "release_time_s", "waiting_time_s", "est_travel_time_s",
-        "pickup_loc_x", "pickup_loc_y", "pickup_dx", "pickup_dy",
-        "drop_loc_x", "drop_loc_y", "is_obsolete", "is_assigned",
-    ],
-}
+def compute_feature_dim(
+    use_xy_pickup: bool = False,
+    use_node_type: bool = False,
+    use_edge_rt: bool = False,
+    robot_commitment: str = "none",
+    route_slots_k: int = 2,
+) -> int:
+    dim = 9
+    if use_xy_pickup and not use_edge_rt:
+        dim += 2
+    if use_node_type:
+        dim += 2
+    if robot_commitment == "route_slots":
+        dim += int(route_slots_k) * 3
+    return dim
 
-def get_feature_names(use_xy_pickup: bool = False) -> tuple[List[str], List[str]]:
-    return (
-        list(ROBOT_FEATURE_NAMES_BY_FLAG[use_xy_pickup]),
-        list(TASK_FEATURE_NAMES_BY_FLAG[use_xy_pickup]),
-    )
+def get_feature_names(
+    use_xy_pickup: bool = False,
+    use_node_type: bool = False,
+    use_edge_rt: bool = False,
+    robot_commitment: str = "none",
+    route_slots_k: int = 2,
+) -> tuple[List[str], List[str]]:
+    robot_names = list(BASE_ROBOT_FEATURE_NAMES)
+    task_names = list(BASE_TASK_FEATURE_NAMES)
+
+    if use_xy_pickup and not use_edge_rt:
+        robot_names += ["pad10", "pad11"]
+        task_names = [
+            "release_time_s", "waiting_time_s", "est_travel_time_s",
+            "pickup_loc_x", "pickup_loc_y", "pickup_dx", "pickup_dy",
+            "drop_loc_x", "drop_loc_y", "is_obsolete", "is_assigned",
+        ]
+
+    if robot_commitment == "route_slots":
+        for idx in range(int(route_slots_k)):
+            robot_names += [
+                f"slot{idx}_dx",
+                f"slot{idx}_dy",
+                f"slot{idx}_valid",
+            ]
+
+    if use_node_type:
+        robot_names += ["is_robot", "is_task"]
+        task_names += ["is_robot", "is_task"]
+
+    return robot_names, task_names
 
 def make_feature_fn(
     ctrl: RLControllerAdapter,
     use_xy_pickup: bool = False,
     normalize_features: bool = False,
+    use_node_type: bool = False,
+    use_edge_rt: bool = False,
+    edge_features: Optional[List[str]] = None,
+    robot_commitment: str = "none",
+    route_slots_k: int = 2,
 ):
-    feature_dim = 9 + (2 if use_xy_pickup else 0)
+    feature_dim = compute_feature_dim(
+        use_xy_pickup=use_xy_pickup,
+        use_node_type=use_node_type,
+        use_edge_rt=use_edge_rt,
+        robot_commitment=robot_commitment,
+        route_slots_k=route_slots_k,
+    )
+    edge_features = list(edge_features or [])
     pos_scale = max(1.0, float(getattr(ctrl, "vicinity_m", 1000.0)))
     cap_scale = max(1.0, float(getattr(ctrl, "max_robot_capacity", 1)))
     wait_scale = max(1.0, float(getattr(ctrl, "max_wait_delay_s", 1.0)))
@@ -92,6 +133,79 @@ def make_feature_fn(
             pass
         return 0.0, 0.0
 
+    def _append_node_type(out: np.ndarray, node_type: str) -> None:
+        if not use_node_type:
+            return
+        if out.shape[0] >= 2:
+            out[-2] = 1.0 if node_type == "robot" else 0.0
+            out[-1] = 1.0 if node_type == "task" else 0.0
+
+    def _robot_route_slots(rid_s: str) -> List[Tuple[float, float, float]]:
+        if robot_commitment != "route_slots":
+            return []
+        res_index = ctrl._reservation_index()
+        seq = list(ctrl._shadow_plan_by_robot.get(rid_s, []))
+        if not seq:
+            return []
+        seen: dict[str, int] = {}
+        picked: set[str] = set()
+        out_slots: List[Tuple[float, float, float]] = []
+        rx, ry = _robot_xy(rid_s)
+        for res_id in seq:
+            res_obj = res_index.get(str(res_id))
+            if res_obj is None:
+                continue
+            res_key = str(res_id)
+            if ctrl._is_picked(res_obj):
+                picked.add(res_key)
+
+            count = seen.get(res_key, 0)
+            seen[res_key] = count + 1
+            if res_key in picked or count >= 1:
+                edge = ctrl._edge_for_dropoff(res_obj)
+            else:
+                edge = ctrl._edge_for_pickup(res_obj)
+
+            tx, ty = _edge_xy(edge)
+            dx = float(tx - rx)
+            dy = float(ty - ry)
+            if normalize_features:
+                dx /= pos_scale
+                dy /= pos_scale
+            out_slots.append((dx, dy, 1.0))
+            if len(out_slots) >= int(route_slots_k):
+                break
+        return out_slots
+
+    def _edge_rt_features(rid_s: str, t: Task) -> np.ndarray:
+        out = np.zeros((len(edge_features),), dtype=np.float32)
+        if not edge_features:
+            return out
+        rx, ry = _robot_xy(rid_s)
+        px, py = _edge_xy(getattr(t, "fromEdge", None))
+        dx = float(px - rx)
+        dy = float(py - ry)
+        if normalize_features:
+            dx /= pos_scale
+            dy /= pos_scale
+        eta = 0.0
+        try:
+            route = ctrl.sumo.vehicle.getRoute(rid_s)
+            r_edge = route[0] if route else ""
+            dist = float(ctrl._road_distance(r_edge, getattr(t, "fromEdge", "")))
+            eta = dist / 10.0 if np.isfinite(dist) else 0.0
+        except Exception:
+            eta = 0.0
+
+        for i, name in enumerate(edge_features):
+            if name == "dx":
+                out[i] = dx
+            elif name == "dy":
+                out[i] = dy
+            elif name == "eta":
+                out[i] = eta
+        return out
+
     def _resolve_task(x: Any) -> Optional[Task]:
         if isinstance(x, Task):
             return x
@@ -134,6 +248,21 @@ def make_feature_fn(
                 out[2] = float(max(0, cap - onboard)) / cap_scale
             else:
                 out[2] = float(max(0, cap - onboard))
+            if robot_commitment == "route_slots":
+                slots = _robot_route_slots(rid_s)
+                base = 9 + (2 if use_xy_pickup and not use_edge_rt else 0)
+                offset = base
+                for s_idx in range(int(route_slots_k)):
+                    if s_idx < len(slots):
+                        dx, dy, valid = slots[s_idx]
+                    else:
+                        dx = dy = 0.0
+                        valid = 0.0
+                    out[offset + 0] = dx
+                    out[offset + 1] = dy
+                    out[offset + 2] = valid
+                    offset += 3
+            _append_node_type(out, "robot")
             return out
 
         # task features are:
@@ -173,7 +302,7 @@ def make_feature_fn(
                 out[3], out[4] = px / pos_scale, py / pos_scale
             else:
                 out[3], out[4] = px, py
-            if use_xy_pickup:
+            if use_xy_pickup and not use_edge_rt:
                 rx, ry = _robot_xy(_normalize_rid(obj_a))
                 if normalize_features:
                     out[5] = float(px - rx) / pos_scale
@@ -192,8 +321,15 @@ def make_feature_fn(
                     out[5], out[6] = dx, dy
                 out[7] = 1.0 if bool(getattr(t, "is_obsolete", False)) else 0.0
                 out[8] = 1.0 if bool(getattr(t, "is_assigned", False)) else 0.0
-
+            _append_node_type(out, "task")
             return out
+
+        elif node_type == "edge_rt":
+            rid = _normalize_rid(obj_a)
+            t = _resolve_task(obj_b)
+            if rid is None or t is None:
+                return np.zeros((len(edge_features),), dtype=np.float32)
+            return _edge_rt_features(cast(str, rid), t)
 
         return out
 

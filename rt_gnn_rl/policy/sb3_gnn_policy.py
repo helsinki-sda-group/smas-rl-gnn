@@ -47,6 +47,7 @@ class RTGNNPolicy(ActorCriticPolicy):
         logit_temperature: float = 5.0,
         noop_init: float = -1.0,
         freeze_noop_logit: bool = False,
+        edge_dim: int = 0,
         backbone: str = "sage",
         critic_aggregation: str = "joint_mean",
         **kwargs,
@@ -86,6 +87,7 @@ class RTGNNPolicy(ActorCriticPolicy):
             k_max=k_max,  # keep the original K for the GNN head
             backbone=bb_lit,
             critic_aggregation=agg_lit,
+            edge_dim=int(edge_dim),
             **gnn_kwargs,
         )
 

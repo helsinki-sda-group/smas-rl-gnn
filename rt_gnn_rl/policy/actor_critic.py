@@ -40,9 +40,9 @@ class _SAGEEgoEncoder(nn.Module):
     Adapter around EgoGraphEncoder that exposes a unified encode_graphs(...) API
     for the actor–critic.
     """
-    def __init__(self, in_dim: int, hidden: int, **gnn_kwargs):
+    def __init__(self, in_dim: int, hidden: int, edge_dim: int = 0, **gnn_kwargs):
         super().__init__()
-        self.impl = EgoGraphEncoder(in_dim, hidden, **gnn_kwargs)
+        self.impl = EgoGraphEncoder(in_dim, hidden, edge_dim=edge_dim, **gnn_kwargs)
 
     def encode_graphs(self, x_list: List[torch.Tensor], ei_list: List[torch.Tensor], extra=None):
         h, pyg_batch = self.impl(x_list, ei_list, extra)
@@ -58,6 +58,7 @@ class EgoActorCritic(nn.Module):
         k_max: int,
         backbone: Literal["dummy", "sage"] = "dummy",
         critic_aggregation: Literal["per_robot", "joint_mean", "joint_attn"] = "joint_attn",
+        edge_dim: int = 0,
         **gnn_kwargs,
     ):
         super().__init__()
@@ -68,8 +69,8 @@ class EgoActorCritic(nn.Module):
             self.enc_actor = _DummyEgoEncoder(in_dim, hidden)
             self.enc_critic = _DummyEgoEncoder(in_dim, hidden)
         elif backbone == "sage":
-            self.enc_actor = _SAGEEgoEncoder(in_dim, hidden, **gnn_kwargs)
-            self.enc_critic = _SAGEEgoEncoder(in_dim, hidden, **gnn_kwargs)
+            self.enc_actor = _SAGEEgoEncoder(in_dim, hidden, edge_dim=edge_dim, **gnn_kwargs)
+            self.enc_critic = _SAGEEgoEncoder(in_dim, hidden, edge_dim=edge_dim, **gnn_kwargs)
         else:
             raise ValueError(f"Unknown backbone '{backbone}'")
 
@@ -111,10 +112,12 @@ class EgoActorCritic(nn.Module):
         R, N_max, _ = x.shape
 
         has_edges = ("edge_index" in obs) and ("edge_mask" in obs)
+        has_edge_attr = has_edges and ("edge_attr" in obs)
 
         x_list: List[torch.Tensor] = []
         ei_list: List[torch.Tensor] = []
         cand_loc_idx: List[torch.Tensor] = []
+        edge_attr_list: List[torch.Tensor] = []
 
         for i in range(R):
             mask_i = node_mask[i].to(dtype=torch.bool)      # [N_max] bool
@@ -140,8 +143,15 @@ class EgoActorCritic(nn.Module):
                 ei_i = idx_map[ei_i]                         # remap to local ids (long)
                 valid = (ei_i >= 0).all(dim=0)               # drop edges touching masked nodes
                 ei_i = ei_i[:, valid]
+                if has_edge_attr:
+                    ea_full = obs["edge_attr"][i].to(dtype=torch.float32)  # [E_max, D]
+                    ea_i = ea_full[emask_i]
+                    ea_i = ea_i[valid]
+                else:
+                    ea_i = x_i.new_zeros((ei_i.size(1), 0), dtype=torch.float32)
             else:
                 ei_i = x_i.new_zeros((2, 0), dtype=torch.long)
+                ea_i = x_i.new_zeros((0, 0), dtype=torch.float32)
 
             # ---- candidates: mask -> cast -> remap -> drop invalid ----
             cand_full = obs["cand_idx"][i].to(dtype=torch.long)          # [K_max]
@@ -153,14 +163,15 @@ class EgoActorCritic(nn.Module):
             x_list.append(x_i)
             ei_list.append(ei_i)
             cand_loc_idx.append(cand_i)
+            edge_attr_list.append(ea_i)
 
-        return x_list, ei_list, cand_loc_idx, R
+        return x_list, ei_list, edge_attr_list, cand_loc_idx, R
 
 
     def forward(self, obs):
         # Convert padded obs (x is [R, N_max, F], edge_index is [R, 2, E_max], etc.) 
         # into ragged lists: x_list[i] is [n_i, F], ei_list[i] is [2, e_i], cand_loc_idx[i] is [k_i]
-        x_list, ei_list, cand_loc_idx, R = self._build_graph_lists(obs)
+        x_list, ei_list, edge_attr_list, cand_loc_idx, R = self._build_graph_lists(obs)
         K_max = obs["cand_mask"].shape[1]
         device = obs["x"].device
 
@@ -171,7 +182,7 @@ class EgoActorCritic(nn.Module):
          # === Actor (with normalization) ===
         # Assume that we have 3 ego graphs with 2, 3, and 1 nodes respectively. 
         # Then h_a is [6, H] and batch_a.batch is [6] with values [0,0,1,1,1,2].
-        h_a, batch_a = self.enc_actor.encode_graphs(x_list, ei_list)   # [sum_nodes, H]
+        h_a, batch_a = self.enc_actor.encode_graphs(x_list, ei_list, edge_attr_list)   # [sum_nodes, H]
         h_a = self.actor_norm(h_a)                                     # normalize within one embedding vector
         # score is a preference score for each node, but we will only use the scores of the candidate nodes for action selection
         scores = self.actor_head(h_a).squeeze(-1)                      # [sum_nodes]
@@ -197,7 +208,7 @@ class EgoActorCritic(nn.Module):
         logits = torch.stack(logits_list, dim=0)      # [R, K_max]
 
         # === Critic (aggregation options) ===
-        h_c, batch_c = self.enc_critic.encode_graphs(x_list, ei_list)  # [sum_nodes, H]
+        h_c, batch_c = self.enc_critic.encode_graphs(x_list, ei_list, edge_attr_list)  # [sum_nodes, H]
         # First, get one embedding per robot by mean-pooling its nodes
         robot_embeds: List[torch.Tensor] = []
         for i, _x_i in enumerate(x_list):

@@ -9,7 +9,7 @@ from sumo_rl_rs.environment.ridepool_rt_env import RidepoolRTEnv
 from sumo_rl_rs.environment.rl_controller_adapter import RLControllerAdapter
 from sumo_rl_rs.logging.ridepool_logger import RidepoolLogger, RidepoolLogConfig
 from utils.sumo_bootstrap import start_sumo, make_reset_fn
-from utils.feature_fns import make_feature_fn
+from utils.feature_fns import make_feature_fn, compute_feature_dim
 from utils.metrics_calculator import (
     EpisodeMetrics,
     compute_episode_metrics_from_logs,
@@ -33,9 +33,21 @@ R = int(opt.env.R)
 K_max = int(opt.env.K_max)
 N_max = int(opt.env.N_max)
 E_max = int(opt.env.E_max)
-F = int(opt.features.base_dim)
-if bool(opt.features.use_xy_pickup):
-    F += 2
+use_xy_pickup = bool(opt.features.use_xy_pickup)
+use_node_type = bool(getattr(opt.features, "use_node_type", False))
+use_edge_rt = bool(getattr(opt.features, "use_edge_rt", False))
+edge_features = list(getattr(opt.features, "edge_features", []))
+robot_commitment = str(getattr(opt.features, "robot_commitment", "none"))
+route_slots_k = int(getattr(opt.features, "route_slots_k", 2))
+
+F = compute_feature_dim(
+    use_xy_pickup=use_xy_pickup,
+    use_node_type=use_node_type,
+    use_edge_rt=use_edge_rt,
+    robot_commitment=robot_commitment,
+    route_slots_k=route_slots_k,
+)
+edge_feat_dim = len(edge_features) if use_edge_rt else 0
 G = int(opt.env.G)
 
 VICINITY_M = float(opt.env.vicinity_m)
@@ -108,8 +120,13 @@ for seed in SEEDS[:NUM_SEEDS]:
         )
         feature_fn = make_feature_fn(
             controller,
-            use_xy_pickup=bool(opt.features.use_xy_pickup),
+            use_xy_pickup=use_xy_pickup,
             normalize_features=bool(getattr(opt.features, "normalize_features", False)),
+            use_node_type=use_node_type,
+            use_edge_rt=use_edge_rt,
+            edge_features=edge_features,
+            robot_commitment=robot_commitment,
+            route_slots_k=route_slots_k,
         )
 
         env = RidepoolRTEnv(
@@ -121,6 +138,8 @@ for seed in SEEDS[:NUM_SEEDS]:
             decision_dt=int(opt.env.decision_dt),
             two_hop=bool(getattr(opt.env, "two_hop", False)),
             normalize_features=bool(getattr(opt.features, "normalize_features", False)),
+            use_edge_rt=use_edge_rt,
+            edge_feat_dim=edge_feat_dim,
         )
 
         # ...existing code for NOOP, action functions, and episode run...

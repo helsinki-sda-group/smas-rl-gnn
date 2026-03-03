@@ -30,7 +30,7 @@ from sumo_rl_rs.environment.ridepool_rt_env import RidepoolRTEnv
 from sumo_rl_rs.environment.rl_controller_adapter import RLControllerAdapter 
 from sumo_rl_rs.logging.ridepool_logger import RidepoolLogger, RidepoolLogConfig
 from utils.sumo_bootstrap import start_sumo, _imports, _build_args
-from utils.feature_fns import make_feature_fn
+from utils.feature_fns import make_feature_fn, compute_feature_dim
 from utils.metrics_calculator import compute_episode_metrics_from_logs
 from utils.logit_metrics_logger import (
     compute_logit_step_metrics,
@@ -161,6 +161,11 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             controller,
             use_xy_pickup=bool(config.get('use_xy_pickup', False)),
             normalize_features=bool(config.get('normalize_features', False)),
+            use_node_type=bool(config.get('use_node_type', False)),
+            use_edge_rt=bool(config.get('use_edge_rt', False)),
+            edge_features=list(config.get('edge_features', [])),
+            robot_commitment=str(config.get('robot_commitment', 'none')),
+            route_slots_k=int(config.get('route_slots_k', 2)),
         )
         
         # Create environment
@@ -173,6 +178,8 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             decision_dt=config['decision_dt'],
             two_hop=bool(config.get('two_hop', False)),
             normalize_features=bool(config.get('normalize_features', False)),
+            use_edge_rt=bool(config.get('use_edge_rt', False)),
+            edge_feat_dim=int(config.get('edge_feat_dim', 0)),
         )
         
         # Run single evaluation episode (one per fresh SUMO instance)
@@ -511,9 +518,21 @@ def main():
     output_dir = str(getattr(args, "output_dir", "eval_results"))
     model_dir = str(getattr(args, "model_dir", "runs/rp_gnn_debug/saved_models"))
 
-    feature_dim = int(opt.features.base_dim)
-    if bool(opt.features.use_xy_pickup):
-        feature_dim += 2
+    use_xy_pickup = bool(opt.features.use_xy_pickup)
+    use_node_type = bool(getattr(opt.features, "use_node_type", False))
+    use_edge_rt = bool(getattr(opt.features, "use_edge_rt", False))
+    edge_features = list(getattr(opt.features, "edge_features", []))
+    robot_commitment = str(getattr(opt.features, "robot_commitment", "none"))
+    route_slots_k = int(getattr(opt.features, "route_slots_k", 2))
+
+    feature_dim = compute_feature_dim(
+        use_xy_pickup=use_xy_pickup,
+        use_node_type=use_node_type,
+        use_edge_rt=use_edge_rt,
+        robot_commitment=robot_commitment,
+        route_slots_k=route_slots_k,
+    )
+    edge_feat_dim = len(edge_features) if use_edge_rt else 0
 
     # Configuration
     config = {
@@ -524,8 +543,14 @@ def main():
         'N_max': int(opt.env.N_max),
         'E_max': int(opt.env.E_max),
         'F': feature_dim,
-        'use_xy_pickup': bool(opt.features.use_xy_pickup),
+        'use_xy_pickup': use_xy_pickup,
         'normalize_features': bool(getattr(opt.features, "normalize_features", False)),
+        'use_node_type': use_node_type,
+        'use_edge_rt': use_edge_rt,
+        'edge_features': edge_features,
+        'robot_commitment': robot_commitment,
+        'route_slots_k': route_slots_k,
+        'edge_feat_dim': edge_feat_dim,
         'two_hop': bool(getattr(opt.env, "two_hop", False)),
         'vicinity_m': float(opt.env.vicinity_m),
         'max_steps': int(opt.env.max_steps),
