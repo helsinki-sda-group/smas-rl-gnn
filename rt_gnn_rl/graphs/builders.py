@@ -25,6 +25,7 @@ def build_padded_ego_batch(
     vicinity_m: float = 0.0,
     use_edge_rt: bool = False,
     edge_feat_dim: int = 0,
+    edge_features: Optional[List[str]] = None,
     # global_stats_fn: Optional[Callable[[Any], np.ndarray]] = None,
 ) -> Tuple[Dict[str, np.ndarray], List[List[Optional[str]]]]:
     """
@@ -85,6 +86,8 @@ def build_padded_ego_batch(
     edge_index = np.zeros((R, 2, E_max), np.int64)
     edge_mask = np.zeros((R, E_max), np.uint8)
     edge_attr = np.zeros((R, E_max, edge_feat_dim), np.float32) if edge_feat_dim > 0 else None
+    edge_features = list(edge_features or [])
+    ego_edge_idx = edge_features.index("is_ego_edge") if "is_ego_edge" in edge_features else None
     cand_idx = np.zeros((R, K_max), np.int64)
     cand_mask = np.zeros((R, K_max), np.uint8)
 
@@ -102,7 +105,7 @@ def build_padded_ego_batch(
     robot_xy_cache: List[Tuple[float, float]] = []
     for rid in robots:
         try:
-            rf = feature_fn(rid, None, "robot")
+            rf = feature_fn(rid, None, "robot_other")
             robot_xy_cache.append(_to_meters((float(rf[0]), float(rf[1]))))
         except Exception:
             robot_xy_cache.append((0.0, 0.0))
@@ -111,7 +114,7 @@ def build_padded_ego_batch(
         rid = robots[i]
         # Robot node at index 0 (even if rid is None, create a dummy vector)
         try:
-            x[i, 0, :] = feature_fn(rid, None, "robot")
+            x[i, 0, :] = feature_fn(rid, None, "robot_ego")
         except Exception:
             # fallback: zeros with bias 1 in the last slot
             pass
@@ -166,6 +169,8 @@ def build_padded_ego_batch(
                 if edge_attr is not None and use_edge_rt:
                     try:
                         edge_attr[i, e_ptr, :] = feature_fn(rid, t, "edge_rt")
+                        if ego_edge_idx is not None:
+                            edge_attr[i, e_ptr, ego_edge_idx] = 1.0
                     except Exception:
                         pass
                 e_ptr += 1
@@ -176,6 +181,8 @@ def build_padded_ego_batch(
                 if edge_attr is not None and use_edge_rt:
                     try:
                         edge_attr[i, e_ptr, :] = feature_fn(rid, t, "edge_rt")
+                        if ego_edge_idx is not None:
+                            edge_attr[i, e_ptr, ego_edge_idx] = 1.0
                     except Exception:
                         pass
                 e_ptr += 1
@@ -200,7 +207,7 @@ def build_padded_ego_batch(
                         next_node_id += 1
                         competitor_nodes[other_key] = other_node_id
                         try:
-                            x[i, other_node_id, :] = feature_fn(other_rid, None, "robot")
+                            x[i, other_node_id, :] = feature_fn(other_rid, None, "robot_other")
                         except Exception:
                             pass
                         node_mask[i, other_node_id] = 1
@@ -212,6 +219,8 @@ def build_padded_ego_batch(
                         if edge_attr is not None and use_edge_rt:
                             try:
                                 edge_attr[i, e_ptr, :] = feature_fn(other_rid, t, "edge_rt")
+                                if ego_edge_idx is not None:
+                                    edge_attr[i, e_ptr, ego_edge_idx] = 0.0
                             except Exception:
                                 pass
                         e_ptr += 1
@@ -222,6 +231,8 @@ def build_padded_ego_batch(
                         if edge_attr is not None and use_edge_rt:
                             try:
                                 edge_attr[i, e_ptr, :] = feature_fn(other_rid, t, "edge_rt")
+                                if ego_edge_idx is not None:
+                                    edge_attr[i, e_ptr, ego_edge_idx] = 0.0
                             except Exception:
                                 pass
                         e_ptr += 1

@@ -35,6 +35,7 @@ N_max = int(opt.env.N_max)
 E_max = int(opt.env.E_max)
 use_xy_pickup = bool(opt.features.use_xy_pickup)
 use_node_type = bool(getattr(opt.features, "use_node_type", False))
+use_ego_robot = bool(getattr(opt.features, "use_ego_robot", False))
 use_edge_rt = bool(getattr(opt.features, "use_edge_rt", False))
 edge_features = list(getattr(opt.features, "edge_features", []))
 robot_commitment = str(getattr(opt.features, "robot_commitment", "none"))
@@ -44,6 +45,7 @@ F = compute_feature_dim(
     use_xy_pickup=use_xy_pickup,
     use_node_type=use_node_type,
     use_edge_rt=use_edge_rt,
+    use_ego_robot=use_ego_robot,
     robot_commitment=robot_commitment,
     route_slots_k=route_slots_k,
 )
@@ -125,6 +127,7 @@ for seed in SEEDS[:NUM_SEEDS]:
             use_node_type=use_node_type,
             use_edge_rt=use_edge_rt,
             edge_features=edge_features,
+            use_ego_robot=use_ego_robot,
             robot_commitment=robot_commitment,
             route_slots_k=route_slots_k,
         )
@@ -140,6 +143,7 @@ for seed in SEEDS[:NUM_SEEDS]:
             normalize_features=bool(getattr(opt.features, "normalize_features", False)),
             use_edge_rt=use_edge_rt,
             edge_feat_dim=edge_feat_dim,
+            edge_features=edge_features,
         )
 
         # ...existing code for NOOP, action functions, and episode run...

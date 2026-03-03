@@ -164,6 +164,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             use_node_type=bool(config.get('use_node_type', False)),
             use_edge_rt=bool(config.get('use_edge_rt', False)),
             edge_features=list(config.get('edge_features', [])),
+            use_ego_robot=bool(config.get('use_ego_robot', False)),
             robot_commitment=str(config.get('robot_commitment', 'none')),
             route_slots_k=int(config.get('route_slots_k', 2)),
         )
@@ -180,6 +181,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             normalize_features=bool(config.get('normalize_features', False)),
             use_edge_rt=bool(config.get('use_edge_rt', False)),
             edge_feat_dim=int(config.get('edge_feat_dim', 0)),
+            edge_features=list(config.get('edge_features', [])),
         )
         
         # Run single evaluation episode (one per fresh SUMO instance)
@@ -520,6 +522,7 @@ def main():
 
     use_xy_pickup = bool(opt.features.use_xy_pickup)
     use_node_type = bool(getattr(opt.features, "use_node_type", False))
+    use_ego_robot = bool(getattr(opt.features, "use_ego_robot", False))
     use_edge_rt = bool(getattr(opt.features, "use_edge_rt", False))
     edge_features = list(getattr(opt.features, "edge_features", []))
     robot_commitment = str(getattr(opt.features, "robot_commitment", "none"))
@@ -529,6 +532,7 @@ def main():
         use_xy_pickup=use_xy_pickup,
         use_node_type=use_node_type,
         use_edge_rt=use_edge_rt,
+        use_ego_robot=use_ego_robot,
         robot_commitment=robot_commitment,
         route_slots_k=route_slots_k,
     )
@@ -546,6 +550,7 @@ def main():
         'use_xy_pickup': use_xy_pickup,
         'normalize_features': bool(getattr(opt.features, "normalize_features", False)),
         'use_node_type': use_node_type,
+        'use_ego_robot': use_ego_robot,
         'use_edge_rt': use_edge_rt,
         'edge_features': edge_features,
         'robot_commitment': robot_commitment,

@@ -36,6 +36,7 @@ class RidepoolRTEnv(gym.Env):
         normalize_features: bool = False,
         use_edge_rt: bool = False,
         edge_feat_dim: int = 0,
+        edge_features: Optional[List[str]] = None,
     ):
         super().__init__()
         self.controller = controller
@@ -48,6 +49,7 @@ class RidepoolRTEnv(gym.Env):
         self.normalize_features = bool(normalize_features)
         self.use_edge_rt = bool(use_edge_rt)
         self.edge_feat_dim = int(edge_feat_dim)
+        self.edge_features = list(edge_features or [])
         self._episode_reward = 0
         self._macro_step = 0
 
@@ -114,6 +116,7 @@ class RidepoolRTEnv(gym.Env):
             vicinity_m=float(getattr(self.controller, "vicinity_m", 0.0)),
             use_edge_rt=self.use_edge_rt,
             edge_feat_dim=self.edge_feat_dim,
+            edge_features=self.edge_features,
             # global_stats_fn=self.global_stats_fn,  # currently unused
         )
         # Save the exact ids used for slots this step (for action mapping)
