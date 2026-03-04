@@ -122,7 +122,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
                 run_name=f"model_ep{episode_idx}_ts{ts_idx}_seed{seed}_att{attempt}",
                 erase_run_dir_on_start=True,
                 erase_episode_dir_on_start=True,
-                console_debug=False
+                console_debug=False,
             )
         )
         

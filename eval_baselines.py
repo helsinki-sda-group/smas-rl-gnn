@@ -94,7 +94,7 @@ for seed in SEEDS[:NUM_SEEDS]:
                 run_name=f"rp_eval_seed{seed}_{policy_name}",
                 erase_run_dir_on_start=True,
                 erase_episode_dir_on_start=True,
-                console_debug=False
+                console_debug=False,
             )
         )
 

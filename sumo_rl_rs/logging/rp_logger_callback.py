@@ -169,12 +169,12 @@ class RPLoggerCallback(BaseCallback):
             if self.metrics_log_path:
                 episode_dir = getattr(self.rp_logger, "last_ep_dir", None) or self.rp_logger.ep_dir
                 info_for_metrics = infos[0] if infos else {}
-                
+
                 # Get current seed from reset_fn if available
                 current_seed = self.seed
                 if self.reset_fn and hasattr(self.reset_fn, 'get_current_seed'):
                     current_seed = self.reset_fn.get_current_seed()
-                
+
                 metrics = compute_episode_metrics_from_logs(
                     episode_dir=episode_dir,
                     episode_info=info_for_metrics,
@@ -182,9 +182,7 @@ class RPLoggerCallback(BaseCallback):
                     seed=current_seed,
                     num_robots=self.num_robots,
                 )
-                # Set ts (timesteps) field for training log
-                if hasattr(metrics, '__dict__'):
-                    metrics.ts = getattr(self, 'num_timesteps', 0)
+                metrics.ts = getattr(self, 'num_timesteps', 0)
                 append_metrics_log(self.metrics_log_path, metrics)
             if self.logit_metrics_log_path:
                 current_seed = self.seed
