@@ -53,6 +53,7 @@ N_max = int(opt.env.N_max)
 E_max = int(opt.env.E_max)
 use_xy_pickup = bool(opt.features.use_xy_pickup)
 use_node_type = bool(getattr(opt.features, "use_node_type", False))
+use_ego_robot = bool(getattr(opt.features, "use_ego_robot", False))
 use_edge_rt = bool(getattr(opt.features, "use_edge_rt", False))
 edge_features = list(getattr(opt.features, "edge_features", []))
 robot_commitment = str(getattr(opt.features, "robot_commitment", "none"))
@@ -62,6 +63,7 @@ F = compute_feature_dim(
     use_xy_pickup=use_xy_pickup,
     use_node_type=use_node_type,
     use_edge_rt=use_edge_rt,
+    use_ego_robot=use_ego_robot,
     robot_commitment=robot_commitment,
     route_slots_k=route_slots_k,
 )
@@ -124,7 +126,7 @@ rp_logger = RidepoolLogger(
         run_name=str(opt.logging.run_name),        # run dir will be: runs/rp_gnn_debug
         erase_run_dir_on_start=not continue_training,
         erase_episode_dir_on_start=not continue_training,
-        console_debug=True
+        console_debug=True,
     )
 )
 
@@ -151,6 +153,7 @@ feature_fn = make_feature_fn(
     use_node_type=use_node_type,
     use_edge_rt=use_edge_rt,
     edge_features=edge_features,
+    use_ego_robot=use_ego_robot,
     robot_commitment=robot_commitment,
     route_slots_k=route_slots_k,
 )
@@ -172,10 +175,15 @@ env = RidepoolRTEnv(
     normalize_features=bool(getattr(opt.features, "normalize_features", False)),
     use_edge_rt=use_edge_rt,
     edge_feat_dim=edge_feat_dim,
+    edge_features=edge_features,
 )
 env = Monitor(env, filename="monitor.csv", info_keywords=("episode_reward",))
 
 # 4) SB3 PPO with custom GNN policy
+gnn_layers = int(getattr(opt.ppo.policy_kwargs, "gnn_layers", 2))
+gnn_layers_two_hop = int(getattr(opt.ppo.policy_kwargs, "gnn_layers_two_hop", gnn_layers))
+chosen_layers = gnn_layers_two_hop if bool(getattr(opt.env, "two_hop", False)) else gnn_layers
+
 policy_kwargs = dict(
     in_dim=F,
     hidden=int(opt.ppo.policy_kwargs.hidden),
@@ -184,6 +192,7 @@ policy_kwargs = dict(
     noop_init=float(opt.ppo.policy_kwargs.noop_init),
     freeze_noop_logit=bool(getattr(opt.ppo.policy_kwargs, "freeze_noop_logit", False)),
     edge_dim=edge_feat_dim,
+    gnn_kwargs={"layers": chosen_layers},
 )
 
 def _latest_model_path(model_dir: str) -> tuple[str, int, int]:

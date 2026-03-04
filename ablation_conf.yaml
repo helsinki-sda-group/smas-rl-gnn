@@ -1,0 +1,24 @@
+# Aggregation config for ablation results
+model_dirs:
+  # - ../gnn-rl
+  - ../rp-withoutnoop
+  - ../rp-train-notanh
+  #- ../training results/exp-withoutnoop
+  #- ../training results/exp-notanh
+
+
+read_params_from_yaml: false
+
+# Used only if read_params_from_yaml is false
+exp_params:
+  use_xy_pickup: [true, false]
+  normalize_features: [true, false]
+  logit_temperature: [1.0, 1.0]
+  noop_init: -1.0
+  freeze_noop_logit: [true, false]
+
+k_eval: 8
+
+output_dir: ablation_results
+output_file: ablation_aggregated.log
+output_csv: ablation_aggregated.csv

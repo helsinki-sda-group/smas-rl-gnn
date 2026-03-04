@@ -17,6 +17,7 @@ def compute_feature_dim(
     use_xy_pickup: bool = False,
     use_node_type: bool = False,
     use_edge_rt: bool = False,
+    use_ego_robot: bool = False,
     robot_commitment: str = "none",
     route_slots_k: int = 2,
 ) -> int:
@@ -25,6 +26,8 @@ def compute_feature_dim(
         dim += 2
     if use_node_type:
         dim += 2
+    if use_ego_robot:
+        dim += 1
     if robot_commitment == "route_slots":
         dim += int(route_slots_k) * 3
     return dim
@@ -33,6 +36,7 @@ def get_feature_names(
     use_xy_pickup: bool = False,
     use_node_type: bool = False,
     use_edge_rt: bool = False,
+    use_ego_robot: bool = False,
     robot_commitment: str = "none",
     route_slots_k: int = 2,
 ) -> tuple[List[str], List[str]]:
@@ -59,6 +63,10 @@ def get_feature_names(
         robot_names += ["is_robot", "is_task"]
         task_names += ["is_robot", "is_task"]
 
+    if use_ego_robot:
+        robot_names += ["is_ego_robot"]
+        task_names += ["is_ego_robot"]
+
     return robot_names, task_names
 
 def make_feature_fn(
@@ -68,6 +76,7 @@ def make_feature_fn(
     use_node_type: bool = False,
     use_edge_rt: bool = False,
     edge_features: Optional[List[str]] = None,
+    use_ego_robot: bool = False,
     robot_commitment: str = "none",
     route_slots_k: int = 2,
 ):
@@ -75,6 +84,7 @@ def make_feature_fn(
         use_xy_pickup=use_xy_pickup,
         use_node_type=use_node_type,
         use_edge_rt=use_edge_rt,
+        use_ego_robot=use_ego_robot,
         robot_commitment=robot_commitment,
         route_slots_k=route_slots_k,
     )
@@ -136,9 +146,20 @@ def make_feature_fn(
     def _append_node_type(out: np.ndarray, node_type: str) -> None:
         if not use_node_type:
             return
-        if out.shape[0] >= 2:
-            out[-2] = 1.0 if node_type == "robot" else 0.0
-            out[-1] = 1.0 if node_type == "task" else 0.0
+        if use_ego_robot:
+            if out.shape[0] >= 3:
+                out[-3] = 1.0 if node_type == "robot" else 0.0
+                out[-2] = 1.0 if node_type == "task" else 0.0
+        else:
+            if out.shape[0] >= 2:
+                out[-2] = 1.0 if node_type == "robot" else 0.0
+                out[-1] = 1.0 if node_type == "task" else 0.0
+
+    def _append_ego_robot(out: np.ndarray, is_ego: bool) -> None:
+        if not use_ego_robot:
+            return
+        if out.shape[0] >= 1:
+            out[-1] = 1.0 if is_ego else 0.0
 
     def _robot_route_slots(rid_s: str) -> List[Tuple[float, float, float]]:
         if robot_commitment != "route_slots":
@@ -206,6 +227,8 @@ def make_feature_fn(
                 out[i] = dy
             elif name == "eta":
                 out[i] = eta
+            elif name == "is_ego_edge":
+                out[i] = 0.0
         return out
 
     def _resolve_task(x: Any) -> Optional[Task]:
@@ -225,7 +248,8 @@ def make_feature_fn(
         # robot features are [ robot_x_coordinate, robot_y_coordinate, free_capacity, 0, 0, 0, 0, 0, 0 ]
         # example: [2.0107662e+03 2.4869739e+03 2.0000000e+00 0. 0. 0. 0. 0. 0.]
 
-        if node_type == "robot":
+        if node_type in {"robot", "robot_ego", "robot_other"}:
+            is_ego = node_type != "robot_other"
             rid = _normalize_rid(obj_a)
             if not _valid_robot_id(rid):
                 return out  # all zeros for padded/missing taxis
@@ -265,6 +289,7 @@ def make_feature_fn(
                     out[offset + 2] = valid
                     offset += 3
             _append_node_type(out, "robot")
+            _append_ego_robot(out, is_ego)
             return out
 
         # task features are:
@@ -324,6 +349,7 @@ def make_feature_fn(
                 out[7] = 1.0 if bool(getattr(t, "is_obsolete", False)) else 0.0
                 out[8] = 1.0 if bool(getattr(t, "is_assigned", False)) else 0.0
             _append_node_type(out, "task")
+            _append_ego_robot(out, False)
             return out
 
         elif node_type == "edge_rt":
