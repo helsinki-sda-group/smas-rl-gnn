@@ -87,8 +87,10 @@ class RidepoolRTEnv(gym.Env):
         robots = self.controller.get_robots()
         tasks_viable, cand_lists = self.controller.get_tasks_and_candidate_lists(self.K_max)
 
-        # Trim robots to R; never append Nones
+        # Trim robots to R; pad with None to keep fixed shapes
         robots = robots[: self.R]
+        if len(robots) < self.R:
+            robots += [None] * (self.R - len(robots))
 
         # Ensure there are cand_lists for each of the first R robots
         if len(cand_lists) < self.R:

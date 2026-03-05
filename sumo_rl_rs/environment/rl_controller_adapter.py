@@ -761,7 +761,7 @@ class RLControllerAdapter:
         """
 
         
-        robots = self._last_robot_ids or self.get_robots()
+        robots = self.get_robots()
         res_index = self._reservation_index()
         p2r = self._person_to_res_index(res_index)
 
