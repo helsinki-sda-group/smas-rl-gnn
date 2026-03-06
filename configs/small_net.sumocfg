@@ -3,7 +3,7 @@
 <configuration>
     <input>
         <net-file value="randgrid.net.xml"/>
-        <route-files value="5-15.rou.xml"/>
+        <route-files value="coordination_medium_6t_40p.rou.xml"/>
 		<additional-files value="parkingareas.add.xml"/>
     </input>
     <time>
