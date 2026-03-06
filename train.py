@@ -259,7 +259,7 @@ callback = RPLoggerCallback(
     rp_logger,
     controller,
     metrics_log_path=metrics_log_path,
-    logit_metrics_log_path=logit_metrics_log_path,
+    logit_metrics_log_path=None,#logit_metrics_log_path,
     num_robots=R,
     reset_fn=reset_fn,  # Pass reset_fn to get current seed
     save_model_dir=model_save_dir,  # Enable model saving after each rollout
