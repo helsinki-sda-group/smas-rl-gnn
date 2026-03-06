@@ -192,6 +192,9 @@ policy_kwargs = dict(
     noop_init=float(opt.ppo.policy_kwargs.noop_init),
     freeze_noop_logit=bool(getattr(opt.ppo.policy_kwargs, "freeze_noop_logit", False)),
     edge_dim=edge_feat_dim,
+    use_competitor_fusion=bool(getattr(opt.env, "two_hop", False)),
+    eta_index=(edge_features.index("eta") if "eta" in edge_features else -1),
+    lambda_init=float(getattr(opt.ppo.policy_kwargs, "lambda_init", 0.0)),
     gnn_kwargs={"layers": chosen_layers},
 )
 

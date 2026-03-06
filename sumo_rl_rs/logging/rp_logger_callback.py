@@ -40,12 +40,19 @@ class RPLoggerCallback(BaseCallback):
         self._edge_max = np.full((3,), -np.inf, dtype=np.float64)
         self._edge_count = 0
         self._edge_logged = False
+        self.comp_norms_log_path = os.path.abspath(os.path.join(os.getcwd(), "comp_norms.log"))
 
     def _on_training_start(self) -> None:
         if self.metrics_log_path:
             ensure_metrics_log(self.metrics_log_path, overwrite=not self.continue_training)
         if self.logit_metrics_log_path:
             ensure_logit_metrics_log(self.logit_metrics_log_path, overwrite=not self.continue_training)
+
+        if not self.continue_training and os.path.exists(self.comp_norms_log_path):
+            try:
+                os.remove(self.comp_norms_log_path)
+            except Exception:
+                pass
         
         # Create save directory if specified
         if self.save_model_dir:
@@ -90,6 +97,23 @@ class RPLoggerCallback(BaseCallback):
                     print(f"[WARN] Could not log noop_logit: {e}")
             if self.verbose > 0:
                 print(f"Model saved to {model_path}")
+
+        try:
+            gnn_ac = getattr(self.model.policy, "gnn_ac", None)
+            stats = gnn_ac.pop_comp_norm_stats() if gnn_ac is not None else None
+            if stats is not None:
+                file_exists = os.path.exists(self.comp_norms_log_path)
+                with open(self.comp_norms_log_path, "a") as f:
+                    if not file_exists:
+                        f.write("ts,ep,h_k,m_comp,lam_m_comp,lam,count\n")
+                    f.write(
+                        f"{int(self.num_timesteps)},{int(self.ep_idx)},"
+                        f"{stats['h_k']:.6f},{stats['m_comp']:.6f},{stats['lam_m_comp']:.6f},"
+                        f"{stats['lam']:.6f},{int(stats['count'])}\n"
+                    )
+        except Exception as e:
+            if self.verbose > 0:
+                print(f"[WARN] Could not log comp norms: {e}")
         return True
 
     def _on_step(self) -> bool:

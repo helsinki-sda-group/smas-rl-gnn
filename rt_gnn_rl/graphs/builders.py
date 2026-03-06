@@ -212,21 +212,9 @@ def build_padded_ego_batch(
                             pass
                         node_mask[i, other_node_id] = 1
 
-                    if e_ptr + 2 <= E_max:
+                    if e_ptr + 1 <= E_max:
                         edge_index[i, 0, e_ptr] = node_id
                         edge_index[i, 1, e_ptr] = other_node_id
-                        edge_mask[i, e_ptr] = 1
-                        if edge_attr is not None and use_edge_rt:
-                            try:
-                                edge_attr[i, e_ptr, :] = feature_fn(other_rid, t, "edge_rt")
-                                if ego_edge_idx is not None:
-                                    edge_attr[i, e_ptr, ego_edge_idx] = 0.0
-                            except Exception:
-                                pass
-                        e_ptr += 1
-
-                        edge_index[i, 0, e_ptr] = other_node_id
-                        edge_index[i, 1, e_ptr] = node_id
                         edge_mask[i, e_ptr] = 1
                         if edge_attr is not None and use_edge_rt:
                             try:

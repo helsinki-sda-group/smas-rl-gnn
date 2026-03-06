@@ -59,11 +59,20 @@ class EgoActorCritic(nn.Module):
         backbone: Literal["dummy", "sage"] = "dummy",
         critic_aggregation: Literal["per_robot", "joint_mean", "joint_attn"] = "joint_attn",
         edge_dim: int = 0,
+        use_competitor_fusion: bool = True,
+        lambda_init: float = 0.0,
+        eta_index: int = -1,
         **gnn_kwargs,
     ):
         super().__init__()
         self.k_max = k_max
+        self.hidden = hidden
+        self.edge_dim = int(edge_dim)
         self.critic_aggregation = critic_aggregation
+        self.use_competitor_fusion = bool(use_competitor_fusion)
+        self.eta_index = int(eta_index)
+        self._comp_norm_sums: Optional[torch.Tensor] = None
+        self._comp_norm_count: int = 0
 
         if backbone == "dummy":
             self.enc_actor = _DummyEgoEncoder(in_dim, hidden)
@@ -76,8 +85,9 @@ class EgoActorCritic(nn.Module):
 
 
         self.actor_norm = nn.LayerNorm(hidden)
-        # Actor: per-node score
         self.actor_head = nn.Linear(hidden, 1)
+        if self.use_competitor_fusion:
+            self.lambda_comp = nn.Parameter(torch.tensor(lambda_init))
 
         # Critic: head maps an H-dim vector to 1 scalar
         self.critic_head = nn.Sequential(
@@ -88,6 +98,27 @@ class EgoActorCritic(nn.Module):
         # If using attention aggregation for the joint critic, learn weights over robots
         if self.critic_aggregation == "joint_attn":
             self.attn_score = nn.Linear(hidden, 1)  # produces unnormalized weights per robot
+
+    def _init_comp_stats(self, device: torch.device) -> None:
+        if self._comp_norm_sums is None:
+            self._comp_norm_sums = torch.zeros((4,), device=device)
+            self._comp_norm_count = 0
+
+    def pop_comp_norm_stats(self) -> Optional[dict[str, float]]:
+        if self._comp_norm_sums is None or self._comp_norm_count <= 0:
+            return None
+        sums = self._comp_norm_sums.detach().cpu().numpy().astype(float)
+        count = float(self._comp_norm_count)
+        stats = {
+            "h_k": sums[0] / count,
+            "m_comp": sums[1] / count,
+            "lam_m_comp": sums[2] / count,
+            "lam": sums[3] / count,
+            "count": int(self._comp_norm_count),
+        }
+        self._comp_norm_sums = None
+        self._comp_norm_count = 0
+        return stats
 
     @torch.no_grad()
     def _remap_indices(self, mask: torch.Tensor) -> torch.Tensor:
@@ -103,112 +134,235 @@ class EgoActorCritic(nn.Module):
 
     def _build_graph_lists(self, obs):
         """
-        Convert padded batch into per-graph lists and candidate indices (remapped).
-        Returns:
-            x_list, ei_list, cand_loc_idx (list of LongTensor [k_i]), R
+        Build both:
+        (a) full remapped graphs (ego + tasks + competitors)
+        (b) 1-hop pruned graphs (ego + candidate tasks)
         """
         x = obs["x"]                    # [R, N_max, F]
         node_mask = obs["node_mask"]    # [R, N_max] bool
-        R, N_max, _ = x.shape
+        R, _, _ = x.shape
 
         has_edges = ("edge_index" in obs) and ("edge_mask" in obs)
         has_edge_attr = has_edges and ("edge_attr" in obs)
 
-        x_list: List[torch.Tensor] = []
-        ei_list: List[torch.Tensor] = []
-        cand_loc_idx: List[torch.Tensor] = []
-        edge_attr_list: List[torch.Tensor] = []
+        x_list_full: List[torch.Tensor] = []
+        ei_list_full: List[torch.Tensor] = []
+        edge_attr_list_full: List[torch.Tensor] = []
+        cand_loc_idx_full: List[torch.Tensor] = []
+
+        x_list_1hop: List[torch.Tensor] = []
+        ei_list_1hop: List[torch.Tensor] = []
+        edge_attr_list_1hop: List[torch.Tensor] = []
+        cand_loc_idx_1hop: List[torch.Tensor] = []
 
         for i in range(R):
-            mask_i = node_mask[i].to(dtype=torch.bool)      # [N_max] bool
-            x_i_full = x[i].to(dtype=torch.float32)         # [N_max, F] float32
+            mask_i = node_mask[i].to(dtype=torch.bool)
+            x_i_padded = x[i].to(dtype=torch.float32)
 
-            # If no valid nodes, create a 1-node dummy graph to keep encoders happy
             if mask_i.any():
-                x_i = x_i_full[mask_i]                      # [n_i, F] 
+                x_full = x_i_padded[mask_i]
+                full_mask = mask_i.clone()
             else:
-                x_i = torch.zeros((1, x.size(-1)),device=x.device, dtype=torch.float32)
-                # create a synthetic mask with a single True at position 0 so idx_map is consistent
-                mask_i = torch.zeros_like(mask_i)
-                mask_i[0] = True
+                x_full = torch.zeros((1, x.size(-1)), device=x.device, dtype=torch.float32)
+                full_mask = torch.zeros_like(mask_i)
+                full_mask[0] = True
 
-            # map 0..N_max-1 -> -1 or 0..n_i-1
-            idx_map = self._remap_indices(mask_i)           # [N_max] -> [-1 or 0..n_i-1] long
+            idx_map_full = self._remap_indices(full_mask)
 
-            # ---- edges: mask -> cast -> remap -> drop invalid ----
             if has_edges:
-                ei_full = obs["edge_index"][i].to(dtype=torch.long)     # [2, E_max]
-                emask_i = obs["edge_mask"][i].to(dtype=torch.bool)      # [E_max]
-                ei_i = ei_full[:, emask_i]                              # [2, e_i]
-                ei_i = idx_map[ei_i]                         # remap to local ids (long)
-                valid = (ei_i >= 0).all(dim=0)               # drop edges touching masked nodes
-                ei_i = ei_i[:, valid]
+                ei_full_pad = obs["edge_index"][i].to(dtype=torch.long)
+                emask_i = obs["edge_mask"][i].to(dtype=torch.bool)
+                ei_full = ei_full_pad[:, emask_i]
+                ei_full = idx_map_full[ei_full]
+                valid_full = (ei_full >= 0).all(dim=0)
+                ei_full = ei_full[:, valid_full]
+
                 if has_edge_attr:
-                    ea_full = obs["edge_attr"][i].to(dtype=torch.float32)  # [E_max, D]
-                    ea_i = ea_full[emask_i]
-                    ea_i = ea_i[valid]
+                    ea_full_pad = obs["edge_attr"][i].to(dtype=torch.float32)
+                    ea_full = ea_full_pad[emask_i][valid_full]
                 else:
-                    ea_i = x_i.new_zeros((ei_i.size(1), 0), dtype=torch.float32)
+                    ea_full = x_full.new_zeros((ei_full.size(1), 0), dtype=torch.float32)
             else:
-                ei_i = x_i.new_zeros((2, 0), dtype=torch.long)
-                ea_i = x_i.new_zeros((0, 0), dtype=torch.float32)
+                ei_full = x_full.new_zeros((2, 0), dtype=torch.long)
+                ea_full = x_full.new_zeros((0, 0), dtype=torch.float32)
 
-            # ---- candidates: mask -> cast -> remap -> drop invalid ----
-            cand_full = obs["cand_idx"][i].to(dtype=torch.long)          # [K_max]
-            cmask_i = obs["cand_mask"][i].to(dtype=torch.bool)           # [K_max]
-            cand_raw = cand_full[cmask_i]                                 # [k_i_raw]
-            cand_i = idx_map[cand_raw]                                    # -> 0..n_i-1 or -1
-            cand_i = cand_i[cand_i >= 0]                                  # keep only valid                                  # keep only valid
+            cand_full_pad = obs["cand_idx"][i].to(dtype=torch.long)
+            cmask_i = obs["cand_mask"][i].to(dtype=torch.bool)
+            cand_raw = cand_full_pad[cmask_i]
+            cand_full = idx_map_full[cand_raw]
+            valid_cand = (cand_full >= 0)
+            cand_raw_valid = cand_raw[valid_cand]
+            cand_full = cand_full[valid_cand]
 
-            x_list.append(x_i)
-            ei_list.append(ei_i)
-            cand_loc_idx.append(cand_i)
-            edge_attr_list.append(ea_i)
+            x_list_full.append(x_full)
+            ei_list_full.append(ei_full)
+            edge_attr_list_full.append(ea_full)
+            cand_loc_idx_full.append(cand_full)
 
-        return x_list, ei_list, edge_attr_list, cand_loc_idx, R
+            keep_mask = torch.zeros_like(full_mask)
+            if full_mask[0]:
+                keep_mask[0] = True
+            if cand_raw_valid.numel() > 0:
+                keep_mask[cand_raw_valid] = True
 
+            if keep_mask.any():
+                x_1hop = x_i_padded[keep_mask]
+            else:
+                x_1hop = torch.zeros((1, x.size(-1)), device=x.device, dtype=torch.float32)
+                keep_mask = torch.zeros_like(keep_mask)
+                keep_mask[0] = True
+
+            idx_map_1hop = self._remap_indices(keep_mask)
+
+            if has_edges:
+                ei_1hop_pad = obs["edge_index"][i].to(dtype=torch.long)
+                emask_i = obs["edge_mask"][i].to(dtype=torch.bool)
+                ei_1hop = ei_1hop_pad[:, emask_i]
+                ei_1hop = idx_map_1hop[ei_1hop]
+                valid_1hop = (ei_1hop >= 0).all(dim=0)
+                ei_1hop = ei_1hop[:, valid_1hop]
+
+                if has_edge_attr:
+                    ea_1hop_pad = obs["edge_attr"][i].to(dtype=torch.float32)
+                    ea_1hop = ea_1hop_pad[emask_i][valid_1hop]
+                else:
+                    ea_1hop = x_1hop.new_zeros((ei_1hop.size(1), 0), dtype=torch.float32)
+            else:
+                ei_1hop = x_1hop.new_zeros((2, 0), dtype=torch.long)
+                ea_1hop = x_1hop.new_zeros((0, 0), dtype=torch.float32)
+
+            cand_1hop = idx_map_1hop[cand_raw_valid]
+            cand_1hop = cand_1hop[cand_1hop >= 0]
+
+            x_list_1hop.append(x_1hop)
+            ei_list_1hop.append(ei_1hop)
+            edge_attr_list_1hop.append(ea_1hop)
+            cand_loc_idx_1hop.append(cand_1hop)
+
+        return (
+            x_list_1hop, ei_list_1hop, edge_attr_list_1hop, cand_loc_idx_1hop,
+            x_list_full, ei_list_full, edge_attr_list_full, cand_loc_idx_full,
+            R,
+        )
+
+
+    def _compute_comp_context(
+        self,
+        x_full_i: torch.Tensor,
+        ei_full_i: torch.Tensor,
+        ea_full_i: torch.Tensor,
+        cand_full_i: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Architecture 3.1: s_t = min_{r in C(t)} ETA(r,t) - ETA(ego,t)
+        Returns s_t in the same order as cand_full_i. Shape [k_i].
+        """
+        device = x_full_i.device
+        k_i = int(cand_full_i.numel())
+        if (not self.use_competitor_fusion) or k_i == 0:
+            return x_full_i.new_zeros((k_i,), dtype=torch.float32)
+        if self.edge_dim <= 0 or self.eta_index < 0:
+            return x_full_i.new_zeros((k_i,), dtype=torch.float32)
+
+        src = ei_full_i[0] if ei_full_i.numel() > 0 else torch.empty(0, dtype=torch.long, device=device)
+        dst = ei_full_i[1] if ei_full_i.numel() > 0 else torch.empty(0, dtype=torch.long, device=device)
+        task_set_full = set(int(t) for t in cand_full_i.tolist())
+
+        edge_attr_map = {}
+        if ea_full_i.numel() > 0:
+            for k in range(ei_full_i.size(1)):
+                u = int(src[k].item())
+                v = int(dst[k].item())
+                edge_attr_map[(u, v)] = ea_full_i[k]
+
+        def _edge_attr_between(u: int, v: int) -> torch.Tensor:
+            out = edge_attr_map.get((u, v), None)
+            if out is None:
+                out = edge_attr_map.get((v, u), None)
+            if out is None:
+                out = x_full_i.new_zeros((self.edge_dim,), dtype=torch.float32)
+            return out
+
+        s_list: List[torch.Tensor] = []
+        for t in cand_full_i.tolist():
+            t = int(t)
+            eta_ego = _edge_attr_between(0, t)[self.eta_index]
+            comps = []
+            if src.numel() > 0:
+                comp_ids = dst[src == t]
+                comps = [int(n) for n in comp_ids.tolist() if int(n) != 0 and int(n) not in task_set_full]
+
+            if len(comps) == 0:
+                s_list.append(eta_ego.new_tensor(0.0))
+            else:
+                eta_comp = torch.stack([_edge_attr_between(c, t)[self.eta_index] for c in comps], dim=0)
+                s_list.append(eta_comp.min() - eta_ego)
+
+        return torch.stack(s_list, dim=0)
 
     def forward(self, obs):
-        # Convert padded obs (x is [R, N_max, F], edge_index is [R, 2, E_max], etc.) 
-        # into ragged lists: x_list[i] is [n_i, F], ei_list[i] is [2, e_i], cand_loc_idx[i] is [k_i]
-        x_list, ei_list, edge_attr_list, cand_loc_idx, R = self._build_graph_lists(obs)
+        (
+            x_list, ei_list, edge_attr_list, cand_loc_idx,
+            x_list_full, ei_list_full, edge_attr_list_full, cand_loc_idx_full,
+            R,
+        ) = self._build_graph_lists(obs)
         K_max = obs["cand_mask"].shape[1]
         device = obs["x"].device
 
-        # === Actor (unchanged) ===
-        #h_a, batch_a = self.enc_actor.encode_graphs(x_list, ei_list)  # [sum_nodes, H]
-        #scores = self.actor_head(h_a).squeeze(-1)                      # [sum_nodes]
-
-         # === Actor (with normalization) ===
-        # Assume that we have 3 ego graphs with 2, 3, and 1 nodes respectively. 
-        # Then h_a is [6, H] and batch_a.batch is [6] with values [0,0,1,1,1,2].
-        h_a, batch_a = self.enc_actor.encode_graphs(x_list, ei_list, edge_attr_list)   # [sum_nodes, H]
-        h_a = self.actor_norm(h_a)                                     # normalize within one embedding vector
-        # score is a preference score for each node, but we will only use the scores of the candidate nodes for action selection
-        scores = self.actor_head(h_a).squeeze(-1)                      # [sum_nodes]
+        # === Actor on 1-hop graph ===
+        h_a, batch_a = self.enc_actor.encode_graphs(x_list, ei_list, edge_attr_list)
+        h_a = self.actor_norm(h_a)
 
         logits_list: List[torch.Tensor] = []
         for i, _x_i in enumerate(x_list):
             mask_i = (batch_a.batch == i)
-            scores_i = scores[mask_i]                 # [n_i]
+            h_i = h_a[mask_i]                          # [n_i, H]
             cand_i = cand_loc_idx[i]                  # [k_i]
-            
-            if cand_i.numel() > 0 and scores_i.numel() > 0:
-                raw_logits = scores_i[cand_i]
-                #li = torch.tanh(raw_logits) * 5.0         # logits in [-5, +5]
+
+            if cand_i.numel() > 0 and h_i.numel() > 0:
+                h_t = h_i[cand_i]                     # [k_i, H]
+                base_logits = self.actor_head(h_t).squeeze(-1)
+                if self.use_competitor_fusion:
+                    s_t = self._compute_comp_context(
+                        x_list_full[i],
+                        ei_list_full[i],
+                        edge_attr_list_full[i],
+                        cand_loc_idx_full[i],
+                    )
+                    if s_t.numel() != h_t.size(0):
+                        raise RuntimeError(
+                            f"Competitor-correction size mismatch: s_t={s_t.size(0)} vs cand={h_t.size(0)}"
+                        )
+                    lam = self.lambda_comp
+                    raw_logits = base_logits + lam * s_t
+
+                    with torch.no_grad():
+                        self._init_comp_stats(device)
+                        if self._comp_norm_sums is not None:
+                            h_norm = h_t.detach().norm(dim=-1)
+                            m_norm = s_t.detach().abs()
+                            lam_det = lam.detach()
+                            self._comp_norm_sums[0] += h_norm.sum().detach()
+                            self._comp_norm_sums[1] += m_norm.sum().detach()
+                            self._comp_norm_sums[2] += (lam_det * m_norm).sum().detach()
+                            self._comp_norm_sums[3] += lam_det * float(h_norm.numel())
+                            self._comp_norm_count += int(h_norm.numel())
+                else:
+                    raw_logits = base_logits
                 li = raw_logits
-                # li = (raw_logits - raw_logits.mean()).clamp(-10,10)  # normalize logits to have mean 0 and be in a reasonable range
             else:
                 li = torch.empty(0, device=device)
 
-
             if li.numel() < K_max:
-                li = torch.cat([li, torch.full((K_max - li.numel(),), -1e9, device=device)], dim=0)
+                li = torch.cat(
+                    [li, torch.full((K_max - li.numel(),), -1e9, device=device)],
+                    dim=0,
+                )
             logits_list.append(li)
         logits = torch.stack(logits_list, dim=0)      # [R, K_max]
 
-        # === Critic (aggregation options) ===
-        h_c, batch_c = self.enc_critic.encode_graphs(x_list, ei_list, edge_attr_list)  # [sum_nodes, H]
+        # === Critic on full graph ===
+        h_c, batch_c = self.enc_critic.encode_graphs(x_list_full, ei_list_full, edge_attr_list_full)
         # First, get one embedding per robot by mean-pooling its nodes
         robot_embeds: List[torch.Tensor] = []
         for i, _x_i in enumerate(x_list):
