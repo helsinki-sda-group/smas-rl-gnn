@@ -40,12 +40,19 @@ class RPLoggerCallback(BaseCallback):
         self._edge_max = np.full((3,), -np.inf, dtype=np.float64)
         self._edge_count = 0
         self._edge_logged = False
+        self.comp_norms_log_path = os.path.abspath(os.path.join(os.getcwd(), "comp_norms.log"))
 
     def _on_training_start(self) -> None:
         if self.metrics_log_path:
             ensure_metrics_log(self.metrics_log_path, overwrite=not self.continue_training)
         if self.logit_metrics_log_path:
             ensure_logit_metrics_log(self.logit_metrics_log_path, overwrite=not self.continue_training)
+
+        if not self.continue_training and os.path.exists(self.comp_norms_log_path):
+            try:
+                os.remove(self.comp_norms_log_path)
+            except Exception:
+                pass
         
         # Create save directory if specified
         if self.save_model_dir:
@@ -90,6 +97,34 @@ class RPLoggerCallback(BaseCallback):
                     print(f"[WARN] Could not log noop_logit: {e}")
             if self.verbose > 0:
                 print(f"Model saved to {model_path}")
+
+        try:
+            gnn_ac = getattr(self.model.policy, "gnn_ac", None)
+            stats = gnn_ac.pop_comp_norm_stats() if gnn_ac is not None else None
+            if stats is not None:
+                file_exists = os.path.exists(self.comp_norms_log_path)
+                with open(self.comp_norms_log_path, "a") as f:
+                    if not file_exists:
+                        f.write(
+                            "ts,ep,norm_h,norm_z,p_has_comp,logit_base,logit_comp,logit_ind,"
+                            "bias_base,norm_w_h,norm_w_c,norm_w_s,norm_w_d,attn_entropy,max_attn,"
+                            "ratio_comp_base,ratio_comp_gap,norm_u,std_comp,mean_num_comp,max_num_comp,"
+                            "mean_score,std_score,count\n"
+                        )
+                    f.write(
+                        f"{int(self.num_timesteps)},{int(self.ep_idx)},"
+                        f"{stats['norm_h']:.3f},{stats['norm_z']:.3f},{stats['p_has_comp']:.3f},"
+                        f"{stats['logit_base']:.3f},{stats['logit_comp']:.3f},{stats['logit_ind']:.3f},"
+                        f"{stats['bias_base']:.3f},{stats['norm_w_h']:.3f},{stats['norm_w_c']:.3f},"
+                        f"{stats['norm_w_s']:.3f},{stats['norm_w_d']:.3f},{stats['attn_entropy']:.3f},"
+                        f"{stats['max_attn']:.3f},{stats['ratio_comp_base']:.3f},{stats['ratio_comp_gap']:.3f},"
+                        f"{stats['norm_u']:.3f},{stats['std_comp']:.3f},{stats['mean_num_comp']:.3f},"
+                        f"{stats['max_num_comp']:.3f},{stats['mean_score']:.3f},{stats['std_score']:.3f},"
+                        f"{int(stats['count'])}\n"
+                    )
+        except Exception as e:
+            if self.verbose > 0:
+                print(f"[WARN] Could not log comp norms: {e}")
         return True
 
     def _on_step(self) -> bool:

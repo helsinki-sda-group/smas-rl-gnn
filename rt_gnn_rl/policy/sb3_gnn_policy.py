@@ -48,6 +48,9 @@ class RTGNNPolicy(ActorCriticPolicy):
         noop_init: float = -1.0,
         freeze_noop_logit: bool = False,
         edge_dim: int = 0,
+        use_competitor_fusion: bool = False,
+        eta_index: int = -1,
+        lambda_init: float = 0.0,
         backbone: str = "sage",
         critic_aggregation: str = "joint_mean",
         **kwargs,
@@ -88,6 +91,9 @@ class RTGNNPolicy(ActorCriticPolicy):
             backbone=bb_lit,
             critic_aggregation=agg_lit,
             edge_dim=int(edge_dim),
+            use_competitor_fusion=bool(use_competitor_fusion),
+            eta_index=int(eta_index),
+            lambda_init=float(lambda_init),
             **gnn_kwargs,
         )
 
