@@ -71,8 +71,10 @@ class EgoActorCritic(nn.Module):
         self.critic_aggregation = critic_aggregation
         self.use_competitor_fusion = bool(use_competitor_fusion)
         self.eta_index = int(eta_index)
-        self._comp_norm_sums: Optional[torch.Tensor] = None
-        self._comp_norm_count: int = 0
+        self._comp_log_sums: Optional[torch.Tensor] = None
+        self._comp_log_count: int = 0
+        self._comp_log_comp_count: int = 0
+        self._comp_log_robot_count: int = 0
 
         if backbone == "dummy":
             self.enc_actor = _DummyEgoEncoder(in_dim, hidden)
@@ -87,7 +89,15 @@ class EgoActorCritic(nn.Module):
         self.actor_norm = nn.LayerNorm(hidden)
         self.actor_head = nn.Linear(hidden, 1)
         if self.use_competitor_fusion:
-            self.lambda_comp = nn.Parameter(torch.tensor(lambda_init))
+            self.phi_comp = nn.Sequential(
+                nn.Linear(hidden + in_dim + edge_dim, hidden),
+                nn.ReLU(),
+                nn.Linear(hidden, hidden),
+            )
+            self.score_comp = nn.Linear(hidden, 1, bias=False)
+            self.comp_head = nn.Linear(hidden, 1, bias=False)
+            self.comp_bias = nn.Parameter(torch.tensor(0.0))
+            nn.init.zeros_(self.comp_head.weight)
 
         # Critic: head maps an H-dim vector to 1 scalar
         self.critic_head = nn.Sequential(
@@ -100,24 +110,51 @@ class EgoActorCritic(nn.Module):
             self.attn_score = nn.Linear(hidden, 1)  # produces unnormalized weights per robot
 
     def _init_comp_stats(self, device: torch.device) -> None:
-        if self._comp_norm_sums is None:
-            self._comp_norm_sums = torch.zeros((4,), device=device)
-            self._comp_norm_count = 0
+        if self._comp_log_sums is None:
+            self._comp_log_sums = torch.zeros((21,), device=device)
+            self._comp_log_count = 0
+            self._comp_log_comp_count = 0
+            self._comp_log_robot_count = 0
 
     def pop_comp_norm_stats(self) -> Optional[dict[str, float]]:
-        if self._comp_norm_sums is None or self._comp_norm_count <= 0:
+        if self._comp_log_sums is None or self._comp_log_count <= 0:
             return None
-        sums = self._comp_norm_sums.detach().cpu().numpy().astype(float)
-        count = float(self._comp_norm_count)
+        sums = self._comp_log_sums.detach().cpu().numpy().astype(float)
+        count = float(self._comp_log_count)
+        comp_count = float(self._comp_log_comp_count)
+        robot_count = float(self._comp_log_robot_count)
+        if comp_count <= 0:
+            comp_count = 1.0
+        if robot_count <= 0:
+            robot_count = 1.0
         stats = {
-            "h_k": sums[0] / count,
-            "m_comp": sums[1] / count,
-            "lam_m_comp": sums[2] / count,
-            "lam": sums[3] / count,
-            "count": int(self._comp_norm_count),
+            "norm_h": sums[0] / count,
+            "norm_z": sums[1] / count,
+            "p_has_comp": sums[2] / count,
+            "logit_base": sums[3] / count,
+            "logit_comp": sums[4] / count,
+            "logit_ind": sums[5] / count,
+            "bias_base": sums[6] / count,
+            "norm_w_h": sums[7] / count,
+            "norm_w_c": sums[8] / count,
+            "norm_w_s": sums[9] / count,
+            "norm_w_d": sums[10] / count,
+            "attn_entropy": sums[11] / comp_count,
+            "max_attn": sums[12] / comp_count,
+            "ratio_comp_base": sums[13] / robot_count,
+            "ratio_comp_gap": sums[14] / robot_count,
+            "norm_u": sums[15] / comp_count,
+            "std_comp": sums[16] / robot_count,
+            "mean_num_comp": sums[17] / comp_count,
+            "max_num_comp": sums[18] / robot_count,
+            "mean_score": sums[19] / comp_count,
+            "std_score": sums[20] / comp_count,
+            "count": int(self._comp_log_count),
         }
-        self._comp_norm_sums = None
-        self._comp_norm_count = 0
+        self._comp_log_sums = None
+        self._comp_log_count = 0
+        self._comp_log_comp_count = 0
+        self._comp_log_robot_count = 0
         return stats
 
     @torch.no_grad()
@@ -248,21 +285,32 @@ class EgoActorCritic(nn.Module):
 
     def _compute_comp_context(
         self,
+        h_t: torch.Tensor,
         x_full_i: torch.Tensor,
         ei_full_i: torch.Tensor,
         ea_full_i: torch.Tensor,
         cand_full_i: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         """
-        Architecture 3.1: s_t = min_{r in C(t)} ETA(r,t) - ETA(ego,t)
-        Returns s_t in the same order as cand_full_i. Shape [k_i].
+        Architecture 3.2: attention over competitors.
+        Returns z_t_comp [k_i, H] and indicator [k_i] for whether competitors exist.
         """
         device = x_full_i.device
         k_i = int(cand_full_i.numel())
         if (not self.use_competitor_fusion) or k_i == 0:
-            return x_full_i.new_zeros((k_i,), dtype=torch.float32)
-        if self.edge_dim <= 0 or self.eta_index < 0:
-            return x_full_i.new_zeros((k_i,), dtype=torch.float32)
+            empty = x_full_i.new_zeros((k_i,), dtype=torch.float32)
+            return (
+                x_full_i.new_zeros((k_i, self.hidden), dtype=torch.float32),
+                empty,
+                {
+                    "attn_entropy": empty,
+                    "max_attn": empty,
+                    "norm_u": empty,
+                    "mean_score": empty,
+                    "std_score": empty,
+                    "num_comp": empty,
+                },
+            )
 
         src = ei_full_i[0] if ei_full_i.numel() > 0 else torch.empty(0, dtype=torch.long, device=device)
         dst = ei_full_i[1] if ei_full_i.numel() > 0 else torch.empty(0, dtype=torch.long, device=device)
@@ -283,22 +331,65 @@ class EgoActorCritic(nn.Module):
                 out = x_full_i.new_zeros((self.edge_dim,), dtype=torch.float32)
             return out
 
-        s_list: List[torch.Tensor] = []
-        for t in cand_full_i.tolist():
+        z_list: List[torch.Tensor] = []
+        ind_list: List[torch.Tensor] = []
+        ent_list: List[torch.Tensor] = []
+        max_list: List[torch.Tensor] = []
+        norm_u_list: List[torch.Tensor] = []
+        mean_score_list: List[torch.Tensor] = []
+        std_score_list: List[torch.Tensor] = []
+        num_comp_list: List[torch.Tensor] = []
+        for idx, t in enumerate(cand_full_i.tolist()):
             t = int(t)
-            eta_ego = _edge_attr_between(0, t)[self.eta_index]
             comps = []
             if src.numel() > 0:
                 comp_ids = dst[src == t]
                 comps = [int(n) for n in comp_ids.tolist() if int(n) != 0 and int(n) not in task_set_full]
 
             if len(comps) == 0:
-                s_list.append(eta_ego.new_tensor(0.0))
-            else:
-                eta_comp = torch.stack([_edge_attr_between(c, t)[self.eta_index] for c in comps], dim=0)
-                s_list.append(eta_comp.min() - eta_ego)
+                z_list.append(h_t.new_zeros((self.hidden,), dtype=torch.float32))
+                ind_list.append(h_t.new_tensor(0.0))
+                ent_list.append(h_t.new_tensor(0.0))
+                max_list.append(h_t.new_tensor(0.0))
+                norm_u_list.append(h_t.new_tensor(0.0))
+                mean_score_list.append(h_t.new_tensor(0.0))
+                std_score_list.append(h_t.new_tensor(0.0))
+                num_comp_list.append(h_t.new_tensor(0.0))
+                continue
 
-        return torch.stack(s_list, dim=0)
+            h_t_i = h_t[idx].unsqueeze(0).expand(len(comps), -1)
+            x_c = x_full_i[comps]
+            if self.edge_dim > 0:
+                a_tc = torch.stack([_edge_attr_between(t, c) for c in comps], dim=0)
+            else:
+                a_tc = x_full_i.new_zeros((len(comps), 0), dtype=torch.float32)
+
+            u_tc = self.phi_comp(torch.cat([h_t_i, x_c, a_tc], dim=-1))
+            s_tc = self.score_comp(u_tc).squeeze(-1)
+            alpha = torch.softmax(s_tc, dim=0)
+            z_t = (alpha.unsqueeze(-1) * u_tc).sum(dim=0)
+            z_list.append(z_t)
+            ind_list.append(h_t.new_tensor(1.0))
+            ent = -(alpha * (alpha + 1e-12).log()).sum()
+            ent_list.append(ent)
+            max_list.append(alpha.max())
+            norm_u_list.append(u_tc.norm(dim=-1).mean())
+            mean_score_list.append(s_tc.mean())
+            std_score_list.append(s_tc.std(unbiased=False))
+            num_comp_list.append(h_t.new_tensor(float(len(comps))))
+
+        return (
+            torch.stack(z_list, dim=0),
+            torch.stack(ind_list, dim=0),
+            {
+                "attn_entropy": torch.stack(ent_list, dim=0),
+                "max_attn": torch.stack(max_list, dim=0),
+                "norm_u": torch.stack(norm_u_list, dim=0),
+                "mean_score": torch.stack(mean_score_list, dim=0),
+                "std_score": torch.stack(std_score_list, dim=0),
+                "num_comp": torch.stack(num_comp_list, dim=0),
+            },
+        )
 
     def forward(self, obs):
         (
@@ -323,30 +414,74 @@ class EgoActorCritic(nn.Module):
                 h_t = h_i[cand_i]                     # [k_i, H]
                 base_logits = self.actor_head(h_t).squeeze(-1)
                 if self.use_competitor_fusion:
-                    s_t = self._compute_comp_context(
+                    z_t, ind_t, comp_stats = self._compute_comp_context(
+                        h_t,
                         x_list_full[i],
                         ei_list_full[i],
                         edge_attr_list_full[i],
                         cand_loc_idx_full[i],
                     )
-                    if s_t.numel() != h_t.size(0):
+                    if z_t.size(0) != h_t.size(0):
                         raise RuntimeError(
-                            f"Competitor-correction size mismatch: s_t={s_t.size(0)} vs cand={h_t.size(0)}"
+                            f"Competitor-correction size mismatch: z_t={z_t.size(0)} vs cand={h_t.size(0)}"
                         )
-                    lam = self.lambda_comp
-                    raw_logits = base_logits + lam * s_t
+                    comp_logits = self.comp_head(z_t).squeeze(-1)
+                    ind_logits = self.comp_bias * ind_t
+                    raw_logits = base_logits + comp_logits + ind_logits
 
                     with torch.no_grad():
                         self._init_comp_stats(device)
-                        if self._comp_norm_sums is not None:
+                        if self._comp_log_sums is not None:
                             h_norm = h_t.detach().norm(dim=-1)
-                            m_norm = s_t.detach().abs()
-                            lam_det = lam.detach()
-                            self._comp_norm_sums[0] += h_norm.sum().detach()
-                            self._comp_norm_sums[1] += m_norm.sum().detach()
-                            self._comp_norm_sums[2] += (lam_det * m_norm).sum().detach()
-                            self._comp_norm_sums[3] += lam_det * float(h_norm.numel())
-                            self._comp_norm_count += int(h_norm.numel())
+                            z_norm = z_t.detach().norm(dim=-1)
+                            ind_det = ind_t.detach()
+                            count = float(h_norm.numel())
+                            self._comp_log_sums[0] += h_norm.sum().detach()
+                            self._comp_log_sums[1] += z_norm.sum().detach()
+                            self._comp_log_sums[2] += ind_det.sum().detach()
+                            self._comp_log_sums[3] += base_logits.detach().sum().detach()
+                            self._comp_log_sums[4] += comp_logits.detach().sum().detach()
+                            self._comp_log_sums[5] += ind_logits.detach().sum().detach()
+                            self._comp_log_sums[6] += float(self.actor_head.bias.detach()) * count
+                            self._comp_log_sums[7] += self.actor_head.weight.detach().norm() * count
+                            self._comp_log_sums[8] += self.comp_head.weight.detach().norm() * count
+                            self._comp_log_sums[9] += self.score_comp.weight.detach().norm() * count
+                            self._comp_log_sums[10] += self.comp_bias.detach().abs() * count
+
+                            comp_mask = (ind_det > 0)
+                            if comp_mask.any():
+                                ent = comp_stats["attn_entropy"].detach()[comp_mask]
+                                max_a = comp_stats["max_attn"].detach()[comp_mask]
+                                norm_u = comp_stats["norm_u"].detach()[comp_mask]
+                                mean_score = comp_stats["mean_score"].detach()[comp_mask]
+                                std_score = comp_stats["std_score"].detach()[comp_mask]
+                                num_comp = comp_stats["num_comp"].detach()[comp_mask]
+                                comp_n = float(comp_mask.sum().item())
+                                self._comp_log_sums[11] += ent.sum().detach()
+                                self._comp_log_sums[12] += max_a.sum().detach()
+                                self._comp_log_sums[15] += norm_u.sum().detach()
+                                self._comp_log_sums[17] += num_comp.sum().detach()
+                                self._comp_log_sums[19] += mean_score.sum().detach()
+                                self._comp_log_sums[20] += std_score.sum().detach()
+                                self._comp_log_comp_count += int(comp_n)
+
+                            base_abs = base_logits.detach().abs().mean()
+                            comp_abs = comp_logits.detach().abs().mean()
+                            ratio_base = comp_abs / (base_abs + 1e-8)
+                            self._comp_log_sums[13] += ratio_base.detach()
+
+                            if base_logits.numel() >= 2:
+                                top2 = torch.topk(base_logits.detach(), k=2, largest=True).values
+                                gap = (top2[0] - top2[1]).abs()
+                                ratio_gap = comp_abs / (gap + 1e-8)
+                                self._comp_log_sums[14] += ratio_gap.detach()
+                                self._comp_log_sums[16] += comp_logits.detach().std(unbiased=False)
+                                self._comp_log_sums[18] += comp_stats["num_comp"].detach().max()
+                                self._comp_log_robot_count += 1
+                            else:
+                                self._comp_log_robot_count += 1
+
+                            self._comp_log_count += int(count)
                 else:
                     raw_logits = base_logits
                 li = raw_logits

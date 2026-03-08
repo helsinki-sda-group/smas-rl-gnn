@@ -105,11 +105,22 @@ class RPLoggerCallback(BaseCallback):
                 file_exists = os.path.exists(self.comp_norms_log_path)
                 with open(self.comp_norms_log_path, "a") as f:
                     if not file_exists:
-                        f.write("ts,ep,h_k,m_comp,lam_m_comp,lam,count\n")
+                        f.write(
+                            "ts,ep,norm_h,norm_z,p_has_comp,logit_base,logit_comp,logit_ind,"
+                            "bias_base,norm_w_h,norm_w_c,norm_w_s,norm_w_d,attn_entropy,max_attn,"
+                            "ratio_comp_base,ratio_comp_gap,norm_u,std_comp,mean_num_comp,max_num_comp,"
+                            "mean_score,std_score,count\n"
+                        )
                     f.write(
                         f"{int(self.num_timesteps)},{int(self.ep_idx)},"
-                        f"{stats['h_k']:.6f},{stats['m_comp']:.6f},{stats['lam_m_comp']:.6f},"
-                        f"{stats['lam']:.6f},{int(stats['count'])}\n"
+                        f"{stats['norm_h']:.3f},{stats['norm_z']:.3f},{stats['p_has_comp']:.3f},"
+                        f"{stats['logit_base']:.3f},{stats['logit_comp']:.3f},{stats['logit_ind']:.3f},"
+                        f"{stats['bias_base']:.3f},{stats['norm_w_h']:.3f},{stats['norm_w_c']:.3f},"
+                        f"{stats['norm_w_s']:.3f},{stats['norm_w_d']:.3f},{stats['attn_entropy']:.3f},"
+                        f"{stats['max_attn']:.3f},{stats['ratio_comp_base']:.3f},{stats['ratio_comp_gap']:.3f},"
+                        f"{stats['norm_u']:.3f},{stats['std_comp']:.3f},{stats['mean_num_comp']:.3f},"
+                        f"{stats['max_num_comp']:.3f},{stats['mean_score']:.3f},{stats['std_score']:.3f},"
+                        f"{int(stats['count'])}\n"
                     )
         except Exception as e:
             if self.verbose > 0:
