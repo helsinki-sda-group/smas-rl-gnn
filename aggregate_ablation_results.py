@@ -187,6 +187,27 @@ def _find_first(path: Path, pattern: str) -> Optional[Path]:
     return None
 
 
+def _find_first_nonempty(
+    path: Path,
+    pattern: str,
+    parser,
+) -> tuple[Optional[Path], pd.DataFrame]:
+    matches = list(path.glob(pattern))
+    if not matches:
+        matches = list(path.rglob(pattern))
+    if not matches:
+        return None, pd.DataFrame()
+    matches = sorted(matches, key=lambda p: p.stat().st_mtime, reverse=True)
+    for candidate in matches:
+        try:
+            df = parser(candidate)
+        except Exception:
+            continue
+        if not df.empty:
+            return candidate, df
+    return matches[0], pd.DataFrame()
+
+
 def _collect_eval_logs(model_dir: Path) -> Dict[str, Path]:
     eval_root = model_dir / "eval_results"
     if not eval_root.exists():
@@ -212,6 +233,18 @@ def _reference_ts_sets(model_dirs: List[Path]) -> List[List[int]]:
             if df.empty:
                 continue
             ts_sets.append(sorted(df["ts"].unique().tolist()))
+    return ts_sets
+
+
+def _reference_ts_sets_training(model_dirs: List[Path]) -> List[List[int]]:
+    ts_sets = []
+    for model_dir in model_dirs:
+        _, train_output_df = _find_first_nonempty(model_dir, "train_output*.txt", _parse_train_output)
+        if not train_output_df.empty:
+            ts_sets.append(sorted(train_output_df["ts"].unique().tolist()))
+        _, training_df = _find_first_nonempty(model_dir, "training_metrics*.log", _parse_metrics_log)
+        if not training_df.empty:
+            ts_sets.append(sorted(training_df["ts"].unique().tolist()))
     return ts_sets
 
 
@@ -401,9 +434,15 @@ def main() -> None:
 
     exp_params_list = _extract_exp_params(conf, model_dirs)
 
-    ts_sets = _reference_ts_sets(model_dirs)
-    ts_ref = _pick_reference_ts(ts_sets)
-    ts_step = _ts_step(ts_ref)
+    training_only = bool(conf.get("training_only", False))
+    if training_only:
+        ts_sets = _reference_ts_sets_training(model_dirs)
+        ts_ref = _pick_reference_ts(ts_sets) if ts_sets else []
+        ts_step = _ts_step(ts_ref) if ts_ref else None
+    else:
+        ts_sets = _reference_ts_sets(model_dirs)
+        ts_ref = _pick_reference_ts(ts_sets)
+        ts_step = _ts_step(ts_ref)
 
     output_dir = Path(conf.get("output_dir", "ablation_results"))
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -415,11 +454,12 @@ def main() -> None:
     for model_dir, exp_params in zip(model_dirs, exp_params_list):
         model_id = model_dir.name
 
-        train_output = _find_first(model_dir, "train_output*.txt")
-        training_metrics = _find_first(model_dir, "training_metrics*.log")
-
-        train_output_df = _parse_train_output(train_output) if train_output else pd.DataFrame()
-        training_df = _parse_metrics_log(training_metrics) if training_metrics else pd.DataFrame()
+        train_output, train_output_df = _find_first_nonempty(
+            model_dir, "train_output*.txt", _parse_train_output
+        )
+        training_metrics, training_df = _find_first_nonempty(
+            model_dir, "training_metrics*.log", _parse_metrics_log
+        )
 
         if not train_output_df.empty:
             train_output_agg = _aggregate_by_ts(train_output_df, TRAIN_OUTPUT_METRICS)
@@ -459,22 +499,23 @@ def main() -> None:
                 **exp_params,
             })
 
-        eval_logs = _collect_eval_logs(model_dir)
-        for mode, log_path in eval_logs.items():
-            eval_df = _parse_metrics_log(log_path)
-            if eval_df.empty:
-                continue
-            eval_agg = _aggregate_by_ts(eval_df, EVAL_METRICS)
-            eval_metrics_summary = _summarize_metrics(eval_agg, EVAL_METRICS, ts_ref, k_eval)
-            rows.append({
-                "model_id": model_id,
-                "eval_mode": mode,
-                "ts_first": ts_ref[0] if ts_ref else None,
-                "ts_last": ts_ref[-1] if ts_ref else None,
-                "ts_step": ts_step,
-                "metrics": eval_metrics_summary,
-                **exp_params,
-            })
+        if not training_only:
+            eval_logs = _collect_eval_logs(model_dir)
+            for mode, log_path in eval_logs.items():
+                eval_df = _parse_metrics_log(log_path)
+                if eval_df.empty:
+                    continue
+                eval_agg = _aggregate_by_ts(eval_df, EVAL_METRICS)
+                eval_metrics_summary = _summarize_metrics(eval_agg, EVAL_METRICS, ts_ref, k_eval)
+                rows.append({
+                    "model_id": model_id,
+                    "eval_mode": mode,
+                    "ts_first": ts_ref[0] if ts_ref else None,
+                    "ts_last": ts_ref[-1] if ts_ref else None,
+                    "ts_step": ts_step,
+                    "metrics": eval_metrics_summary,
+                    **exp_params,
+                })
 
     _write_summary_log(output_file, rows, ts_ref, ts_step)
 

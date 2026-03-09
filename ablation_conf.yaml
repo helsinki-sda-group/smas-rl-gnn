@@ -1,13 +1,17 @@
 # Aggregation config for ablation results
 model_dirs:
-  # - ../gnn-rl
+  - ../gnn-rl
   - ../rp-withoutnoop
-  - ../rp-train-notanh
+  # - ../rp-train-notanh
   #- ../training results/exp-withoutnoop
   #- ../training results/exp-notanh
 
 
-read_params_from_yaml: false
+read_params_from_yaml: true
+
+# If true, use only training logs (training_metrics*.log, train_output*.txt)
+# to determine reference timesteps and summaries. Evaluation logs are ignored.
+training_only: true
 
 # Used only if read_params_from_yaml is false
 exp_params:
@@ -17,7 +21,7 @@ exp_params:
   noop_init: -1.0
   freeze_noop_logit: [true, false]
 
-k_eval: 8
+k_eval: 50
 
 output_dir: ablation_results
 output_file: ablation_aggregated.log
