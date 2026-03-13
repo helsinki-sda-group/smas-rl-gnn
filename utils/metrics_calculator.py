@@ -17,8 +17,9 @@ class EpisodeMetrics:
     reward_sum: float = 0.0
     capacity_sum: float = 0.0
     step_sum: float = 0.0
-    missed_deadline_sum: float = 0.0
+    deadline_sum: float = 0.0
     wait_sum: float = 0.0
+    travel_sum: float = 0.0
     completion_sum: float = 0.0
     nonserved_sum: float = 0.0
 
@@ -79,8 +80,15 @@ def compute_episode_metrics_from_logs(
             metrics.reward_sum = float(df_rewards["reward"].sum())
             metrics.capacity_sum = float(df_rewards["capacity_avg"].sum())
             metrics.step_sum = float(df_rewards["step_avg"].sum())
-            metrics.missed_deadline_sum = float(df_rewards["missed_deadline_avg"].sum())
-            metrics.wait_sum = float(df_rewards["wait_avg"].sum())
+            if "deadline_avg" in df_rewards.columns:
+                metrics.deadline_sum = float(df_rewards["deadline_avg"].sum())
+            elif "missed_deadline_avg" in df_rewards.columns:
+                metrics.deadline_sum = float(df_rewards["missed_deadline_avg"].sum())
+            else:
+                metrics.deadline_sum = 0.0
+
+            metrics.wait_sum = float(df_rewards["wait_avg"].sum()) if "wait_avg" in df_rewards.columns else 0.0
+            metrics.travel_sum = float(df_rewards["travel_avg"].sum()) if "travel_avg" in df_rewards.columns else 0.0
             metrics.completion_sum = float(df_rewards["completion_avg"].sum())
             metrics.nonserved_sum = float(df_rewards["nonserved_avg"].sum())
         except Exception as e:
@@ -275,8 +283,8 @@ def compute_episode_metrics_from_logs(
 def metrics_to_string(metrics: EpisodeMetrics) -> str:
     return (
         f"{metrics.policy:<10} {metrics.seed:>4} {metrics.ts:>8} | "
-        f"{metrics.reward_sum:>8.2f} {metrics.capacity_sum:>8.2f} {metrics.step_sum:>8.2f}"
-        f" {metrics.missed_deadline_sum:>8.2f} {metrics.wait_sum:>8.2f}"
+        f" {metrics.reward_sum:>8.2f} {metrics.capacity_sum:>8.2f} {metrics.step_sum:>8.2f}"
+        f" {metrics.deadline_sum:>8.2f} {metrics.wait_sum:>8.2f} {metrics.travel_sum:>8.2f}"
         f" {metrics.completion_sum:>8.2f} {metrics.nonserved_sum:>8.2f} | "
         f"{metrics.picked_up_tasks:>2}/{metrics.total_tasks:<2} {metrics.pickup_rate:>6.2f}"
         f" {metrics.obsolete_tasks:>2} {metrics.obsolete_rate:>6.2f}"
@@ -296,7 +304,7 @@ def metrics_to_string(metrics: EpisodeMetrics) -> str:
 
 def get_metrics_header() -> str:
     return (
-        "pol        seed      ts |      rew      cap     step      mdl     wait     comp      nsv |   pku    pkr obs  obsr   pkv   pkvr    mwt   cmp    cmr   anp   anpr     mtt   pnc    pncr |   noop  overld  mcand  cne_fr cne_mn   dstep    macmr    msd   ovrlap   shared"
+        "pol        seed      ts |      rew      cap     step      dln     wait     trav     comp      nsv |   pku    pkr obs  obsr   pkv   pkvr    mwt   cmp    cmr   anp   anpr     mtt   pnc    pncr |   noop  overld  mcand  cne_fr cne_mn   dstep    macmr    msd   ovrlap   shared"
     )
 
 

@@ -97,10 +97,10 @@ class RidepoolLogger:
         self._open_csv(self._get_csv_filename("dispatch"), ["time","taxi","prev_seq","base_ids","seq","seq_pd","raw_currentCustomers","notes"])
         self._open_csv(self._get_csv_filename("conflicts"), ["time","res_id","taxi_candidates","remaining_caps","distances","winner"])
         self._open_csv(self._get_csv_filename("candidates"), ["time","taxi","cand_slots","cand_res_ids","cand_persons","cand_pd_seq"])
-        self._open_csv(self._get_csv_filename("rewards"), ["time","taxi","reward","capacity","step","missed_deadline","wait_at_pickups","completion", "nonserved"])
+        self._open_csv(self._get_csv_filename("rewards"), ["time","taxi","reward","capacity","step","deadline","wait","travel","completion", "nonserved"])
         self._open_csv(self._get_csv_filename("fleet_counts"), ["time","idle","en_route","occupied","pickup_occupied"])
         self._open_csv(self._get_csv_filename("episode_totals"), ["episode","sum_reward","n_pickups","n_dropoffs","duration"])
-        self._open_csv(self._get_csv_filename("rewards_macro"), ["macro_steps","reward","capacity_avg","step_avg","missed_deadline_avg", "wait_avg", "completion_avg", "nonserved_avg"])
+        self._open_csv(self._get_csv_filename("rewards_macro"), ["macro_steps","reward","capacity_avg","step_avg","deadline_avg", "wait_avg", "travel_avg", "completion_avg", "nonserved_avg"])
 
         self._open_csv(self._get_csv_filename("task_lifecycle"), [
             "task_id", "reservation_time", "pickup_deadline", "estimated_travel_time",
@@ -249,7 +249,7 @@ class RidepoolLogger:
 
     def log_rewards(self, t: float, taxi: str, reward: float, terms: Dict[str, float]):
         fname = self._get_csv_filename("rewards")
-        self._ensure_csv(fname, ["time","taxi","reward","capacity","step","missed_deadline","wait_at_pickups","completion", "nonserved"])
+        self._ensure_csv(fname, ["time","taxi","reward","capacity","step","deadline","wait","travel","completion", "nonserved"])
 
         terms_round = {k: round(float(v),2) for k,v in terms.items()}
 
@@ -257,8 +257,9 @@ class RidepoolLogger:
             time=float(t), taxi=str(taxi), reward=round(float(reward),2),
             capacity=terms_round["capacity"],
             step=terms_round["step"],
-            missed_deadline=terms_round["missed_deadline"],
-            wait_at_pickups=terms_round["wait_at_pickups"],
+            deadline=terms_round.get("deadline", 0.0),
+            wait=terms_round.get("wait", 0.0),
+            travel=terms_round.get("travel", 0.0),
             completion=terms_round["completion"],
             nonserved=terms_round["nonserved"],
         ))
@@ -266,16 +267,18 @@ class RidepoolLogger:
     def log_macro_step(self, info):
         fname = self._get_csv_filename("rewards_macro")
         self._ensure_csv(fname, 
-                         ["macro_steps","reward","capacity_avg","step_avg","missed_deadline_avg", "wait_avg", "completion_avg", "nonserved_avg"])
+                 ["macro_steps","reward","capacity_avg","step_avg","deadline_avg", "wait_avg", "travel_avg", "completion_avg", "nonserved_avg"])
 
-        missed_deadline_avg = info.get("macro_missed_deadline", info.get("macro_abandoned"))
+        deadline_avg = info.get("macro_deadline", info.get("macro_missed_deadline", info.get("macro_abandoned")))
+        travel_avg = info.get("macro_travel", 0.0)
         self._write(fname, dict(
                 macro_steps = info["macro_steps"],
                 reward = info["macro_reward"],
                 capacity_avg = info["macro_capacity"],
                 step_avg = info["macro_step"],
-                missed_deadline_avg = missed_deadline_avg,
-                wait_avg = info["macro_wait"],
+            deadline_avg = deadline_avg,
+            wait_avg = info["macro_wait"],
+            travel_avg = travel_avg,
                 completion_avg = info["macro_completion"],
                 nonserved_avg = info["macro_nonserved"],
         ))

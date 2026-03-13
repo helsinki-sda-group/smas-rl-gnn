@@ -155,6 +155,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             max_travel_delay_s=config['max_travel_delay_s'],
             max_robot_capacity=config['max_robot_capacity'],
             logger=rp_logger,
+            reward_params=dict(config.get("reward_params", {}) or {}),
         )
         
         feature_fn = make_feature_fn(
