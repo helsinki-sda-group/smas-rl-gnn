@@ -75,6 +75,7 @@ MAX_STEPS = int(opt.env.max_steps)
 MAX_WAIT_DELAY_S = float(opt.env.max_wait_delay_s)
 MAX_TRAVEL_DELAY_S = float(opt.env.max_travel_delay_s)
 MAX_ROBOT_CAPACITY = int(opt.env.max_robot_capacity)
+reward_params = dict(getattr(opt.env, "reward_params", {}) or {})
 
 # Training seeds - different from evaluation seeds [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
 TRAIN_SEEDS = list(opt.seeds.train)
@@ -145,6 +146,7 @@ controller = RLControllerAdapter(
     max_travel_delay_s=MAX_TRAVEL_DELAY_S,  # no explicit penalty for that now (!)
     max_robot_capacity=MAX_ROBOT_CAPACITY, # should match to taxis.rou.xml
     logger= rp_logger,
+    reward_params=reward_params,
 )
 feature_fn = make_feature_fn(
     controller,

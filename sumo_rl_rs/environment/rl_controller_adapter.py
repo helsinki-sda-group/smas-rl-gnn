@@ -27,11 +27,11 @@ class RLControllerAdapter:
     """
     RL adapter over TraCI's Taxi interface.
 
-    Key features:
-      • Candidate selection is restricted by a "vicinity" threshold (meters) using road-network distance.
-      • Rewards are computed per-robot as in MultiTaskAllocationEnv:
-          r_i = capacity_i + (-1 step) + (- missed_deadline_i) + (- wait_at_pickups_i) + completion_i
-        where completion_i = pickups_i or dropoffs_i per tick (configurable).
+        Key features:
+            • Candidate selection is restricted by a "vicinity" threshold (meters) using road-network distance.
+            • Rewards are computed per-robot with configurable components:
+                    r_i = completion_i + wait_i + deadline_i (default) or travel_i (wait_travel mode)
+                where completion_i = pickups_i or dropoffs_i per tick (configurable).
     """
 
     # Reservation state flags 
@@ -60,6 +60,7 @@ class RLControllerAdapter:
         max_robot_capacity: int = 5,
         logger: Optional["RidepoolLogger"]=None,
         conflict_resolution: str = "closest_then_capacity", # "capacity" | "closest" | "closest_then_capacity"
+        reward_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Args:
@@ -80,6 +81,7 @@ class RLControllerAdapter:
             max_robot_capacity:
             logger: RidepoolLogger instance.
             conflict_resolution: how the assignment conflicts are resolved ("capacity" | "closest" | "closest_then_capacity")
+            reward_params: reward configuration (reward_type, weights, caps)
         """
         self.sumo = sumo
         self.k_max = int(k_max)
@@ -145,6 +147,27 @@ class RLControllerAdapter:
         self._prev_alive_res: Set[str] = set()
         self._res_owner_by_res: Dict[str, str] = {}
         self._prev_obsolete: Set[str] = set()
+
+        reward_params = reward_params or {}
+        reward_type = str(reward_params.get("reward_type", "deadline")).lower().strip()
+        if reward_type in {"default", "missed_deadline"}:
+            reward_type = "deadline"
+        if reward_type in {"wait_travel", "travel", "wait+travel", "wait-travel"}:
+            reward_type = "wait_travel"
+        self.reward_type = reward_type
+
+        self.reward_weights = {
+            "comp": float(reward_params.get("w_comp", 1.0)),
+            "wait": float(reward_params.get("w_wait", 1.5)),
+            "deadline": float(reward_params.get("w_deadline", 10.0)),
+            "travel": float(reward_params.get("w_travel", 2.0)),
+        }
+        self.reward_caps = {
+            "wait": float(reward_params.get("wait_cap", 600.0)),
+            "deadline": float(reward_params.get("deadline_cap", 600.0)),
+            "travel": float(reward_params.get("travel_cap", 90.0)),
+        }
+        self._terminal_penalties_applied = False
     
 
     # ---------------- Public API ----------------
@@ -390,6 +413,7 @@ class RLControllerAdapter:
         self._prev_alive_res.clear()
         self._res_owner_by_res.clear()
         self._prev_obsolete.clear()
+        self._terminal_penalties_applied = False
 
 
 
@@ -975,11 +999,20 @@ class RLControllerAdapter:
 
         )
         self._refresh_shadow_plan(alive_now)
+        robots = (self._last_robot_ids or self.get_robots())
+        done = self.is_episode_done()
+        if done and not self._terminal_penalties_applied:
+            terminal_terms = self._compute_terminal_penalty_terms(robots=robots, now=self._now())
+            for rid in robots:
+                for key, val in terminal_terms.get(rid, {}).items():
+                    terms[rid][key] = terms[rid].get(key, 0.0) + val
+                    per_robot[rid] = float(per_robot.get(rid, 0.0)) + float(val)
+            self._terminal_penalties_applied = True
         if self.logger:
             tnow = self._now()
             total = 0.0
             pickups = dropoffs = 0
-            for rid in (self._last_robot_ids or self.get_robots()):
+            for rid in robots:
                 r = float(per_robot.get(rid, 0.0))
                 total += r
                 self.logger.log_rewards(tnow, rid, r, terms.get(rid, {}))
@@ -998,7 +1031,6 @@ class RLControllerAdapter:
             self._cum_dropoffs += dropoffs
 
             # if episode is done, write a row to episode_totals.csv once
-            done = self.is_episode_done()
             if done and self.logger and not self._episode_closed:
                 self.logger.end_episode(
                     sum_reward=self._cum_sum_reward,
@@ -1214,7 +1246,7 @@ class RLControllerAdapter:
 
         
         # waiting for pickup - in [-1;0]
-        WAIT_CAP = 600.0
+        WAIT_CAP = max(1e-6, float(self.reward_caps.get("wait", 600.0)))
         wait_penalty_by_robot: Dict[str, float] = {rid: 0.0 for rid in robots}
         for rid in robots:
             w = 0.0
@@ -1226,33 +1258,55 @@ class RLControllerAdapter:
 
         # missed deadline: single component, counts pickup & dropoff tardiness
         # (0 if on time; negative if late; bounded)
-        DEADLINE_CAP = 600.0  # sec cap for normalization
+        DEADLINE_CAP = max(1e-6, float(self.reward_caps.get("deadline", 600.0)))
+        TRAVEL_CAP = max(1e-6, float(self.reward_caps.get("travel", 90.0)))
         deadline_penalty_by_robot: Dict[str, float] = {rid: 0.0 for rid in robots}
+        travel_penalty_by_robot: Dict[str, float] = {rid: 0.0 for rid in robots}
 
-        for rid in robots:
-            d = 0.0
+        if self.reward_type == "deadline":
+            for rid in robots:
+                d = 0.0
 
-            # pickup deadline violations (measured at actual pickup moment)
-            for res_id in picked_up_ids_by_robot[rid]:
-                info = self._task_lifecycle.get(res_id)
-                if info is None:
-                    continue
-                pd = info.get("pickup_deadline", None)
-                if pd is not None:
-                    late = max(0.0, now - pd)
-                    d += -min(late, DEADLINE_CAP) / DEADLINE_CAP
+                # pickup deadline violations (measured at actual pickup moment)
+                for res_id in picked_up_ids_by_robot[rid]:
+                    info = self._task_lifecycle.get(res_id)
+                    if info is None:
+                        continue
+                    pd = info.get("pickup_deadline", None)
+                    if pd is not None:
+                        late = max(0.0, now - pd)
+                        d += -min(late, DEADLINE_CAP) / DEADLINE_CAP
 
-            # dropoff deadline violations (measured at actual dropoff moment)
-            for res_id in dropped_off_ids_by_robot[rid]:
-                info = self._task_lifecycle.get(res_id)
-                if info is None:
-                    continue
-                dd = info.get("dropoff_deadline", None)
-                if dd is not None:
-                    late = max(0.0, now - dd)
-                    d += -min(late, DEADLINE_CAP) / DEADLINE_CAP
+                # dropoff deadline violations (measured at actual dropoff moment)
+                for res_id in dropped_off_ids_by_robot[rid]:
+                    info = self._task_lifecycle.get(res_id)
+                    if info is None:
+                        continue
+                    dd = info.get("dropoff_deadline", None)
+                    if dd is not None:
+                        late = max(0.0, now - dd)
+                        d += -min(late, DEADLINE_CAP) / DEADLINE_CAP
 
-            deadline_penalty_by_robot[rid] = d
+                deadline_penalty_by_robot[rid] = d
+
+        if self.reward_type == "wait_travel":
+            for rid in robots:
+                t = 0.0
+                for res_id in dropped_off_ids_by_robot[rid]:
+                    info = self._task_lifecycle.get(res_id)
+                    if info is None:
+                        continue
+                    est = info.get("estimated_travel_time", None)
+                    actual = info.get("actual_travel_time", None)
+                    if est is None or actual is None:
+                        continue
+                    est = float(est)
+                    actual = float(actual)
+                    if est <= 0.0:
+                        continue
+                    over = max(0.0, actual - est)
+                    t += -min(over, TRAVEL_CAP) / TRAVEL_CAP
+                travel_penalty_by_robot[rid] = t
 
 
         # capacity reward (onboard count)
@@ -1293,7 +1347,7 @@ class RLControllerAdapter:
 
         # OPTIONAL: penalize tasks that became obsolete without pickup
         # This makes the deadline signal *much* stronger and avoids "avoid pickup to avoid penalty".
-        if newly_obsolete:
+        if self.reward_type == "deadline" and newly_obsolete:
             for res_id in newly_obsolete:
                 info = self._task_lifecycle.get(res_id)
                 if not info:
@@ -1315,9 +1369,10 @@ class RLControllerAdapter:
                         deadline_penalty_by_robot[r] += share
 
         # Weights
-        W_COMP = 1.0 
-        W_WAIT = 1.5
-        W_DEADLINE = 10.0
+        W_COMP = float(self.reward_weights.get("comp", 1.0))
+        W_WAIT = float(self.reward_weights.get("wait", 1.5))
+        W_DEADLINE = float(self.reward_weights.get("deadline", 10.0))
+        W_TRAVEL = float(self.reward_weights.get("travel", 2.0))
 
         # compose
         per_robot: Dict[str, float] = {}
@@ -1333,25 +1388,74 @@ class RLControllerAdapter:
             comp = completion_by_robot[rid] * W_COMP
             waitp = wait_penalty_by_robot[rid] * W_WAIT
             deadp = deadline_penalty_by_robot[rid] * W_DEADLINE
+            travp = travel_penalty_by_robot[rid] * W_TRAVEL
             cap = 0.0
             step_penalty = 0.0
             backlog = 0.0
 
-            r = comp + waitp + deadp
+            r = comp + waitp + deadp + travp
 
             per_robot[rid] = float(r)
 
             terms[rid] = {
                 "capacity": cap,
                 "step": step_penalty,
-                "missed_deadline": deadp,
-                "wait_at_pickups": waitp,
+                "deadline": deadp,
+                "wait": waitp,
+                "travel": travp,
                 "completion": comp,
                 "nonserved": backlog,
             }
 
         #self._prev_assigned_by_robot = cur_assigned_by_robot
         return per_robot, terms
+
+    def _compute_terminal_penalty_terms(self, *, robots: Sequence[str], now: float) -> Dict[str, Dict[str, float]]:
+        if self.reward_type != "wait_travel":
+            return {rid: {} for rid in robots}
+
+        wait_cap = max(1e-6, float(self.reward_caps.get("wait", 600.0)))
+        travel_cap = max(1e-6, float(self.reward_caps.get("travel", 90.0)))
+        w_wait = float(self.reward_weights.get("wait", 1.5))
+        w_travel = float(self.reward_weights.get("travel", 2.0))
+
+        out: Dict[str, Dict[str, float]] = {rid: {"wait": 0.0, "travel": 0.0} for rid in robots}
+
+        def owner_from_shadow(res_id: str) -> str | None:
+            for rid in robots:
+                if res_id in self._shadow_plan_by_robot.get(rid, []):
+                    return rid
+            return None
+
+        for task_id, info in self._task_lifecycle.items():
+            if info.get("actual_dropoff_time") is not None:
+                continue
+
+            rid = info.get("assigned_taxi") or self._res_owner_by_res.get(task_id) or owner_from_shadow(task_id)
+            if not rid or rid not in out:
+                continue
+
+            if info.get("actual_pickup_time") is None:
+                res_time = info.get("reservation_time")
+                if res_time is None:
+                    continue
+                wait_s = max(0.0, now - float(res_time))
+                penalty = -min(wait_s, wait_cap) / wait_cap
+                out[rid]["wait"] += penalty * w_wait
+            else:
+                est = info.get("estimated_travel_time")
+                pick_time = info.get("actual_pickup_time")
+                if est is None or pick_time is None:
+                    continue
+                est = float(est)
+                if est <= 0.0:
+                    continue
+                elapsed = max(0.0, now - float(pick_time))
+                over = max(0.0, elapsed - est)
+                penalty = -min(over, travel_cap) / travel_cap
+                out[rid]["travel"] += penalty * w_travel
+
+        return out
 
     # ! OBSOLETE
     def _compute_rewards_per_robot(self) -> Tuple[Dict[str, float], Dict[str, Dict[str, float]]]:
@@ -1456,8 +1560,9 @@ class RLControllerAdapter:
             terms[rid] = {
                 "capacity": cap,
                 "step": step_penalty,
-                "missed_deadline": abandoned,        # penalty actually added
-                "wait_at_pickups": waitr,       # negative seconds
+                "deadline": abandoned,        # penalty actually added
+                "wait": waitr,       # negative seconds
+                "travel": 0.0,
                 "completion": comp,             # pickups or dropoffs per tick,
                 "nonserved": backlog   # fine for non-serving requests
             }

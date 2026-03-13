@@ -57,6 +57,7 @@ MAX_STEPS = int(opt.env.max_steps)
 MAX_WAIT_DELAY_S = float(opt.env.max_wait_delay_s)
 MAX_TRAVEL_DELAY_S = float(opt.env.max_travel_delay_s)
 MAX_ROBOT_CAPACITY = int(opt.env.max_robot_capacity)
+reward_params = dict(getattr(opt.env, "reward_params", {}) or {})
 
 NUM_SEEDS = int(opt.baselines.num_seeds)
 SEEDS = list(opt.seeds.eval)
@@ -119,6 +120,7 @@ for seed in SEEDS[:NUM_SEEDS]:
             max_robot_capacity=MAX_ROBOT_CAPACITY,
             logger=rp_logger,
             respect_sumo_end=True,
+            reward_params=reward_params,
         )
         feature_fn = make_feature_fn(
             controller,
@@ -260,7 +262,7 @@ print(f"{'='*80}")
 summary_path = metrics_log_path
 with open(summary_path, "a", encoding="utf-8") as f:
     f.write("\n\n# SUMMARY STATISTICS\n")
-    f.write("pol           rew±std   |     cap±std       step±std     mdl±std       wait±std      comp±std       nsv±std   |     pkr±std       obsr±std      pkvr±std      mwt±std       cmr±std       anpr±std      pncr±std |  noop±std   overld±std   mcand±std  cne_fr±std cne_mn±std  dstep±std    macmr±std     msd±std\n")
+    f.write("pol           rew±std   |     cap±std       step±std     dln±std       wait±std      trav±std      comp±std       nsv±std   |     pkr±std       obsr±std      pkvr±std      mwt±std       cmr±std       anpr±std      pncr±std |  noop±std   overld±std   mcand±std  cne_fr±std cne_mn±std  dstep±std    macmr±std     msd±std\n")
     
     for policy_name in POLICIES:
         metrics_list = all_metrics_by_policy[policy_name]
@@ -270,8 +272,9 @@ with open(summary_path, "a", encoding="utf-8") as f:
         rewards = [m.reward_sum for m in metrics_list]
         caps = [m.capacity_sum for m in metrics_list]
         steps = [m.step_sum for m in metrics_list]
-        mdls = [m.missed_deadline_sum for m in metrics_list]
+        dlvs = [m.deadline_sum for m in metrics_list]
         waits = [m.wait_sum for m in metrics_list]
+        travs = [m.travel_sum for m in metrics_list]
         comps = [m.completion_sum for m in metrics_list]
         nsvs = [m.nonserved_sum for m in metrics_list]
         pickup_rates = [m.pickup_rate for m in metrics_list]
@@ -295,8 +298,9 @@ with open(summary_path, "a", encoding="utf-8") as f:
             f" {np.mean(rewards):>6.2f}±{np.std(rewards):<5.2f} | "
             f" {np.mean(caps):>6.2f}±{np.std(caps):<5.2f}"
             f"  {np.mean(steps):>6.2f}±{np.std(steps):<5.2f}"
-            f"  {np.mean(mdls):>6.2f}±{np.std(mdls):<5.2f}"
+            f"  {np.mean(dlvs):>6.2f}±{np.std(dlvs):<5.2f}"
             f"  {np.mean(waits):>6.2f}±{np.std(waits):<5.2f}"
+            f"  {np.mean(travs):>6.2f}±{np.std(travs):<5.2f}"
             f"  {np.mean(comps):>6.2f}±{np.std(comps):<5.2f}"
             f"  {np.mean(nsvs):>6.2f}±{np.std(nsvs):<5.2f} | "
             f" {np.mean(pickup_rates):>6.2f}±{np.std(pickup_rates):<5.2f}"
@@ -343,8 +347,9 @@ with open(summary_path, "a", encoding="utf-8") as f:
         ("rew", "reward_sum"),
         ("cap", "capacity_sum"),
         ("step", "step_sum"),
-        ("mdl", "missed_deadline_sum"),
+        ("dln", "deadline_sum"),
         ("wait", "wait_sum"),
+        ("trav", "travel_sum"),
         ("comp", "completion_sum"),
         ("nsv", "nonserved_sum"),
         ("pku", "pickups (picked/total)"),

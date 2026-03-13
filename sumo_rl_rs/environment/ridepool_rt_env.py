@@ -208,8 +208,9 @@ class RidepoolRTEnv(gym.Env):
         sum_terms = {
             "capacity": 0.,
             "step": 0.,
-            "missed_deadline": 0.,
-            "wait_at_pickups": 0.,
+            "deadline": 0.,
+            "wait": 0.,
+            "travel": 0.,
             "completion": 0.,
             "nonserved": 0.,
         }
@@ -264,8 +265,9 @@ class RidepoolRTEnv(gym.Env):
             "macro_reward": round(total_reward, 3),
             "macro_capacity": round(sum_terms["capacity"],3),
             "macro_step": round(sum_terms["step"],3),
-            "macro_missed_deadline": round(sum_terms["missed_deadline"],3),
-            "macro_wait": round(sum_terms["wait_at_pickups"],3),
+            "macro_deadline": round(sum_terms["deadline"],3),
+            "macro_wait": round(sum_terms["wait"],3),
+            "macro_travel": round(sum_terms["travel"],3),
             "macro_completion": round(sum_terms["completion"],3),
             "macro_nonserved": round(sum_terms["nonserved"],3),
         }
