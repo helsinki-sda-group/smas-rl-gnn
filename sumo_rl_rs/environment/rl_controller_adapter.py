@@ -46,6 +46,7 @@ class RLControllerAdapter:
         *,
         k_max: int = 8,
         vicinity_m: float = 2_000.0,
+        sorted_candidates: bool = False,
         max_steps: Optional[int] = None,
         min_episode_steps: int = 0,            # warmup; don't allow done before this many steps
         idle_patience_steps:int = 600,       # how long whole-fleet idle must persist
@@ -65,6 +66,7 @@ class RLControllerAdapter:
             sumo: the TraCI handle/module (usually `traci`).
             k_max: cap on candidates per robot.
             vicinity_m: maximum road-network distance (meters) robot→task pickup to be a valid candidate.
+            sorted_candidates: if True, candidates are sorted by pickup distance; if False, randomized.
             max_steps: hard episode max length.
             min_episode_steps: minimum episode length.
             idle_patience_steps: end if whole fleet is idle for that long
@@ -82,6 +84,7 @@ class RLControllerAdapter:
         self.sumo = sumo
         self.k_max = int(k_max)
         self.vicinity_m = float(vicinity_m)
+        self.sorted_candidates = bool(sorted_candidates)
         self.max_steps = max_steps
         self.completion_mode = completion_mode.lower().strip()
         assert self.completion_mode in {"pickup", "dropoff"}, "completion_mode must be 'pickup' or 'dropoff'"
@@ -532,8 +535,8 @@ class RLControllerAdapter:
 
     def get_tasks_and_candidate_lists(self, K: Optional[int] = None) -> tuple[List[Task], List[List[int]]]:
         """
-        For each robot, return viable task list and list of candidates - up to K nearest tasks by pickup distance,
-        filtered by road-network distance <= vicinity_m.
+        For each robot, return viable task list and list of candidates - up to K tasks within vicinity_m,
+        randomized by default to avoid ordering leakage (or sorted by pickup distance if enabled).
         Output indices reference viable task list.
         """
         if not self._last_robot_ids:
@@ -574,7 +577,11 @@ class RLControllerAdapter:
                 d = self._road_distance(r_edge, t.fromEdge)
                 if np.isfinite(d) and d <= self.vicinity_m:
                     dist_idx.append((float(d), j))
-            dist_idx.sort(key=lambda x: x[0])
+            if dist_idx:
+                if self.sorted_candidates:
+                    dist_idx.sort(key=lambda x: x[0])
+                else:
+                    self._rng.shuffle(dist_idx)
             cand_lists.append([j for _, j in dist_idx[:K]])
         
    
@@ -754,7 +761,7 @@ class RLControllerAdapter:
         """
 
         
-        robots = self._last_robot_ids or self.get_robots()
+        robots = self.get_robots()
         res_index = self._reservation_index()
         p2r = self._person_to_res_index(res_index)
 
@@ -845,6 +852,17 @@ class RLControllerAdapter:
                 if r not in onboard_by_res:        # never override onboard
                     owners[r] = rid_win
             owners.update(onboard_by_res)           # onboard has highest precedence
+
+            for res_id, rid_win in winners.items():
+                self._res_owner_by_res[res_id] = rid_win
+
+            for rid0 in robots:
+                seq0 = self._shadow_plan_by_robot.get(rid0, [])
+                if not seq0:
+                    continue
+                pruned = [r for r in seq0 if owners.get(r) == rid0]
+                if pruned != seq0:
+                    self._shadow_plan_by_robot[rid0] = pruned
 
             # track task assignment
             for rid, res_id in enumerate(chosen):
@@ -1498,17 +1516,28 @@ class RLControllerAdapter:
         cap = self._get_vehicle_capacity(rid)
         if cap <= 0:
             return 0
-        
+
         res_index = self._reservation_index()
         planned_unique = list(dict.fromkeys(self._shadow_plan_by_robot.get(rid, [])))
-        load = 0
+
+        planned_ids: set[str] = set()
         for r in planned_unique:
             obj = res_index.get(r)
             if obj is None:
                 continue
             if self._is_completed(obj):
                 continue
-            load += 1
+            planned_ids.add(r)
+
+        p2r = self._person_to_res_index(res_index)
+        onboard_ids = set(self._current_reservation_ids_onboard(rid, p2r))
+
+        if onboard_ids:
+            load = len(planned_ids | onboard_ids)
+        else:
+            onboard_count = len(self._get_current_customers(rid))
+            load = max(len(planned_ids), onboard_count)
+
         return max(0, cap - load)
 
 
@@ -1732,9 +1761,10 @@ class RLControllerAdapter:
 
             # Only log if not already logged (dropoffs are logged immediately)
             if not lifecycle.get("_logged", False):
-                log_data = {k: v for k, v in lifecycle.items() 
-                       if not k.startswith("_")}  # Skip _logged, _assignment_distance, etc.
-                self.logger.log_task_lifecycle(**lifecycle)
+              log_data = {k: v for k, v in lifecycle.items()
+                  if not k.startswith("_")}  # Skip _logged, _assignment_distance, etc.
+              self.logger.log_task_lifecycle(**log_data)
+              lifecycle["_logged"] = True
 
     def _normalize_task_id(self, task_id: str) -> str:
         """

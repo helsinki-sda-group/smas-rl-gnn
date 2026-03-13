@@ -32,6 +32,11 @@ class RidepoolRTEnv(gym.Env):
         feature_fn,
         global_stats_fn=None,
         decision_dt: int = 15, # seconds between policy decisions (1 = every second)
+        two_hop: bool = False,
+        normalize_features: bool = False,
+        use_edge_rt: bool = False,
+        edge_feat_dim: int = 0,
+        edge_features: Optional[List[str]] = None,
     ):
         super().__init__()
         self.controller = controller
@@ -40,6 +45,11 @@ class RidepoolRTEnv(gym.Env):
         self.F, self.G = int(F), int(G)
         self.feature_fn = feature_fn
         self.global_stats_fn = global_stats_fn  # can be None (ignored)
+        self.two_hop = bool(two_hop)
+        self.normalize_features = bool(normalize_features)
+        self.use_edge_rt = bool(use_edge_rt)
+        self.edge_feat_dim = int(edge_feat_dim)
+        self.edge_features = list(edge_features or [])
         self._episode_reward = 0
         self._macro_step = 0
 
@@ -47,7 +57,7 @@ class RidepoolRTEnv(gym.Env):
         self._noop_index = self.K_max
         # Spaces (fixed shapes; runtime masking handles sparsity)
         self.action_space = spaces.MultiDiscrete([self.K_max+1] * self.R)
-        self.observation_space = spaces.Dict({
+        obs_space = {
             "x":            spaces.Box(-np.inf, np.inf, (self.R, self.N_max, self.F), dtype=np.float32),
             "node_mask":    spaces.MultiBinary((self.R, self.N_max)),
             "edge_index":   spaces.Box(0, self.N_max - 1, (self.R, 2, self.E_max), dtype=np.int64),
@@ -55,7 +65,15 @@ class RidepoolRTEnv(gym.Env):
             "cand_idx":     spaces.Box(0, self.N_max - 1, (self.R, self.K_max), dtype=np.int64),
             "cand_mask":    spaces.MultiBinary((self.R, self.K_max)),
             # "global_stats": spaces.Box(-np.inf, np.inf, (self.G,), dtype=np.float32),
-        })
+        }
+        if self.edge_feat_dim > 0:
+            obs_space["edge_attr"] = spaces.Box(
+                -np.inf,
+                np.inf,
+                (self.R, self.E_max, self.edge_feat_dim),
+                dtype=np.float32,
+            )
+        self.observation_space = spaces.Dict(obs_space)
 
         # cached per-robot candidate mapping: slot -> task_id (string)
         self._last_cand_task_ids: List[List[Optional[str]]] = [[] for _ in range(self.R)]
@@ -69,8 +87,10 @@ class RidepoolRTEnv(gym.Env):
         robots = self.controller.get_robots()
         tasks_viable, cand_lists = self.controller.get_tasks_and_candidate_lists(self.K_max)
 
-        # Trim robots to R; never append Nones
+        # Trim robots to R; pad with None to keep fixed shapes
         robots = robots[: self.R]
+        if len(robots) < self.R:
+            robots += [None] * (self.R - len(robots))
 
         # Ensure there are cand_lists for each of the first R robots
         if len(cand_lists) < self.R:
@@ -93,6 +113,12 @@ class RidepoolRTEnv(gym.Env):
             N_max=self.N_max, E_max=self.E_max, K_max=self.K_max,
             F=self.F, G=self.G,
             feature_fn=self.feature_fn,
+            two_hop=self.two_hop,
+            normalize_features=self.normalize_features,
+            vicinity_m=float(getattr(self.controller, "vicinity_m", 0.0)),
+            use_edge_rt=self.use_edge_rt,
+            edge_feat_dim=self.edge_feat_dim,
+            edge_features=self.edge_features,
             # global_stats_fn=self.global_stats_fn,  # currently unused
         )
         # Save the exact ids used for slots this step (for action mapping)

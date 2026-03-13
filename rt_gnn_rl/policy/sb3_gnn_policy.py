@@ -44,6 +44,13 @@ class RTGNNPolicy(ActorCriticPolicy):
         in_dim: int,
         hidden: int,
         k_max: int,
+        logit_temperature: float = 5.0,
+        noop_init: float = -1.0,
+        freeze_noop_logit: bool = False,
+        edge_dim: int = 0,
+        use_competitor_fusion: bool = False,
+        eta_index: int = -1,
+        lambda_init: float = 0.0,
         backbone: str = "sage",
         critic_aggregation: str = "joint_mean",
         **kwargs,
@@ -83,20 +90,27 @@ class RTGNNPolicy(ActorCriticPolicy):
             k_max=k_max,  # keep the original K for the GNN head
             backbone=bb_lit,
             critic_aggregation=agg_lit,
+            edge_dim=int(edge_dim),
+            use_competitor_fusion=bool(use_competitor_fusion),
+            eta_index=int(eta_index),
+            lambda_init=float(lambda_init),
             **gnn_kwargs,
         )
 
         # # Single learnable NO-OP logit shared across robots and batch.
-        self.noop_logit = nn.Parameter(th.tensor(-1.0))
+        self.noop_logit = nn.Parameter(th.tensor(noop_init))
+        # self.noop_logit = nn.Parameter(th.tensor(-0.5))
 
         # === NEW: temperature to soften logits (no gradient needed) ===
-        self.logit_temperature: float = 5.0 
+        self.logit_temperature = float(logit_temperature)
 
         # --- Ensure GNN + NOOP parameters are optimized by PPO's optimizer ---
         # At this point, super().__init__ has already created `self.optimizer`
         # using the base policy parameters. We must explicitly add the new
         # GNN parameters and the NOOP logit to the optimizer param groups.
-        extra_params = list(self.gnn_ac.parameters()) + [self.noop_logit]
+        extra_params = list(self.gnn_ac.parameters())
+        if not freeze_noop_logit:
+            extra_params.append(self.noop_logit)
         # Avoid adding empty groups in case of weird configs
         if len(extra_params) > 0:
             self.optimizer.add_param_group({"params": extra_params})

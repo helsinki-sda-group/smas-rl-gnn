@@ -1,4 +1,5 @@
 import numpy as np
+import argparse
 from stable_baselines3.common.monitor import Monitor
 from typing import Dict, List
 import pandas as pd
@@ -8,7 +9,7 @@ from sumo_rl_rs.environment.ridepool_rt_env import RidepoolRTEnv
 from sumo_rl_rs.environment.rl_controller_adapter import RLControllerAdapter
 from sumo_rl_rs.logging.ridepool_logger import RidepoolLogger, RidepoolLogConfig
 from utils.sumo_bootstrap import start_sumo, make_reset_fn
-from utils.feature_fns import make_feature_fn
+from utils.feature_fns import make_feature_fn, compute_feature_dim
 from utils.metrics_calculator import (
     EpisodeMetrics,
     compute_episode_metrics_from_logs,
@@ -16,27 +17,52 @@ from utils.metrics_calculator import (
     get_metrics_header,
 )
 
+parser = argparse.ArgumentParser(description="Evaluate baseline policies")
+parser.add_argument("--config", type=str, default="configs/rp_gnn.yaml", help="Path to config YAML")
+parser.add_argument("--sumoport", type=int, default=None, help="SUMO remote port (default: SUMO default)")
+parser.add_argument("--sorted", action="store_true", help="Sort candidates by pickup distance (default: randomized)")
+from utils.config import Config
+cfg = Config(parser)
+opt = cfg.opt
+SUMO_PORT = opt.sumoport
+
 # 1) SUMO/controller setup (example; adapt to your config)
-SUMO_CFG = "configs/small_net.sumocfg"
-USE_GUI = False
-R = 5           # number of robots (taxis) expected. # should match to taxis.rou.xml
-K_max = 3        # candidates per robot
-N_max = 16        # max nodes per ego-graph (robot + tasks in its neighborhood)
-E_max = 64        # max edges per ego-graph
-F = 9            # node feature dimension (robot node and task node should have the same dimensionality, padding is applied)
-G = 0             # global stats dim 
+SUMO_CFG = opt.env.sumo_cfg
+USE_GUI = bool(opt.env.use_gui)
+R = int(opt.env.R)
+K_max = int(opt.env.K_max)
+N_max = int(opt.env.N_max)
+E_max = int(opt.env.E_max)
+use_xy_pickup = bool(opt.features.use_xy_pickup)
+use_node_type = bool(getattr(opt.features, "use_node_type", False))
+use_ego_robot = bool(getattr(opt.features, "use_ego_robot", False))
+use_edge_rt = bool(getattr(opt.features, "use_edge_rt", False))
+edge_features = list(getattr(opt.features, "edge_features", []))
+robot_commitment = str(getattr(opt.features, "robot_commitment", "none"))
+route_slots_k = int(getattr(opt.features, "route_slots_k", 2))
 
-VICINITY_M = 2000.0
-MAX_STEPS = 1200
-MAX_WAIT_DELAY_S = 240.0
-MAX_TRAVEL_DELAY_S = 900.0
-MAX_ROBOT_CAPACITY = 2
+F = compute_feature_dim(
+    use_xy_pickup=use_xy_pickup,
+    use_node_type=use_node_type,
+    use_edge_rt=use_edge_rt,
+    use_ego_robot=use_ego_robot,
+    robot_commitment=robot_commitment,
+    route_slots_k=route_slots_k,
+)
+edge_feat_dim = len(edge_features) if use_edge_rt else 0
+G = int(opt.env.G)
 
-NUM_SEEDS = 10  # Number of seeds to use (first N from SEEDS list)
-SEEDS = [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
+VICINITY_M = float(opt.env.vicinity_m)
+MAX_STEPS = int(opt.env.max_steps)
+MAX_WAIT_DELAY_S = float(opt.env.max_wait_delay_s)
+MAX_TRAVEL_DELAY_S = float(opt.env.max_travel_delay_s)
+MAX_ROBOT_CAPACITY = int(opt.env.max_robot_capacity)
+
+NUM_SEEDS = int(opt.baselines.num_seeds)
+SEEDS = list(opt.seeds.eval)
 #SEEDS = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
                   # 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000]
-POLICIES = ["random", "greedy", "unique"]
+POLICIES = list(opt.baselines.policies)
 
 
 # Initialize metrics log file
@@ -57,8 +83,8 @@ for seed in SEEDS[:NUM_SEEDS]:
     print(f"Starting seed {seed}")
     print(f"{'='*80}")
     
-    traci = start_sumo(SUMO_CFG, use_gui=False,
-                       extra_args=[f"--seed", str(seed), "--device.taxi.dispatch-algorithm", "traci"])
+    extra_args = [f"--seed", str(seed), "--device.taxi.dispatch-algorithm", "traci"]
+    traci = start_sumo(SUMO_CFG, use_gui=USE_GUI, extra_args=extra_args, remote_port=SUMO_PORT)
 
     # Policy loop moved here for per-policy logger/env
     for policy_name in POLICIES:
@@ -68,16 +94,21 @@ for seed in SEEDS[:NUM_SEEDS]:
                 run_name=f"rp_eval_seed{seed}_{policy_name}",
                 erase_run_dir_on_start=True,
                 erase_episode_dir_on_start=True,
-                console_debug=False
+                console_debug=False,
             )
         )
 
         controller = RLControllerAdapter(
             sumo=traci,
-            reset_fn=make_reset_fn(SUMO_CFG, use_gui=False,
-                                   extra_args=[f"--seed", str(seed), "--device.taxi.dispatch-algorithm", "traci"]),
+            reset_fn=make_reset_fn(
+                SUMO_CFG,
+                use_gui=USE_GUI,
+                extra_args=extra_args,
+                remote_port=SUMO_PORT,
+            ),
             k_max=K_max,
             vicinity_m=VICINITY_M,
+            sorted_candidates=True,
             completion_mode="dropoff",
             max_steps=MAX_STEPS,
             min_episode_steps=100,
@@ -89,7 +120,17 @@ for seed in SEEDS[:NUM_SEEDS]:
             logger=rp_logger,
             respect_sumo_end=True,
         )
-        feature_fn = make_feature_fn(controller)
+        feature_fn = make_feature_fn(
+            controller,
+            use_xy_pickup=use_xy_pickup,
+            normalize_features=bool(getattr(opt.features, "normalize_features", False)),
+            use_node_type=use_node_type,
+            use_edge_rt=use_edge_rt,
+            edge_features=edge_features,
+            use_ego_robot=use_ego_robot,
+            robot_commitment=robot_commitment,
+            route_slots_k=route_slots_k,
+        )
 
         env = RidepoolRTEnv(
             controller,
@@ -97,7 +138,12 @@ for seed in SEEDS[:NUM_SEEDS]:
             F=F, G=0,
             feature_fn=feature_fn,
             global_stats_fn=None,
-            decision_dt=60,
+            decision_dt=int(opt.env.decision_dt),
+            two_hop=bool(getattr(opt.env, "two_hop", False)),
+            normalize_features=bool(getattr(opt.features, "normalize_features", False)),
+            use_edge_rt=use_edge_rt,
+            edge_feat_dim=edge_feat_dim,
+            edge_features=edge_features,
         )
 
         # ...existing code for NOOP, action functions, and episode run...

@@ -30,16 +30,23 @@ from sumo_rl_rs.environment.ridepool_rt_env import RidepoolRTEnv
 from sumo_rl_rs.environment.rl_controller_adapter import RLControllerAdapter 
 from sumo_rl_rs.logging.ridepool_logger import RidepoolLogger, RidepoolLogConfig
 from utils.sumo_bootstrap import start_sumo, _imports, _build_args
-from utils.feature_fns import make_feature_fn
+from utils.feature_fns import make_feature_fn, compute_feature_dim
 from utils.metrics_calculator import compute_episode_metrics_from_logs
+from utils.logit_metrics_logger import (
+    compute_logit_step_metrics,
+    aggregate_episode_logit_metrics,
+    append_logit_metrics_log,
+    LogitStepMetrics
+)
 
 
 class FixedSeedResetFn:
     """Reset function that uses a fixed seed for reproducibility."""
-    def __init__(self, sumocfg_path: str, use_gui: bool, seed: int):
+    def __init__(self, sumocfg_path: str, use_gui: bool, seed: int, sumo_port: int | None = None):
         self.sumocfg_path = sumocfg_path
         self.use_gui = use_gui
         self.seed = seed
+        self.sumo_port = sumo_port
     
     def __call__(self) -> None:
         extra_args = ["--seed", str(self.seed), "--device.taxi.dispatch-algorithm", "traci"]
@@ -50,7 +57,7 @@ class FixedSeedResetFn:
             traci_module.load(args)
         else:
             binary = checkBinary("sumo-gui" if self.use_gui else "sumo")
-            traci_module.start([binary, *args])
+            traci_module.start([binary, *args], port=self.sumo_port)
 
 
 class Tee(object):
@@ -115,20 +122,21 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
                 run_name=f"model_ep{episode_idx}_ts{ts_idx}_seed{seed}_att{attempt}",
                 erase_run_dir_on_start=True,
                 erase_episode_dir_on_start=True,
-                console_debug=False
+                console_debug=False,
             )
         )
         
         # Start fresh SUMO instance with unique port
         port = port_base + attempt
         extra_args = ["--seed", str(seed), "--device.taxi.dispatch-algorithm", "traci"]
-        traci = start_sumo(config['sumo_cfg'], use_gui=config['use_gui'], extra_args=extra_args)
+        traci = start_sumo(config['sumo_cfg'], use_gui=config['use_gui'], extra_args=extra_args, remote_port=port)
         
         # Setup reset function
         reset_fn = FixedSeedResetFn(
             config['sumo_cfg'],
             use_gui=config['use_gui'],
-            seed=seed
+            seed=seed,
+            sumo_port=port,
         )
         
         # Create controller with fresh SUMO
@@ -137,6 +145,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             reset_fn=reset_fn,
             k_max=config['k_max'],
             vicinity_m=config['vicinity_m'],
+            sorted_candidates=config.get('sorted_candidates', False),
             completion_mode="dropoff",
             max_steps=config['max_steps'],
             min_episode_steps=config['min_episode_steps'],
@@ -148,7 +157,17 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             logger=rp_logger,
         )
         
-        feature_fn = make_feature_fn(controller)
+        feature_fn = make_feature_fn(
+            controller,
+            use_xy_pickup=bool(config.get('use_xy_pickup', False)),
+            normalize_features=bool(config.get('normalize_features', False)),
+            use_node_type=bool(config.get('use_node_type', False)),
+            use_edge_rt=bool(config.get('use_edge_rt', False)),
+            edge_features=list(config.get('edge_features', [])),
+            use_ego_robot=bool(config.get('use_ego_robot', False)),
+            robot_commitment=str(config.get('robot_commitment', 'none')),
+            route_slots_k=int(config.get('route_slots_k', 2)),
+        )
         
         # Create environment
         env = RidepoolRTEnv(
@@ -158,6 +177,11 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             feature_fn=feature_fn,
             global_stats_fn=None,
             decision_dt=config['decision_dt'],
+            two_hop=bool(config.get('two_hop', False)),
+            normalize_features=bool(config.get('normalize_features', False)),
+            use_edge_rt=bool(config.get('use_edge_rt', False)),
+            edge_feat_dim=int(config.get('edge_feat_dim', 0)),
+            edge_features=list(config.get('edge_features', [])),
         )
         
         # Run single evaluation episode (one per fresh SUMO instance)
@@ -166,30 +190,52 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
         done = False
         step_idx = 0
         
+        # Collect logit metrics for each decision step
+        logit_step_metrics = []
+        
         while not done:
             #model.policy.noop_logit.data.fill_(-1.0)
+            
+            # Capture logits before prediction
+            try:
+                with th.no_grad():
+                    obs_tensor, _ = model.policy.obs_to_tensor(obs)
+                    _ = model.policy.extract_features(obs_tensor, features_extractor=model.policy.features_extractor)
+                    obs_dict_b = model.policy.features_extractor.last_obs
+                    logits_k, _ = model.policy._build_batch_outputs(obs_dict_b)
+                    mask_k = obs_dict_b["cand_mask"]
+                    logits, mask = model.policy._append_noop(logits_k, mask_k)
+                    
+                    # Extract logits and mask as numpy arrays
+                    logits_np = logits.squeeze(0).detach().cpu().numpy()  # [R, K_max+1]
+                    mask_np = mask.squeeze(0).detach().cpu().numpy()  # [R, K_max+1]
+                    noop_logit_value = float(model.policy.noop_logit.item())
+                    
+                    # Compute step logit metrics
+                    step_metrics = compute_logit_step_metrics(logits_np, mask_np, noop_logit_value)
+                    step_metrics.step = step_idx
+                    logit_step_metrics.append(step_metrics)
+                    
+                    if config.get('print_steps', False):
+                        logits_masked = logits.masked_fill(~mask, -1e9)
+                        logits_masked_np = logits_masked.squeeze(0).detach().cpu().numpy()
+                        print(f"[STEP {step_idx}] obs={obs}")
+                        print(f"[STEP {step_idx}] logits={logits_masked_np}")
+                        print(f"[STEP {step_idx}] logit_metrics: best_cand={step_metrics.best_cand_logit:.4f}, "
+                              f"noop={step_metrics.noop_logit:.4f}, margin={step_metrics.margin:.4f}")
+            except Exception as e:
+                print(f"[STEP {step_idx}] logit capture error: {e}")
+            
             action, _states = model.predict(obs, deterministic=config.get('deterministic', False))
+            
             if config.get('print_steps', False):
-                try:
-                    with th.no_grad():
-                        obs_tensor, _ = model.policy.obs_to_tensor(obs)
-                        _ = model.policy.extract_features(obs_tensor, features_extractor=model.policy.features_extractor)
-                        obs_dict_b = model.policy.features_extractor.last_obs
-                        logits_k, _ = model.policy._build_batch_outputs(obs_dict_b)
-                        mask_k = obs_dict_b["cand_mask"]
-                        logits, mask = model.policy._append_noop(logits_k, mask_k)
-                        logits = logits.masked_fill(~mask, -1e9)
-                        logits_np = logits.squeeze(0).detach().cpu().numpy()
-                    print(f"[STEP {step_idx}] obs={obs}")
-                    print(f"[STEP {step_idx}] logits={logits_np}")
-                    print(f"[STEP {step_idx}] action={action}")
-                except Exception as e:
-                    print(f"[STEP {step_idx}] print error: {e}")
+                print(f"[STEP {step_idx}] action={action}")
+            
             obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             ep_reward += reward
             step_idx += 1
-        
+
         # **FIX**: Flush logger files to ensure all data is written before extracting metrics
         if hasattr(rp_logger, '_files'):
             for f in rp_logger._files.values():
@@ -218,11 +264,17 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             episode_metrics.ts = ts_idx
         elif isinstance(episode_metrics, dict):
             episode_metrics['ts'] = ts_idx
+        
+        # Aggregate logit metrics
+        policy_type = "deterministic" if config.get('deterministic', False) else "stochastic"
+        logit_episode_metrics = aggregate_episode_logit_metrics(logit_step_metrics, policy_type, seed, ts_idx)
+        
         env.close()
         rp_logger.close()
         return {
             'reward': ep_reward,
-            'episode_metrics': episode_metrics
+            'episode_metrics': episode_metrics,
+            'logit_metrics': logit_episode_metrics
         }
     
     except Exception as e:
@@ -247,6 +299,9 @@ def ma(data, window):
 def plot_evaluation_results(results_df, output_dir, ma_window=10):
     """Generate plots from evaluation results."""
     os.makedirs(output_dir, exist_ok=True)
+    
+    fig, ax = plt.subplots(figsize=(12, 6), facecolor='#fafafa')
+    ax.set_facecolor('#fafafa')
     
     # Group by timestep, averaging across all seeds and attempts
     grouped = results_df.groupby(['ts_idx'])['reward'].agg(['mean', 'std', 'count']).reset_index()
@@ -423,62 +478,102 @@ def plot_evaluation_results(results_df, output_dir, ma_window=10):
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate all saved models')
+    parser.add_argument('--config', type=str, default='configs/rp_gnn.yaml',
+                        help='Path to config YAML')
     parser.add_argument('--eval-runs', type=int, default=3,
                         help='Number of evaluation runs per seed (default: 3)')
     parser.add_argument('--ma-window', type=int, default=10,
                         help='Moving average window size (default: 10)')
     parser.add_argument('--model-sample', type=float, default=1.0,
                         help='Fraction of models to evaluate (default: 1.0 = all). 0.1 = every 10th model')
-    parser.add_argument('--seeds', type=str, default='both', choices=['train', 'eval', 'both'],
+    parser.add_argument('--seeds', dest='seed_set', type=str, default='both', choices=['train', 'eval', 'both'],
                         help='Which seeds to evaluate on (default: both)')
     parser.add_argument('--model-dir', type=str, default='runs/rp_gnn_debug/saved_models',
                         help='Directory containing model.zip files')
     parser.add_argument('--output-dir', type=str, default='eval_results',
                         help='Output directory for results')
+    parser.add_argument('--sumoport', type=int, default=None,
+                        help='Base SUMO remote port (default: 8900)')
     parser.add_argument('--gui', action='store_true', help='Enable SUMO GUI (default: disabled)')
+    parser.add_argument('--sorted', action='store_true',
+                        help='Sort candidates by pickup distance (default: randomized)')
     parser.add_argument('--print-steps', action='store_true',
                         help='Print observation, logits, and action for each env step')
     parser.add_argument('--deterministic', action='store_true',
                         help='Use deterministic=True for model.predict')
-    args = parser.parse_args()
+    from utils.config import Config
+    cfg = Config(parser)
+    opt = cfg.opt
+    args = opt
     
     # Seeds
-    TRAIN_SEEDS = [100]#, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
-                  # 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000]
-    EVAL_SEEDS = [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
+    TRAIN_SEEDS = list(opt.seeds.train)
+    EVAL_SEEDS = list(opt.seeds.eval)
     
-    if args.seeds == 'train':
+    if args.seed_set == 'train':
         seeds_to_eval = TRAIN_SEEDS
-    elif args.seeds == 'eval':
+    elif args.seed_set == 'eval':
         seeds_to_eval = EVAL_SEEDS
     else:
         seeds_to_eval = TRAIN_SEEDS + EVAL_SEEDS
     
+    output_dir = str(getattr(args, "output_dir", "eval_results"))
+    model_dir = str(getattr(args, "model_dir", "runs/rp_gnn_debug/saved_models"))
+
+    use_xy_pickup = bool(opt.features.use_xy_pickup)
+    use_node_type = bool(getattr(opt.features, "use_node_type", False))
+    use_ego_robot = bool(getattr(opt.features, "use_ego_robot", False))
+    use_edge_rt = bool(getattr(opt.features, "use_edge_rt", False))
+    edge_features = list(getattr(opt.features, "edge_features", []))
+    robot_commitment = str(getattr(opt.features, "robot_commitment", "none"))
+    route_slots_k = int(getattr(opt.features, "route_slots_k", 2))
+
+    feature_dim = compute_feature_dim(
+        use_xy_pickup=use_xy_pickup,
+        use_node_type=use_node_type,
+        use_edge_rt=use_edge_rt,
+        use_ego_robot=use_ego_robot,
+        robot_commitment=robot_commitment,
+        route_slots_k=route_slots_k,
+    )
+    edge_feat_dim = len(edge_features) if use_edge_rt else 0
+
     # Configuration
     config = {
-        'sumo_cfg': 'configs/small_net.sumocfg',
-        'use_gui': args.gui,
-        'R': 5,
-        'k_max': 3,
-        'N_max': 16,
-        'E_max': 64,
-        'F': 9,
-        'vicinity_m': 2000.0,
-        'max_steps': 1200,
-        'max_wait_delay_s': 240.0,
-        'max_travel_delay_s': 900.0,
-        'max_robot_capacity': 2,
-        'decision_dt': 60,
-        'min_episode_steps': 100,
-        'eval_runs': args.eval_runs,
-        'eval_run_dir': os.path.join(args.output_dir, 'evaluation_runs'),
-        'print_steps': args.print_steps,
-        'deterministic': args.deterministic,
+        'sumo_cfg': opt.env.sumo_cfg,
+        'use_gui': bool(opt.env.use_gui) or bool(getattr(args, "gui", False)),
+        'R': int(opt.env.R),
+        'k_max': int(opt.env.K_max),
+        'N_max': int(opt.env.N_max),
+        'E_max': int(opt.env.E_max),
+        'F': feature_dim,
+        'use_xy_pickup': use_xy_pickup,
+        'normalize_features': bool(getattr(opt.features, "normalize_features", False)),
+        'use_node_type': use_node_type,
+        'use_ego_robot': use_ego_robot,
+        'use_edge_rt': use_edge_rt,
+        'edge_features': edge_features,
+        'robot_commitment': robot_commitment,
+        'route_slots_k': route_slots_k,
+        'edge_feat_dim': edge_feat_dim,
+        'two_hop': bool(getattr(opt.env, "two_hop", False)),
+        'vicinity_m': float(opt.env.vicinity_m),
+        'max_steps': int(opt.env.max_steps),
+        'max_wait_delay_s': float(opt.env.max_wait_delay_s),
+        'max_travel_delay_s': float(opt.env.max_travel_delay_s),
+        'max_robot_capacity': int(opt.env.max_robot_capacity),
+        'decision_dt': int(opt.env.decision_dt),
+        'min_episode_steps': int(opt.env.min_episode_steps),
+        'eval_runs': int(getattr(args, "eval_runs", 3)),
+        'eval_run_dir': os.path.join(output_dir, 'evaluation_runs'),
+        'print_steps': bool(getattr(args, "print_steps", False)),
+        'deterministic': bool(getattr(args, "deterministic", False)),
+        'sorted_candidates': bool(getattr(args, "sorted", False)) or bool(opt.env.sorted_candidates),
     }
     
     # Create output directories
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_base = os.path.join(args.output_dir, f'evaluation_{timestamp}')
+    output_base = os.path.join(output_dir, f'evaluation_{timestamp}')
     os.makedirs(config['eval_run_dir'], exist_ok=True)
     os.makedirs(output_base, exist_ok=True)
     
@@ -490,16 +585,16 @@ def main():
     print(f"EVALUATING SAVED MODELS")
     print("=" * 80)
     print(f"Timestamp: {timestamp}")
-    print(f"Model directory: {args.model_dir}")
+    print(f"Model directory: {model_dir}")
     print(f"Output directory: {output_base}")
-    print(f"Seeds: {args.seeds} ({len(seeds_to_eval)} seeds)")
-    print(f"Eval runs per seed: {args.eval_runs}")
-    print(f"Moving average window: {args.ma_window}")
-    print(f"Model sample rate: {args.model_sample*100:.1f}%")
+    print(f"Seeds: {args.seed_set} ({len(seeds_to_eval)} seeds)")
+    print(f"Eval runs per seed: {getattr(args, 'eval_runs', 3)}")
+    print(f"Moving average window: {getattr(args, 'ma_window', 10)}")
+    print(f"Model sample rate: {getattr(args, 'model_sample', 1.0)*100:.1f}%")
     print()
     
     # Find all models and sort by timestep (not by filename)
-    model_files = glob.glob(os.path.join(args.model_dir, 'model_episode*.zip'))
+    model_files = glob.glob(os.path.join(model_dir, 'model_episode*.zip'))
     
     # Parse and sort by timestep value
     model_info = []
@@ -514,29 +609,34 @@ def main():
     model_files = [mf for _, mf in model_info]
     
     # Sample models if requested
-    if args.model_sample < 1.0:
-        sample_size = max(1, int(len(model_files) * args.model_sample))
+    model_sample = float(getattr(args, "model_sample", 1.0))
+    if model_sample < 1.0:
+        sample_size = max(1, int(len(model_files) * model_sample))
         sample_indices = np.linspace(0, len(model_files) - 1, sample_size, dtype=int)
         model_files = [model_files[i] for i in sample_indices]
-        print(f"Sampling {len(model_files)} models ({args.model_sample*100:.1f}% of {len(model_info)} total)")
+        print(f"Sampling {len(model_files)} models ({model_sample*100:.1f}% of {len(model_info)} total)")
     else:
         print(f"Found {len(model_files)} model files (sorted by timestep)")
     print()
     
     if not model_files:
-        print(f"ERROR: No models found in {args.model_dir}")
+        print(f"ERROR: No models found in {model_dir}")
         tee.close()
         return
     
     # Evaluate all models
     results = []
     metrics_file = os.path.join(output_base, f'evaluation_metrics.log')
+    logit_metrics_file = os.path.join(output_base, f'logit_metrics.log')
     from utils.metrics_calculator import ensure_metrics_log
     ensure_metrics_log(metrics_file, overwrite=True)
+    from utils.logit_metrics_logger import ensure_logit_metrics_log
+    ensure_logit_metrics_log(logit_metrics_file)
     
-    total_evals = len(model_files) * len(seeds_to_eval) * args.eval_runs
+    eval_runs = int(getattr(args, "eval_runs", 3))
+    total_evals = len(model_files) * len(seeds_to_eval) * eval_runs
     current_eval = 0
-    port_base = 8900
+    port_base = getattr(args, "sumoport", None) if getattr(args, "sumoport", None) is not None else 8900
     
     for model_idx, model_path in enumerate(model_files):
         filename = os.path.basename(model_path)
@@ -549,10 +649,10 @@ def main():
         print(f"\n[Model {model_idx+1}/{len(model_files)}] {filename}")
         
         for seed_idx, seed in enumerate(seeds_to_eval):
-            for attempt in range(args.eval_runs):
+            for attempt in range(eval_runs):
                 current_eval += 1
                 pct = 100.0 * current_eval / total_evals
-                print(f"  [{current_eval}/{total_evals} ({pct:.1f}%)] Seed {seed}, Attempt {attempt+1}/{args.eval_runs}...", end=' ')
+                print(f"  [{current_eval}/{total_evals} ({pct:.1f}%)] Seed {seed}, Attempt {attempt+1}/{eval_runs}...", end=' ')
                 
                 result = evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_base)
                 if result:
@@ -563,9 +663,15 @@ def main():
                         'attempt': attempt,
                         'reward': result['reward'],
                         'episode_metrics': result['episode_metrics'],
+                        'logit_metrics': result.get('logit_metrics', None),
                     })
                     from utils.metrics_calculator import append_metrics_log
                     append_metrics_log(metrics_file, result['episode_metrics'])
+                    
+                    # Log logit metrics if available
+                    if 'logit_metrics' in result and result['logit_metrics'] is not None:
+                        append_logit_metrics_log(logit_metrics_file, result['logit_metrics'])
+                    
                     print(f"[OK] reward={result['reward']:.4f}")
                 else:
                     print(f"[FAIL]")
@@ -584,7 +690,7 @@ def main():
         
         # Generate plots
         print("\nGenerating plots...")
-        plot_evaluation_results(results_df, output_base, ma_window=args.ma_window)
+        plot_evaluation_results(results_df, output_base, ma_window=int(getattr(args, "ma_window", 10)))
     
     print(f"\n[OK] All results saved to {output_base}")
     tee.close()

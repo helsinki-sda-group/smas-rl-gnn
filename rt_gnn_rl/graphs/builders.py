@@ -20,6 +20,12 @@ def build_padded_ego_batch(
     F: int,
     G: int,
     feature_fn: Callable[[Any, Any, str], np.ndarray],
+    two_hop: bool = False,
+    normalize_features: bool = False,
+    vicinity_m: float = 0.0,
+    use_edge_rt: bool = False,
+    edge_feat_dim: int = 0,
+    edge_features: Optional[List[str]] = None,
     # global_stats_fn: Optional[Callable[[Any], np.ndarray]] = None,
 ) -> Tuple[Dict[str, np.ndarray], List[List[Optional[str]]]]:
     """
@@ -79,17 +85,36 @@ def build_padded_ego_batch(
     node_mask = np.zeros((R, N_max), np.uint8)
     edge_index = np.zeros((R, 2, E_max), np.int64)
     edge_mask = np.zeros((R, E_max), np.uint8)
+    edge_attr = np.zeros((R, E_max, edge_feat_dim), np.float32) if edge_feat_dim > 0 else None
+    edge_features = list(edge_features or [])
+    ego_edge_idx = edge_features.index("is_ego_edge") if "is_ego_edge" in edge_features else None
     cand_idx = np.zeros((R, K_max), np.int64)
     cand_mask = np.zeros((R, K_max), np.uint8)
 
     # map slot -> task_id used this step (to feed controller in step())
     cand_task_ids: List[List[Optional[str]]] = [[None] * K_max for _ in range(R)]
 
+    vicinity_threshold = float(vicinity_m)
+    pos_scale = max(1.0, float(vicinity_m))
+
+    def _to_meters(xy: Tuple[float, float]) -> Tuple[float, float]:
+        if normalize_features:
+            return xy[0] * pos_scale, xy[1] * pos_scale
+        return xy
+
+    robot_xy_cache: List[Tuple[float, float]] = []
+    for rid in robots:
+        try:
+            rf = feature_fn(rid, None, "robot_other")
+            robot_xy_cache.append(_to_meters((float(rf[0]), float(rf[1]))))
+        except Exception:
+            robot_xy_cache.append((0.0, 0.0))
+
     for i in range(R):
         rid = robots[i]
         # Robot node at index 0 (even if rid is None, create a dummy vector)
         try:
-            x[i, 0, :] = feature_fn(rid, None, "robot")
+            x[i, 0, :] = feature_fn(rid, None, "robot_ego")
         except Exception:
             # fallback: zeros with bias 1 in the last slot
             pass
@@ -103,6 +128,8 @@ def build_padded_ego_batch(
 
         # Add nodes and edges
         e_ptr = 0
+        next_node_id = 1 + len(cands)
+        competitor_nodes: Dict[str, int] = {}
         for local_slot, task_idx in enumerate(cands):
             node_id = 1 + local_slot  # node indices for tasks
             if node_id >= N_max:
@@ -115,6 +142,14 @@ def build_padded_ego_batch(
             except Exception:
                 pass
             node_mask[i, node_id] = 1
+
+            task_xy = None
+            if two_hop:
+                try:
+                    tf = feature_fn(rid, t, "task")
+                    task_xy = _to_meters((float(tf[3]), float(tf[4])))
+                except Exception:
+                    task_xy = None
 
             # cand slot mapping: slot `local_slot` → node index `node_id`
             cand_idx[i, local_slot] = node_id
@@ -131,12 +166,64 @@ def build_padded_ego_batch(
                 edge_index[i, 0, e_ptr] = 0
                 edge_index[i, 1, e_ptr] = node_id
                 edge_mask[i, e_ptr] = 1
+                if edge_attr is not None and use_edge_rt:
+                    try:
+                        edge_attr[i, e_ptr, :] = feature_fn(rid, t, "edge_rt")
+                        if ego_edge_idx is not None:
+                            edge_attr[i, e_ptr, ego_edge_idx] = 1.0
+                    except Exception:
+                        pass
                 e_ptr += 1
 
                 edge_index[i, 0, e_ptr] = node_id
                 edge_index[i, 1, e_ptr] = 0
                 edge_mask[i, e_ptr] = 1
+                if edge_attr is not None and use_edge_rt:
+                    try:
+                        edge_attr[i, e_ptr, :] = feature_fn(rid, t, "edge_rt")
+                        if ego_edge_idx is not None:
+                            edge_attr[i, e_ptr, ego_edge_idx] = 1.0
+                    except Exception:
+                        pass
                 e_ptr += 1
+
+            if two_hop and task_xy is not None:
+                for j, other_rid in enumerate(robots):
+                    if other_rid is None or j == i:
+                        continue
+                    rx, ry = robot_xy_cache[j]
+                    dx = rx - task_xy[0]
+                    dy = ry - task_xy[1]
+                    if (dx * dx + dy * dy) > (vicinity_threshold * vicinity_threshold):
+                        continue
+
+                    other_key = str(other_rid)
+                    if other_key in competitor_nodes:
+                        other_node_id = competitor_nodes[other_key]
+                    else:
+                        if next_node_id >= N_max:
+                            continue
+                        other_node_id = next_node_id
+                        next_node_id += 1
+                        competitor_nodes[other_key] = other_node_id
+                        try:
+                            x[i, other_node_id, :] = feature_fn(other_rid, None, "robot_other")
+                        except Exception:
+                            pass
+                        node_mask[i, other_node_id] = 1
+
+                    if e_ptr + 1 <= E_max:
+                        edge_index[i, 0, e_ptr] = node_id
+                        edge_index[i, 1, e_ptr] = other_node_id
+                        edge_mask[i, e_ptr] = 1
+                        if edge_attr is not None and use_edge_rt:
+                            try:
+                                edge_attr[i, e_ptr, :] = feature_fn(other_rid, t, "edge_rt")
+                                if ego_edge_idx is not None:
+                                    edge_attr[i, e_ptr, ego_edge_idx] = 0.0
+                            except Exception:
+                                pass
+                        e_ptr += 1
         # any remaining cand slots are already 0/False (padding)
 
     obs = dict(
@@ -144,6 +231,7 @@ def build_padded_ego_batch(
         node_mask=node_mask,
         edge_index=edge_index,
         edge_mask=edge_mask,
+        **({"edge_attr": edge_attr} if edge_attr is not None else {}),
         cand_idx=cand_idx,
         cand_mask=cand_mask,
         # global_stats=(global_stats_fn() if global_stats_fn else np.zeros((G,), np.float32)),

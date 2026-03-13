@@ -38,9 +38,17 @@ def parse_metrics_log(filepath):
         if len(seg0) < 2 or len(seg1) < 7:
             continue
         
+        ts_val = None
+        if len(seg0) >= 3:
+            try:
+                ts_val = int(seg0[2])
+            except Exception:
+                ts_val = None
+
         data.append({
             'pol': int(seg0[0]),
             'seed': int(seg0[1]),
+            'ts': ts_val,
             'rew': float(seg1[0]),
             'cap': float(seg1[1]),
             'step': float(seg1[2]),
@@ -51,7 +59,10 @@ def parse_metrics_log(filepath):
         })
     
     df = pd.DataFrame(data)
-    df = df.sort_values('pol').reset_index(drop=True)
+    if "ts" in df.columns and df["ts"].notna().any():
+        df = df.sort_values("ts").drop_duplicates(subset=["ts"], keep="last").reset_index(drop=True)
+    else:
+        df = df.sort_values('pol').reset_index(drop=True)
     return df
 
 
@@ -67,6 +78,7 @@ def parse_train_output(filepath):
         row = {}
         patterns = {
             'iterations': r'iterations\s+\|\s+(\d+)',
+            'total_timesteps': r'total_timesteps\s+\|\s+(\d+)',
             'ep_rew_mean': r'ep_rew_mean\s+\|\s+([\d.]+)',
             'approx_kl': r'approx_kl\s+\|\s+([\d.e+-]+)',
             'clip_fraction': r'clip_fraction\s+\|\s+([\d.]+)',
@@ -106,7 +118,8 @@ def ma(data, window):
 
 def plot_reward_components(df, output_file='reward_components.png'):
     """Create reward component breakdown plots."""
-    eps = df['pol'].values
+    use_ts = 'ts' in df.columns and df['ts'].notna().any()
+    eps = df['ts'].values if use_ts else df['pol'].values
     rew = df['rew'].values
     mdl = df['mdl'].values
     wait = df['wait'].values
@@ -139,7 +152,13 @@ def plot_reward_components(df, output_file='reward_components.png'):
     ax.plot(eps, np.polyval(z, eps), lw=1.8, color='#27ae60', alpha=0.5,
             ls=':', label=f'Trend: {z[0]:+.5f}/ep')
     
-    ax.set_xlim(-10, len(eps) + 10)
+    if use_ts:
+        x_min, x_max = float(np.min(eps)), float(np.max(eps))
+        pad = max(1.0, 0.02 * (x_max - x_min))
+        ax.set_xlim(x_min - pad, x_max + pad)
+    else:
+        ax.set_xlim(-10, len(eps) + 10)
+    ax.set_xlabel('Timestep' if use_ts else 'Episode', fontsize=11, fontweight='bold')
     ax.set_ylabel('Total Reward', fontsize=11, fontweight='bold')
     ax.set_title(f'Training Reward - {N} Episodes', fontsize=14, fontweight='bold', pad=10)
     ax.legend(loc='upper left', fontsize=9, ncol=3)
@@ -169,15 +188,15 @@ def plot_reward_components(df, output_file='reward_components.png'):
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     
-    # ── Middleware penalty ──────────────────────────────────────────────────
+    # ── Deadline penalty ──────────────────────────────────────────────────
     ax = fig.add_subplot(gs[1, 1])
     ax.set_facecolor('#fafafa')
     #ax.plot(eps, mdl, 'o', markersize=scatter_size//2, alpha=scatter_alpha, color='#e74c3c')
     ax.plot(eps, ma(mdl, 20), lw=2.5, color='#e74c3c', alpha=0.9)
     ax.axhline(0, color='black', lw=1, alpha=0.5)
     ax.axhline(mdl.mean(), color='#c0392b', lw=2, ls='--', alpha=0.6)
-    ax.set_ylabel('Middleware Penalty', fontsize=10, fontweight='bold')
-    ax.set_title(f'Middleware (mean: {mdl.mean():.2f})', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Deadline Penalty', fontsize=10, fontweight='bold')
+    ax.set_title(f'Deadline Penalty (mean: {mdl.mean():.2f})', fontsize=11, fontweight='bold')
     ax.grid(alpha=0.25)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -202,7 +221,7 @@ def plot_reward_components(df, output_file='reward_components.png'):
     
     baseline = np.zeros(len(eps))
     ax.fill_between(eps, baseline, baseline + mdl,
-                    color='#e74c3c', alpha=0.4, label='Middleware')
+                    color='#e74c3c', alpha=0.4, label='Deadline')
     ax.fill_between(eps, baseline + mdl, baseline + mdl + wait,
                     color='#f39c12', alpha=0.4, label='Wait')
     ax.fill_between(eps, baseline + mdl + wait, baseline + mdl + wait + comp,
@@ -232,7 +251,21 @@ def plot_ppo_metrics(train_df, output_file='ppo_metrics.png'):
         print("⚠ No PPO training data found in train_output.txt")
         return
     
-    iters = train_df['iterations'].values
+    if 'total_timesteps' in train_df.columns and train_df['total_timesteps'].notna().any():
+        iters = train_df['total_timesteps'].values
+        x_label = 'Timesteps'
+    else:
+        raw_iters = train_df['iterations'].values
+        iters = []
+        offset = 0
+        prev = None
+        for val in raw_iters:
+            if prev is not None and val <= prev:
+                offset += prev
+            iters.append(val + offset)
+            prev = val
+        iters = np.array(iters, dtype=float)
+        x_label = 'Iteration'
     ev = train_df['explained_variance'].values
     vl = train_df['value_loss'].values
     ent = train_df['entropy_loss'].values
@@ -260,6 +293,7 @@ def plot_ppo_metrics(train_df, output_file='ppo_metrics.png'):
     ax.set_ylabel('Episode Reward', fontsize=11, fontweight='bold')
     ax.set_title(f'PPO Training Progress - {len(iters)} Iterations', 
                 fontsize=14, fontweight='bold', pad=10)
+    ax.set_xlabel(x_label, fontsize=11, fontweight='bold')
     ax.legend(fontsize=9)
     ax.grid(alpha=0.25)
     ax.spines['top'].set_visible(False)
@@ -277,15 +311,17 @@ def plot_ppo_metrics(train_df, output_file='ppo_metrics.png'):
     ax = fig.add_subplot(gs[1, 0])
     ax.set_facecolor('#fafafa')
     
-    ax.axhspan(-10, 0, alpha=0.08, color='red')
+    ax.axhspan(-0.25, 0, alpha=0.08, color='red')
     ax.axhspan(0, 0.5, alpha=0.08, color='gold')
     ax.axhspan(0.5, 1, alpha=0.08, color='green')
     
     ax.plot(iters, ev, 'o-', lw=2, markersize=marker_size, color='#e74c3c', alpha=0.7)
     ax.axhline(0, color='black', lw=1, alpha=0.5)
     ax.axhline(0.5, color='green', lw=1.5, ls='--', alpha=0.5)
+
+    ax.set_ylim(-0.25, 1)
     
-    ax.set_xlabel('Iteration', fontsize=11, fontweight='bold')
+    ax.set_xlabel(x_label, fontsize=11, fontweight='bold')
     ax.set_ylabel('Explained Variance', fontsize=10, fontweight='bold')
     ax.set_title('Value Function Quality', fontsize=11, fontweight='bold')
     ax.grid(alpha=0.25)
@@ -298,7 +334,7 @@ def plot_ppo_metrics(train_df, output_file='ppo_metrics.png'):
     
     ax.plot(iters, vl, 'o-', lw=2, markersize=marker_size, color='#3498db', alpha=0.7)
     
-    ax.set_xlabel('Iteration', fontsize=11, fontweight='bold')
+    ax.set_xlabel(x_label, fontsize=11, fontweight='bold')
     ax.set_ylabel('Value Loss', fontsize=10, fontweight='bold')
     ax.set_title('Value Loss', fontsize=11, fontweight='bold')
     ax.grid(alpha=0.25)
@@ -313,7 +349,7 @@ def plot_ppo_metrics(train_df, output_file='ppo_metrics.png'):
     ax.axhline(-1.0, color='orange', lw=1.5, ls='--', alpha=0.5, label='Caution')
     ax.axhline(-0.5, color='red', lw=1.5, ls='--', alpha=0.5, label='Collapse')
     
-    ax.set_xlabel('Iteration', fontsize=11, fontweight='bold')
+    ax.set_xlabel(x_label, fontsize=11, fontweight='bold')
     ax.set_ylabel('Entropy Loss', fontsize=10, fontweight='bold')
     ax.set_title('Exploration (Entropy)', fontsize=11, fontweight='bold')
     ax.legend(fontsize=8, loc='lower right')
@@ -331,7 +367,7 @@ def plot_ppo_metrics(train_df, output_file='ppo_metrics.png'):
     ax.axhline(0.01, color='#d35400', lw=1.5, ls='--', alpha=0.4, label='Target: 0.01')
     ax.axhline(0.001, color='#f39c12', lw=1, ls=':', alpha=0.3)
     
-    ax.set_xlabel('Iteration', fontsize=11, fontweight='bold')
+    ax.set_xlabel(x_label, fontsize=11, fontweight='bold')
     ax.set_ylabel('Approx KL', fontsize=10, fontweight='bold', color='#e67e22')
     ax.tick_params(axis='y', labelcolor='#e67e22')
     ax.set_yscale('log')
@@ -396,12 +432,16 @@ def plot_reward_by_seed(df, ma_window=20, output_prefix='reward_seed'):
     """Create separate reward plots for each seed."""
     seeds = df['seed'].unique()
     print(f"\n  Found {len(seeds)} unique seeds: {sorted(seeds)}")
+    use_ts = 'ts' in df.columns and df['ts'].notna().any()
     
     for seed in sorted(seeds):
         seed_df = df[df['seed'] == seed].copy()
-        seed_df = seed_df.sort_values('pol').reset_index(drop=True)
+        if use_ts:
+            seed_df = seed_df.sort_values('ts').drop_duplicates(subset=['ts'], keep='last').reset_index(drop=True)
+        else:
+            seed_df = seed_df.sort_values('pol').reset_index(drop=True)
         
-        eps = seed_df['pol'].values
+        eps = seed_df['ts'].values if use_ts else seed_df['pol'].values
         rew = seed_df['rew'].values
         
         if len(eps) == 0:
@@ -428,8 +468,9 @@ def plot_reward_by_seed(df, ma_window=20, output_prefix='reward_seed'):
         ax.plot(eps, np.polyval(z, eps), lw=1.8, color='#27ae60', alpha=0.5,
                 ls=':', label=f'Trend: {z[0]:+.5f}/ep')
         
-        ax.set_xlim(eps.min() - 5, eps.max() + 5)
-        ax.set_xlabel('Episode', fontsize=11, fontweight='bold')
+        pad = 5 if not use_ts else max(1.0, 0.02 * (eps.max() - eps.min()))
+        ax.set_xlim(eps.min() - pad, eps.max() + pad)
+        ax.set_xlabel('Timestep' if use_ts else 'Episode', fontsize=11, fontweight='bold')
         ax.set_ylabel('Total Reward', fontsize=11, fontweight='bold')
         ax.set_title(f'Training Reward - Seed {seed} ({N} Episodes)', 
                     fontsize=14, fontweight='bold', pad=10)

@@ -19,15 +19,25 @@ def _build_args(sumocfg_path: str, extra_args: Optional[List[str]]) -> List[str]
         args += extra_args
     return args
 
-def start_sumo(sumocfg_path: str, use_gui: bool = False, extra_args: Optional[List[str]] = None) -> Any:
+def start_sumo(
+    sumocfg_path: str,
+    use_gui: bool = False,
+    extra_args: Optional[List[str]] = None,
+    remote_port: Optional[int] = None,
+) -> Any:
     traci, checkBinary = _imports()
     binary = checkBinary("sumo-gui" if use_gui else "sumo")
     if traci.isLoaded():
         traci.close(wait=True)
-    traci.start([binary, *_build_args(sumocfg_path, extra_args)])
+    traci.start([binary, *_build_args(sumocfg_path, extra_args)], port=remote_port)
     return traci
 
-def make_reset_fn(sumocfg_path: str, use_gui: bool = False, extra_args: Optional[List[str]] = None) -> Callable[[], None]:
+def make_reset_fn(
+    sumocfg_path: str,
+    use_gui: bool = False,
+    extra_args: Optional[List[str]] = None,
+    remote_port: Optional[int] = None,
+) -> Callable[[], None]:
     """Reset using traci.load when possible (faster), else restart."""
     def _reset() -> None:
         traci, checkBinary = _imports()
@@ -37,15 +47,20 @@ def make_reset_fn(sumocfg_path: str, use_gui: bool = False, extra_args: Optional
             traci.load(args)
         else:
             binary = checkBinary("sumo-gui" if use_gui else "sumo")
-            traci.start([binary, *args])
+            traci.start([binary, *args], port=remote_port)
     return _reset
 
-def start_sumo_conn(sumocfg_path: str, use_gui: bool = False, extra_args: Optional[List[str]] = None) -> Any:
+def start_sumo_conn(
+    sumocfg_path: str,
+    use_gui: bool = False,
+    extra_args: Optional[List[str]] = None,
+    remote_port: Optional[int] = None,
+) -> Any:
     traci, checkBinary = _imports()
     binary = checkBinary("sumo-gui" if use_gui else "sumo")
     if traci.isLoaded():
         traci.close(wait=True)
-    traci.start([binary, *_build_args(sumocfg_path, extra_args)])
+    traci.start([binary, *_build_args(sumocfg_path, extra_args)], port=remote_port)
     return traci.getConnection()
 
 def make_reset_fn_conn(
@@ -53,6 +68,7 @@ def make_reset_fn_conn(
     sumocfg_path: str,
     use_gui: bool = False,
     extra_args: Optional[List[str]] = None,
+    remote_port: Optional[int] = None,
 ) -> Callable[[], None]:
     """Reset and hand a fresh connection back via set_conn(conn)."""
     def _reset() -> None:
@@ -67,9 +83,9 @@ def make_reset_fn_conn(
                     traci.close(wait=True)
                 except Exception:
                     pass
-                traci.start([binary, *args])
+                traci.start([binary, *args], port=remote_port)
         else:
             binary = checkBinary("sumo-gui" if use_gui else "sumo")
-            traci.start([binary, *args])
+            traci.start([binary, *args], port=remote_port)
         set_conn(traci.getConnection())
     return _reset
