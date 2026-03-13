@@ -9,9 +9,29 @@ model_dirs:
 
 read_params_from_yaml: true
 
+# Optional display names for experiments (keys are model dir basenames).
+experiment_names:
+  gnn-rl: "1 hop critic"
+  rp-withoutnoop: "2 hop arch 3.2"
+
 # If true, use only training logs (training_metrics*.log, train_output*.txt)
 # to determine reference timesteps and summaries. Evaluation logs are ignored.
-training_only: true
+training_only: false
+
+# If true, plot eval comparisons across modes (no baselines).
+plot_comp_eval: true
+
+# Moving average window for eval comparison plots.
+plot_comp_eval_ma: 25
+
+# Plot raw eval means.
+plot_raw_eval: false
+
+# Plot raw eval std/sem on the raw curve.
+plot_raw_eval_std: false
+
+# Plot moving-average std band (std of means in MA window).
+plot_ma_std: true
 
 # Used only if read_params_from_yaml is false
 exp_params:

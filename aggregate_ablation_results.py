@@ -10,6 +10,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from omegaconf import OmegaConf
+import matplotlib.pyplot as plt
 
 
 @dataclass
@@ -275,6 +276,43 @@ def _aggregate_by_ts(df: pd.DataFrame, metrics: List[str]) -> pd.DataFrame:
     return agg
 
 
+def _aggregate_by_ts_with_count(df: pd.DataFrame, metrics: List[str]) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+    agg = df.groupby("ts")[metrics].agg(["mean", "std", "count"]).reset_index()
+    agg.columns = [
+        "ts" if c[0] == "ts" else f"{c[0]}_{c[1]}" for c in agg.columns.to_flat_index()
+    ]
+    return agg
+
+
+def _ma(data: np.ndarray, window: int) -> np.ndarray:
+    data = np.array(data, dtype=float)
+    if data.size == 0:
+        return data
+    window = int(min(window, len(data)))
+    result = np.convolve(data, np.ones(window) / window, mode="same")
+    half_window = window // 2
+    for i in range(half_window):
+        result[i] = np.mean(data[: i + 1])
+        result[-(i + 1)] = np.mean(data[-(i + 1) :])
+    return result
+
+
+def _ma_std(data: np.ndarray, window: int) -> np.ndarray:
+    data = np.array(data, dtype=float)
+    if data.size == 0:
+        return data
+    window = int(min(window, len(data)))
+    half = window // 2
+    out = np.zeros_like(data, dtype=float)
+    for i in range(len(data)):
+        left = max(0, i - half)
+        right = min(len(data), i + half + 1)
+        out[i] = float(np.std(data[left:right], ddof=0))
+    return out
+
+
 def _map_ts_to_available(ts_ref: List[int], ts_available: List[int]) -> List[int]:
     if not ts_ref or not ts_available:
         return []
@@ -427,6 +465,73 @@ def _write_summary_log(
             f.write("\n")
 
 
+def _plot_eval_comparison(
+    rows: List[Dict[str, object]],
+    output_dir: Path,
+    ma_window: int,
+    plot_raw_eval: bool,
+    plot_raw_eval_std: bool,
+    plot_ma_std: bool,
+) -> None:
+    metrics = ["rew", "wait", "comp", "mdl"]
+    eval_rows = [r for r in rows if r.get("eval_mode") in {"deterministic", "stochastic"}]
+    if not eval_rows:
+        return
+
+    plot_dir = output_dir / "eval_comp_plots"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    for metric in metrics:
+        fig, ax = plt.subplots(figsize=(12, 6), facecolor="#fafafa")
+        ax.set_facecolor("#fafafa")
+        for row in eval_rows:
+            agg = row.get("eval_plot")
+            if agg is None or agg.empty:
+                continue
+            mean_col = f"{metric}_mean"
+            std_col = f"{metric}_std"
+            count_col = f"{metric}_count"
+            if mean_col not in agg.columns:
+                continue
+            label = f"{row['model_id']}:{row['eval_mode']}"
+            ts = agg["ts"].values
+            means = agg[mean_col].values
+            std_vals = agg[std_col].values if std_col in agg.columns else None
+            if plot_raw_eval:
+                if plot_raw_eval_std and std_vals is not None:
+                    ax.errorbar(
+                        ts,
+                        means,
+                        yerr=std_vals,
+                        fmt="o-",
+                        alpha=0.6,
+                        capsize=5,
+                        markersize=5,
+                        label=label,
+                    )
+                else:
+                    ax.plot(ts, means, linewidth=1.8, label=label)
+
+            if len(means) > 1 and ma_window > 1:
+                ma_vals = _ma(means, ma_window)
+                ax.plot(ts, ma_vals, lw=2.5, alpha=0.7, label=f"MA(w={ma_window}) {label}")
+                if plot_ma_std:
+                    ma_std = _ma_std(means, ma_window)
+                    ax.fill_between(ts, ma_vals - ma_std, ma_vals + ma_std, alpha=0.15)
+
+        ax.set_xlabel("Training Steps", fontsize=11, fontweight="bold")
+        ax.set_ylabel(metric, fontsize=11, fontweight="bold")
+        ax.set_title(f"{metric} vs Training Steps", fontsize=12, fontweight="bold")
+        ax.legend(fontsize=8, loc="best")
+        ax.grid(alpha=0.25)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        plt.tight_layout()
+        plt.savefig(plot_dir / f"{metric}_vs_timesteps.png", dpi=150, bbox_inches="tight")
+        plt.close()
+
+
 def main() -> None:
     conf = _read_conf(Path("ablation_conf.yaml"))
     model_dirs = [Path(p).expanduser().resolve() for p in conf.model_dirs]
@@ -451,8 +556,11 @@ def main() -> None:
 
     rows: List[Dict[str, object]] = []
 
+    exp_name_map = dict(conf.get("experiment_names") or {})
+
     for model_dir, exp_params in zip(model_dirs, exp_params_list):
         model_id = model_dir.name
+        model_label = exp_name_map.get(model_id, model_id)
 
         train_output, train_output_df = _find_first_nonempty(
             model_dir, "train_output*.txt", _parse_train_output
@@ -471,7 +579,7 @@ def main() -> None:
                 best_metric="ep_rew_mean",
             )
             rows.append({
-                "model_id": model_id,
+                "model_id": model_label,
                 "eval_mode": "train_output",
                 "ts_first": ts_ref[0] if ts_ref else None,
                 "ts_last": ts_ref[-1] if ts_ref else None,
@@ -490,7 +598,7 @@ def main() -> None:
                 allow_floor_ts=True,
             )
             rows.append({
-                "model_id": model_id,
+                "model_id": model_label,
                 "eval_mode": "train_metrics",
                 "ts_first": ts_ref[0] if ts_ref else None,
                 "ts_last": ts_ref[-1] if ts_ref else None,
@@ -506,18 +614,35 @@ def main() -> None:
                 if eval_df.empty:
                     continue
                 eval_agg = _aggregate_by_ts(eval_df, EVAL_METRICS)
+                eval_plot = _aggregate_by_ts_with_count(eval_df, EVAL_METRICS)
                 eval_metrics_summary = _summarize_metrics(eval_agg, EVAL_METRICS, ts_ref, k_eval)
                 rows.append({
-                    "model_id": model_id,
+                    "model_id": model_label,
                     "eval_mode": mode,
                     "ts_first": ts_ref[0] if ts_ref else None,
                     "ts_last": ts_ref[-1] if ts_ref else None,
                     "ts_step": ts_step,
                     "metrics": eval_metrics_summary,
+                    "eval_agg": eval_agg,
+                    "eval_plot": eval_plot,
                     **exp_params,
                 })
 
     _write_summary_log(output_file, rows, ts_ref, ts_step)
+
+    if bool(conf.get("plot_comp_eval", False)):
+        ma_window = int(conf.get("plot_comp_eval_ma", 10))
+        plot_raw_eval = bool(conf.get("plot_raw_eval", True))
+        plot_raw_eval_std = bool(conf.get("plot_raw_eval_std", True))
+        plot_ma_std = bool(conf.get("plot_ma_std", False))
+        _plot_eval_comparison(
+            rows,
+            output_dir,
+            ma_window,
+            plot_raw_eval,
+            plot_raw_eval_std,
+            plot_ma_std,
+        )
 
     csv_rows = []
     for row in rows:
