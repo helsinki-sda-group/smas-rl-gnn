@@ -12,7 +12,7 @@ from sumo_rl_rs.logging.ridepool_logger import RidepoolLogger, RidepoolLogConfig
 from sumo_rl_rs.logging.rp_logger_callback import RPLoggerCallback
 from utils.sumo_bootstrap import start_sumo, make_reset_fn
 import numpy as np
-from utils.feature_fns import make_feature_fn, compute_feature_dim
+from utils.feature_fns import make_feature_fn, compute_feature_dim, expand_edge_features
 
 # to write PPO output to txt file
 import sys
@@ -55,7 +55,11 @@ use_xy_pickup = bool(opt.features.use_xy_pickup)
 use_node_type = bool(getattr(opt.features, "use_node_type", False))
 use_ego_robot = bool(getattr(opt.features, "use_ego_robot", False))
 use_edge_rt = bool(getattr(opt.features, "use_edge_rt", False))
-edge_features = list(getattr(opt.features, "edge_features", []))
+edge_features = expand_edge_features(
+    list(getattr(opt.features, "edge_features", [])),
+    robot_commitment=robot_commitment,
+    route_slots_k=route_slots_k,
+)
 robot_commitment = str(getattr(opt.features, "robot_commitment", "none"))
 route_slots_k = int(getattr(opt.features, "route_slots_k", 2))
 

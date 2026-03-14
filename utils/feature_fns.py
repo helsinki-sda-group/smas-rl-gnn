@@ -28,8 +28,6 @@ def compute_feature_dim(
         dim += 2
     if use_ego_robot:
         dim += 1
-    if robot_commitment == "route_slots":
-        dim += int(route_slots_k) * 3
     return dim
 
 def get_feature_names(
@@ -51,14 +49,6 @@ def get_feature_names(
             "drop_loc_x", "drop_loc_y", "is_obsolete", "is_assigned",
         ]
 
-    if robot_commitment == "route_slots":
-        for idx in range(int(route_slots_k)):
-            robot_names += [
-                f"slot{idx}_dx",
-                f"slot{idx}_dy",
-                f"slot{idx}_valid",
-            ]
-
     if use_node_type:
         robot_names += ["is_robot", "is_task"]
         task_names += ["is_robot", "is_task"]
@@ -68,6 +58,28 @@ def get_feature_names(
         task_names += ["is_ego_robot"]
 
     return robot_names, task_names
+
+
+def expand_edge_features(
+    edge_features: Optional[List[str]],
+    robot_commitment: str = "none",
+    route_slots_k: int = 2,
+) -> List[str]:
+    feats = list(edge_features or [])
+    if robot_commitment != "route_slots":
+        return feats
+    for idx in range(int(route_slots_k)):
+        slot_names = [
+            f"slot{idx}_pu_dx",
+            f"slot{idx}_pu_dy",
+            f"slot{idx}_do_dx",
+            f"slot{idx}_do_dy",
+            f"slot{idx}_valid",
+        ]
+        for name in slot_names:
+            if name not in feats:
+                feats.append(name)
+    return feats
 
 def make_feature_fn(
     ctrl: RLControllerAdapter,
@@ -88,7 +100,7 @@ def make_feature_fn(
         robot_commitment=robot_commitment,
         route_slots_k=route_slots_k,
     )
-    edge_features = list(edge_features or [])
+    edge_features = expand_edge_features(edge_features, robot_commitment, route_slots_k)
     pos_scale = max(1.0, float(getattr(ctrl, "vicinity_m", 1000.0)))
     cap_scale = max(1.0, float(getattr(ctrl, "max_robot_capacity", 1)))
     wait_scale = max(1.0, float(getattr(ctrl, "max_wait_delay_s", 1.0)))
@@ -161,39 +173,29 @@ def make_feature_fn(
         if out.shape[0] >= 1:
             out[-1] = 1.0 if is_ego else 0.0
 
-    def _robot_route_slots(rid_s: str) -> List[Tuple[float, float, float]]:
+    def _robot_route_slots(rid_s: str) -> List[Tuple[Tuple[float, float], Tuple[float, float], float]]:
         if robot_commitment != "route_slots":
             return []
         res_index = ctrl._reservation_index()
         seq = list(ctrl._shadow_plan_by_robot.get(rid_s, []))
         if not seq:
             return []
-        seen: dict[str, int] = {}
-        picked: set[str] = set()
-        out_slots: List[Tuple[float, float, float]] = []
-        rx, ry = _robot_xy(rid_s)
+        seen: set[str] = set()
+        out_slots: List[Tuple[Tuple[float, float], Tuple[float, float], float]] = []
         for res_id in seq:
             res_obj = res_index.get(str(res_id))
             if res_obj is None:
                 continue
             res_key = str(res_id)
-            if ctrl._is_picked(res_obj):
-                picked.add(res_key)
+            if res_key in seen:
+                continue
+            seen.add(res_key)
 
-            count = seen.get(res_key, 0)
-            seen[res_key] = count + 1
-            if res_key in picked or count >= 1:
-                edge = ctrl._edge_for_dropoff(res_obj)
-            else:
-                edge = ctrl._edge_for_pickup(res_obj)
-
-            tx, ty = _edge_xy(edge)
-            dx = float(tx - rx)
-            dy = float(ty - ry)
-            if normalize_features:
-                dx /= pos_scale
-                dy /= pos_scale
-            out_slots.append((dx, dy, 1.0))
+            pu_edge = ctrl._edge_for_pickup(res_obj)
+            do_edge = ctrl._edge_for_dropoff(res_obj)
+            pu_xy = _edge_xy(pu_edge)
+            do_xy = _edge_xy(do_edge)
+            out_slots.append((pu_xy, do_xy, 1.0))
             if len(out_slots) >= int(route_slots_k):
                 break
         return out_slots
@@ -220,6 +222,33 @@ def make_feature_fn(
         if normalize_features:
             eta = float(np.clip(eta / travel_scale, 0.0, 1.0))
 
+        slot_values: dict[str, float] = {}
+        if robot_commitment == "route_slots":
+            slots = _robot_route_slots(rid_s)
+            for s_idx in range(int(route_slots_k)):
+                if s_idx < len(slots):
+                    (pu_xy, do_xy, valid) = slots[s_idx]
+                    pu_dx = float(pu_xy[0] - px)
+                    pu_dy = float(pu_xy[1] - py)
+                    do_dx = float(do_xy[0] - px)
+                    do_dy = float(do_xy[1] - py)
+                    if normalize_features:
+                        pu_dx /= pos_scale
+                        pu_dy /= pos_scale
+                        do_dx /= pos_scale
+                        do_dy /= pos_scale
+                    slot_values[f"slot{s_idx}_pu_dx"] = pu_dx
+                    slot_values[f"slot{s_idx}_pu_dy"] = pu_dy
+                    slot_values[f"slot{s_idx}_do_dx"] = do_dx
+                    slot_values[f"slot{s_idx}_do_dy"] = do_dy
+                    slot_values[f"slot{s_idx}_valid"] = float(valid)
+                else:
+                    slot_values[f"slot{s_idx}_pu_dx"] = 0.0
+                    slot_values[f"slot{s_idx}_pu_dy"] = 0.0
+                    slot_values[f"slot{s_idx}_do_dx"] = 0.0
+                    slot_values[f"slot{s_idx}_do_dy"] = 0.0
+                    slot_values[f"slot{s_idx}_valid"] = 0.0
+
         for i, name in enumerate(edge_features):
             if name == "dx":
                 out[i] = dx
@@ -229,6 +258,8 @@ def make_feature_fn(
                 out[i] = eta
             elif name == "is_ego_edge":
                 out[i] = 0.0
+            elif name in slot_values:
+                out[i] = slot_values[name]
         return out
 
     def _resolve_task(x: Any) -> Optional[Task]:
@@ -274,20 +305,6 @@ def make_feature_fn(
                 out[2] = float(max(0, cap - onboard)) / cap_scale
             else:
                 out[2] = float(max(0, cap - onboard))
-            if robot_commitment == "route_slots":
-                slots = _robot_route_slots(rid_s)
-                base = 9 + (2 if use_xy_pickup and not use_edge_rt else 0)
-                offset = base
-                for s_idx in range(int(route_slots_k)):
-                    if s_idx < len(slots):
-                        dx, dy, valid = slots[s_idx]
-                    else:
-                        dx = dy = 0.0
-                        valid = 0.0
-                    out[offset + 0] = dx
-                    out[offset + 1] = dy
-                    out[offset + 2] = valid
-                    offset += 3
             _append_node_type(out, "robot")
             _append_ego_robot(out, is_ego)
             return out
