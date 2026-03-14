@@ -1212,14 +1212,16 @@ class RLControllerAdapter:
         dropped_off_ids_by_robot: Dict[str, set[str]] = {rid: set() for rid in robots}
 
         def owner_from_shadow(res_id: str) -> str | None:
-            for rid in robots:
-                if res_id in self._shadow_plan_by_robot.get(rid, []):
+            for rid, plan in self._shadow_plan_by_robot.items():
+                if res_id in plan:
                     return rid
             return None
         
         for res_id in new_pickups:
             rid = owner_from_shadow(res_id)
             if rid:
+                if rid not in picked_up_ids_by_robot:
+                    picked_up_ids_by_robot[rid] = set()
                 picked_up_ids_by_robot[rid].add(res_id)
                 # record owner for future onboard counting
                 self._res_owner_by_res[res_id] = rid
@@ -1228,6 +1230,8 @@ class RLControllerAdapter:
         for res_id in new_dropoffs:
             rid = self._res_owner_by_res.get(res_id) or owner_from_shadow(res_id)
             if rid:
+                if rid not in dropped_off_ids_by_robot:
+                    dropped_off_ids_by_robot[rid] = set()
                 dropped_off_ids_by_robot[rid].add(res_id)
 
         # # abandoned tasks: removed from this taxi's plan, and were not picked up or dropped off by anyone
