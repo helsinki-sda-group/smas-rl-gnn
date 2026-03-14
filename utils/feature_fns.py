@@ -206,6 +206,7 @@ def make_feature_fn(
             return out
         rx, ry = _robot_xy(rid_s)
         px, py = _edge_xy(getattr(t, "fromEdge", None))
+        tx_do, ty_do = _edge_xy(getattr(t, "toEdge", None))
         dx = float(px - rx)
         dy = float(py - ry)
         if normalize_features:
@@ -230,8 +231,8 @@ def make_feature_fn(
                     (pu_xy, do_xy, valid) = slots[s_idx]
                     pu_dx = float(pu_xy[0] - px)
                     pu_dy = float(pu_xy[1] - py)
-                    do_dx = float(do_xy[0] - px)
-                    do_dy = float(do_xy[1] - py)
+                    do_dx = float(do_xy[0] - tx_do)
+                    do_dy = float(do_xy[1] - ty_do)
                     if normalize_features:
                         pu_dx /= pos_scale
                         pu_dy /= pos_scale
