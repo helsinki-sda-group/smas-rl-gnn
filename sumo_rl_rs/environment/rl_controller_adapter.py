@@ -1372,6 +1372,25 @@ class RLControllerAdapter:
                     for r in robots:
                         deadline_penalty_by_robot[r] += share
 
+        if self.reward_type == "wait_travel" and newly_obsolete:
+            for res_id in newly_obsolete:
+                info = self._task_lifecycle.get(res_id)
+                if not info:
+                    continue
+                pd = info.get("pickup_deadline")
+                if pd is None:
+                    continue
+                late = max(1.0, now - float(pd))
+                p = -max(0.05, min(late, WAIT_CAP) / WAIT_CAP)
+
+                rid = self._res_owner_by_res.get(res_id) or owner_from_shadow(res_id)
+                if rid:
+                    wait_penalty_by_robot[rid] += p
+                else:
+                    share = p / max(1, len(robots))
+                    for r in robots:
+                        wait_penalty_by_robot[r] += share
+
         # Weights
         W_COMP = float(self.reward_weights.get("comp", 1.0))
         W_WAIT = float(self.reward_weights.get("wait", 1.5))
@@ -1435,7 +1454,7 @@ class RLControllerAdapter:
             if info.get("actual_dropoff_time") is not None:
                 continue
 
-            rid = info.get("assigned_taxi") or self._res_owner_by_res.get(task_id) or owner_from_shadow(task_id)
+            rid = self._res_owner_by_res.get(task_id) or owner_from_shadow(task_id) or info.get("assigned_taxi")
             if not rid or rid not in out:
                 continue
 
@@ -1444,8 +1463,15 @@ class RLControllerAdapter:
                 if res_time is None:
                     continue
                 wait_s = max(0.0, now - float(res_time))
-                penalty = -min(wait_s, wait_cap) / wait_cap
-                out[rid]["wait"] += penalty * w_wait
+                p_wait = -min(wait_s, wait_cap) / wait_cap
+                out[rid]["wait"] += p_wait * w_wait
+
+                est = info.get("estimated_travel_time")
+                if est is not None:
+                    est = float(est)
+                    if est > 0.0:
+                        p_travel = -min(est, travel_cap) / travel_cap
+                        out[rid]["travel"] += p_travel * w_travel
             else:
                 est = info.get("estimated_travel_time")
                 pick_time = info.get("actual_pickup_time")
