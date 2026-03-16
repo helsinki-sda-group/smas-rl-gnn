@@ -155,6 +155,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             max_travel_delay_s=config['max_travel_delay_s'],
             max_robot_capacity=config['max_robot_capacity'],
             logger=rp_logger,
+            conflict_resolution=str(config.get('conflict_resolution', 'closest_then_capacity')),
             reward_params=dict(config.get("reward_params", {}) or {}),
         )
         
@@ -575,6 +576,7 @@ def main():
         'max_wait_delay_s': float(opt.env.max_wait_delay_s),
         'max_travel_delay_s': float(opt.env.max_travel_delay_s),
         'max_robot_capacity': int(opt.env.max_robot_capacity),
+        'conflict_resolution': str(getattr(opt.env, 'conflict_resolution', 'closest_then_capacity')),
         'decision_dt': int(opt.env.decision_dt),
         'min_episode_steps': int(opt.env.min_episode_steps),
         'eval_runs': int(getattr(args, "eval_runs", 3)),

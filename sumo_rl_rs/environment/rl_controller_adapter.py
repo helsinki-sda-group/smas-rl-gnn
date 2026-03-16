@@ -59,7 +59,7 @@ class RLControllerAdapter:
         max_travel_delay_s: float = 900.0,      # how late the robot is allowed to deliever to dropoff
         max_robot_capacity: int = 5,
         logger: Optional["RidepoolLogger"]=None,
-        conflict_resolution: str = "closest_then_capacity", # "capacity" | "closest" | "closest_then_capacity"
+        conflict_resolution: str = "closest_then_capacity", # "capacity" | "closest" | "closest_then_capacity" | "logit_diff"
         reward_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
@@ -80,7 +80,7 @@ class RLControllerAdapter:
             max_travel_delay_s: how late the robot is allowed to deliever to dropoff. No explicit penalty for that in the current implementation. 
             max_robot_capacity:
             logger: RidepoolLogger instance.
-            conflict_resolution: how the assignment conflicts are resolved ("capacity" | "closest" | "closest_then_capacity")
+            conflict_resolution: how the assignment conflicts are resolved ("capacity" | "closest" | "closest_then_capacity" | "logit_diff")
             reward_params: reward configuration (reward_type, weights, caps)
         """
         self.sumo = sumo
@@ -91,7 +91,8 @@ class RLControllerAdapter:
         self.completion_mode = completion_mode.lower().strip()
         assert self.completion_mode in {"pickup", "dropoff"}, "completion_mode must be 'pickup' or 'dropoff'"
         self.conflict_resolution = str(conflict_resolution).lower().strip()
-        assert self.conflict_resolution in {"capacity", "closest", "closest_then_capacity"}, "conflict resolution must be 'capacity', 'closest', 'closest_then_capacity'"
+        assert self.conflict_resolution in {"capacity", "closest", "closest_then_capacity", "logit_diff"}, "conflict resolution must be 'capacity', 'closest', 'closest_then_capacity', or 'logit_diff'"
+        self._warned_missing_logit_diff = False
 
         self.reset_fn = reset_fn
         self._shadow_assigned_by_robot = defaultdict(list)  # rid -> [reservation 1, reservation 2, ...]
@@ -649,6 +650,7 @@ class RLControllerAdapter:
         robots: List[str], # list of robot IDs ["t0", "t1", "t2"]
         chosen: List[Optional[str]], # list of reservation IDs selected by each taxi ["r4", "r1", "r4"]
         tasks_list: List[Task],
+        selection_margins: Optional[Dict[str, float]] = None,
     ) -> tuple[List[Optional[str]], Dict[str, str]]:
         """
         For each reservation chosen by multiple taxis, keep exactly one winner.
@@ -657,6 +659,7 @@ class RLControllerAdapter:
         - "capacity": highest remaining capacity wins, ties broken at random.
         - "closest": choose taxi with smallest distance to pickup edge.
         - "closest_then_capacity": closest, then capacity.
+        - "logit_diff": largest selected-task logit margin wins.
         Returns:
         (resolved_assignments, winners_map) where winners_map is {res_id: rid_winner}.
         """
@@ -688,13 +691,29 @@ class RLControllerAdapter:
             dists : List[Tuple[str, float]] = []
 
             mode = self.conflict_resolution
+            if mode == "logit_diff":
+                margin_pairs = [
+                    (rid, float(selection_margins[rid]))
+                    for rid in rids
+                    if selection_margins is not None and rid in selection_margins and np.isfinite(selection_margins[rid])
+                ]
+                if len(margin_pairs) == len(rids):
+                    max_margin = max(m for _, m in margin_pairs)
+                    best = [rid for rid, m in margin_pairs if m >= max_margin - 1e-6]
+                    dists = [(rid, -1.0) for rid in rids]
+                else:
+                    if not self._warned_missing_logit_diff:
+                        print("[WARN] Missing logit margins for logit_diff conflict resolution; falling back to closest_then_capacity.")
+                        self._warned_missing_logit_diff = True
+                    mode = "closest_then_capacity"
+
             if mode == "capacity":
                 # Pick taxis with max remaining capacity
                 caps = [(rid, rem_cap.get(rid, 0)) for rid in rids]
                 max_cap = max(c for _, c in caps)
                 best = [rid for rid, c in caps if c == max_cap]
 
-            else:
+            elif mode in {"closest", "closest_then_capacity"}:
                 # get Task object
                 t = task_by_res_id.get(res_id)
                 pickup_edge = t.fromEdge
@@ -774,6 +793,7 @@ class RLControllerAdapter:
     def apply_and_step(self, 
                        assignments: Sequence[Optional[Union[int, str]]],
                        allow_redispatch: bool = True,
+                       selection_margins: Optional[Dict[str, float]] = None,
                        ) -> Dict[str, Any]:
         """
         Apply assignments (aligned with self.get_robots() order), then advance SUMO one step.
@@ -850,7 +870,12 @@ class RLControllerAdapter:
                             break
 
             # 1b) resolve conflicts so only one taxi wins each reservation
-            chosen, winners = self._resolve_assignment_conflicts(list(robots), chosen, tasks)
+            chosen, winners = self._resolve_assignment_conflicts(
+                list(robots),
+                chosen,
+                tasks,
+                selection_margins=selection_margins,
+            )
 
             if self.logger:
                 self.logger.log_debug(self._now(), "apply-winners", {

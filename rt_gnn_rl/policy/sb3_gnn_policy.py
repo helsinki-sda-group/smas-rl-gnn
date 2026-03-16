@@ -6,6 +6,7 @@ from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
 from .actor_critic import EgoActorCritic  # pluggable GNN-based actor–critic
+from .action_context import set_latest_policy_step
 
 
 class DictPassthroughExtractor(BaseFeaturesExtractor):
@@ -225,6 +226,7 @@ class RTGNNPolicy(ActorCriticPolicy):
 
         logits_k, values = self._build_batch_outputs(obs_dict_b)           # [B,R,K_max], [B,1]
         mask_k = obs_dict_b["cand_mask"]                                   # [B,R,K_max]
+        set_latest_policy_step(logits_k, mask_k)
         logits, mask = self._append_noop(logits_k, mask_k)                 # [B,R,K_max+1] each
         logits = logits.masked_fill(~mask, -1e9)
 

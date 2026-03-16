@@ -37,13 +37,13 @@ use_xy_pickup = bool(opt.features.use_xy_pickup)
 use_node_type = bool(getattr(opt.features, "use_node_type", False))
 use_ego_robot = bool(getattr(opt.features, "use_ego_robot", False))
 use_edge_rt = bool(getattr(opt.features, "use_edge_rt", False))
+robot_commitment = str(getattr(opt.features, "robot_commitment", "none"))
+route_slots_k = int(getattr(opt.features, "route_slots_k", 2))
 edge_features = expand_edge_features(
     list(getattr(opt.features, "edge_features", [])),
     robot_commitment=robot_commitment,
     route_slots_k=route_slots_k,
 )
-robot_commitment = str(getattr(opt.features, "robot_commitment", "none"))
-route_slots_k = int(getattr(opt.features, "route_slots_k", 2))
 
 F = compute_feature_dim(
     use_xy_pickup=use_xy_pickup,
@@ -61,6 +61,7 @@ MAX_STEPS = int(opt.env.max_steps)
 MAX_WAIT_DELAY_S = float(opt.env.max_wait_delay_s)
 MAX_TRAVEL_DELAY_S = float(opt.env.max_travel_delay_s)
 MAX_ROBOT_CAPACITY = int(opt.env.max_robot_capacity)
+CONFLICT_RESOLUTION = str(getattr(opt.env, "conflict_resolution", "closest_then_capacity"))
 reward_params = dict(getattr(opt.env, "reward_params", {}) or {})
 
 NUM_SEEDS = int(opt.baselines.num_seeds)
@@ -124,6 +125,7 @@ for seed in SEEDS[:NUM_SEEDS]:
             max_robot_capacity=MAX_ROBOT_CAPACITY,
             logger=rp_logger,
             respect_sumo_end=True,
+            conflict_resolution=CONFLICT_RESOLUTION,
             reward_params=reward_params,
         )
         feature_fn = make_feature_fn(

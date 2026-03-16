@@ -4,6 +4,7 @@ import numpy as np
 from typing import List, Optional, Dict, Any
 
 from rt_gnn_rl.graphs import build_padded_ego_batch  # implemented below
+from rt_gnn_rl.policy.action_context import pop_latest_policy_step
 
 class RidepoolRTEnv(gym.Env):
     """
@@ -77,6 +78,7 @@ class RidepoolRTEnv(gym.Env):
 
         # cached per-robot candidate mapping: slot -> task_id (string)
         self._last_cand_task_ids: List[List[Optional[str]]] = [[] for _ in range(self.R)]
+        self._last_robot_ids: List[Optional[str]] = [None] * self.R
 
         # macro-decision control
         self.decision_dt = int(decision_dt)
@@ -123,6 +125,7 @@ class RidepoolRTEnv(gym.Env):
         )
         # Save the exact ids used for slots this step (for action mapping)
         self._last_cand_task_ids = cand_task_ids
+        self._last_robot_ids = list(robots)
 
         x = obs["x"]
 
@@ -188,6 +191,43 @@ class RidepoolRTEnv(gym.Env):
             mask[r, self._noop_index] = 1
         return mask
 
+    def _selected_task_margins(self, action_vec: np.ndarray) -> Dict[str, float]:
+        payload = pop_latest_policy_step()
+        if payload is None:
+            return {}
+
+        logits_k = np.asarray(payload.get("logits_k"), dtype=np.float32)
+        mask_k = np.asarray(payload.get("mask_k"), dtype=bool)
+        if logits_k.ndim == 3:
+            logits_k = logits_k[0]
+        if mask_k.ndim == 3:
+            mask_k = mask_k[0]
+        if logits_k.ndim != 2 or mask_k.ndim != 2:
+            return {}
+
+        margins: Dict[str, float] = {}
+        num_rows = min(self.R, logits_k.shape[0], mask_k.shape[0])
+        for r in range(num_rows):
+            rid = self._last_robot_ids[r] if r < len(self._last_robot_ids) else None
+            chosen_slot = int(action_vec[r])
+            if rid is None or chosen_slot == self._noop_index:
+                continue
+            if chosen_slot < 0 or chosen_slot >= logits_k.shape[1] or chosen_slot >= mask_k.shape[1]:
+                continue
+            if not bool(mask_k[r, chosen_slot]):
+                continue
+
+            valid_slots = np.flatnonzero(mask_k[r])
+            if valid_slots.size == 0 or chosen_slot not in valid_slots:
+                continue
+
+            chosen_logit = float(logits_k[r, chosen_slot])
+            other_slots = valid_slots[valid_slots != chosen_slot]
+            max_other = float(np.max(logits_k[r, other_slots])) if other_slots.size > 0 else 0.0
+            margins[str(rid)] = chosen_logit - max_other
+
+        return margins
+
 
     def step(self, action):
         """
@@ -217,7 +257,12 @@ class RidepoolRTEnv(gym.Env):
 
         # (1) apply chosen assignments now
         assignments = self._decode(action)
-        step_out = self.controller.apply_and_step(assignments, allow_redispatch=True)  # controller aligns with its robot order
+        selected_task_margins = self._selected_task_margins(action)
+        step_out = self.controller.apply_and_step(
+            assignments,
+            allow_redispatch=True,
+            selection_margins=selected_task_margins,
+        )  # controller aligns with its robot order
          # Expect dict like {"per_robot": {...}, "sum_reward": float, "terms": {...}}
         total_reward += float(step_out.get("sum_reward", 0.0))
         terminated = bool(self.controller.is_episode_done())
