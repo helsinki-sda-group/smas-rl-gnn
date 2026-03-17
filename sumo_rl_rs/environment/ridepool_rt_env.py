@@ -34,6 +34,7 @@ class RidepoolRTEnv(gym.Env):
         global_stats_fn=None,
         decision_dt: int = 15, # seconds between policy decisions (1 = every second)
         two_hop: bool = False,
+        two_hop_directed: bool = False,
         normalize_features: bool = False,
         use_edge_rt: bool = False,
         edge_feat_dim: int = 0,
@@ -47,6 +48,7 @@ class RidepoolRTEnv(gym.Env):
         self.feature_fn = feature_fn
         self.global_stats_fn = global_stats_fn  # can be None (ignored)
         self.two_hop = bool(two_hop)
+        self.two_hop_directed = bool(two_hop_directed)
         self.normalize_features = bool(normalize_features)
         self.use_edge_rt = bool(use_edge_rt)
         self.edge_feat_dim = int(edge_feat_dim)
@@ -116,6 +118,7 @@ class RidepoolRTEnv(gym.Env):
             F=self.F, G=self.G,
             feature_fn=self.feature_fn,
             two_hop=self.two_hop,
+            two_hop_directed=self.two_hop_directed,
             normalize_features=self.normalize_features,
             vicinity_m=float(getattr(self.controller, "vicinity_m", 0.0)),
             use_edge_rt=self.use_edge_rt,

@@ -123,6 +123,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
                 erase_run_dir_on_start=True,
                 erase_episode_dir_on_start=True,
                 console_debug=False,
+                log_conflict_metrics=bool(config.get('log_conflict_metrics', False)),
             )
         )
         
@@ -184,6 +185,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             global_stats_fn=None,
             decision_dt=config['decision_dt'],
             two_hop=bool(config.get('two_hop', False)),
+            two_hop_directed=bool(config.get('two_hop_directed', False)),
             normalize_features=bool(config.get('normalize_features', False)),
             use_edge_rt=bool(config.get('use_edge_rt', False)),
             edge_feat_dim=int(config.get('edge_feat_dim', 0)),
@@ -571,6 +573,9 @@ def main():
         'route_slots_k': route_slots_k,
         'edge_feat_dim': edge_feat_dim,
         'two_hop': bool(getattr(opt.env, "two_hop", False)),
+        'two_hop_directed': bool(getattr(opt.env, "two_hop_directed", False)),
+        'two_hop_critic': bool(getattr(opt.env, "two_hop_critic", False)),
+        'two_hop_arch': str(getattr(opt.env, "two_hop_arch", "comp_corr")),
         'vicinity_m': float(opt.env.vicinity_m),
         'max_steps': int(opt.env.max_steps),
         'max_wait_delay_s': float(opt.env.max_wait_delay_s),
@@ -584,6 +589,7 @@ def main():
         'print_steps': bool(getattr(args, "print_steps", False)),
         'deterministic': bool(getattr(args, "deterministic", False)),
         'sorted_candidates': bool(getattr(args, "sorted", False)) or bool(opt.env.sorted_candidates),
+        'log_conflict_metrics': bool(getattr(opt.logging, 'log_conflict_metrics', False)),
     }
     
     # Create output directories

@@ -674,6 +674,12 @@ class RLControllerAdapter:
         if not buckets:
             return chosen, {}
 
+        if self.logger:
+            try:
+                self.logger.log_conflict_task_count(len(buckets))
+            except Exception:
+                pass
+
         # Remaining capacity per taxi
         rem_cap: Dict[str, int] = {rid: self._remaining_capacity(rid) for rid in robots}
         # Reservation id -> Task object
@@ -689,18 +695,42 @@ class RLControllerAdapter:
 
             # (rid, pickup distance)
             dists : List[Tuple[str, float]] = []
+            t = task_by_res_id.get(res_id)
+            pickup_edge = t.fromEdge if t is not None else None
+            for rid in rids:
+                dist = float("inf")
+                if pickup_edge:
+                    try:
+                        r_edge = self.sumo.vehicle.getRoute(rid)[0]
+                        dist = round(float(self._road_distance(r_edge, pickup_edge)), 2)
+                    except Exception:
+                        dist = float("inf")
+                dists.append((rid, dist))
+
+            finite_dists = [(rid, dist) for rid, dist in dists if np.isfinite(dist)]
+            if finite_dists:
+                min_d = min(d for _, d in finite_dists)
+                pickup_winners = [rid for rid, d in finite_dists if d <= min_d + 1e-6]
+            else:
+                pickup_winners = []
+
+            margin_pairs = [
+                (rid, float(selection_margins[rid]))
+                for rid in rids
+                if selection_margins is not None and rid in selection_margins and np.isfinite(selection_margins[rid])
+            ]
+            if margin_pairs:
+                max_margin = max(m for _, m in margin_pairs)
+                margin_winners = [rid for rid, m in margin_pairs if m >= max_margin - 1e-6]
+                margin_map = {rid: m for rid, m in margin_pairs}
+            else:
+                margin_winners = []
+                margin_map = {}
 
             mode = self.conflict_resolution
             if mode == "logit_diff":
-                margin_pairs = [
-                    (rid, float(selection_margins[rid]))
-                    for rid in rids
-                    if selection_margins is not None and rid in selection_margins and np.isfinite(selection_margins[rid])
-                ]
                 if len(margin_pairs) == len(rids):
-                    max_margin = max(m for _, m in margin_pairs)
                     best = [rid for rid, m in margin_pairs if m >= max_margin - 1e-6]
-                    dists = [(rid, -1.0) for rid in rids]
                 else:
                     if not self._warned_missing_logit_diff:
                         print("[WARN] Missing logit margins for logit_diff conflict resolution; falling back to closest_then_capacity.")
@@ -714,15 +744,6 @@ class RLControllerAdapter:
                 best = [rid for rid, c in caps if c == max_cap]
 
             elif mode in {"closest", "closest_then_capacity"}:
-                # get Task object
-                t = task_by_res_id.get(res_id)
-                pickup_edge = t.fromEdge
-                
-                for rid in rids:
-                    # current edge of a robot
-                    r_edge = self.sumo.vehicle.getRoute(rid)[0]
-                    dist = round(float(self._road_distance(r_edge, pickup_edge)),2)
-                    dists.append((rid, dist))
                 min_d = min(d for _, d in dists)
                 best = [rid for rid, d in dists if d <=min_d + 1e-6]
 
@@ -737,6 +758,21 @@ class RLControllerAdapter:
             else:
                 idx = int(self._rng.integers(0, len(best)))
                 winners[res_id] = best[idx]
+
+            winner_rid = winners[res_id]
+            winner_margin = margin_map.get(winner_rid)
+            loser_margins = [m for rid, m in margin_map.items() if rid != winner_rid]
+            if self.logger:
+                try:
+                    self.logger.log_conflict_metrics_event(
+                        winner=winner_rid,
+                        pickup_winners=pickup_winners,
+                        margin_winners=margin_winners,
+                        winner_margin=winner_margin,
+                        loser_margins=loser_margins,
+                    )
+                except Exception:
+                    pass
 
             # Conflict log (the actual winner is used)
             # 116.0,1,t0|t1|t3|t4,2|2|2|1, 31.33, 214.15, 176.13, 222.14, t1

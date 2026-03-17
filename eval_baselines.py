@@ -101,6 +101,7 @@ for seed in SEEDS[:NUM_SEEDS]:
                 erase_run_dir_on_start=True,
                 erase_episode_dir_on_start=True,
                 console_debug=False,
+                log_conflict_metrics=bool(getattr(opt.logging, "log_conflict_metrics", False)),
             )
         )
 
@@ -148,6 +149,7 @@ for seed in SEEDS[:NUM_SEEDS]:
             global_stats_fn=None,
             decision_dt=int(opt.env.decision_dt),
             two_hop=bool(getattr(opt.env, "two_hop", False)),
+            two_hop_directed=bool(getattr(opt.env, "two_hop_directed", False)),
             normalize_features=bool(getattr(opt.features, "normalize_features", False)),
             use_edge_rt=use_edge_rt,
             edge_feat_dim=edge_feat_dim,

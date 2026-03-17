@@ -73,6 +73,13 @@ F = compute_feature_dim(
 )
 edge_feat_dim = len(edge_features) if use_edge_rt else 0
 G = int(opt.env.G)
+TWO_HOP_ENABLED = bool(getattr(opt.env, "two_hop", False))
+TWO_HOP_DIRECTED = bool(getattr(opt.env, "two_hop_directed", False))
+TWO_HOP_CRITIC = bool(getattr(opt.env, "two_hop_critic", False))
+TWO_HOP_ARCH = str(getattr(opt.env, "two_hop_arch", "comp_corr")).strip().lower()
+if TWO_HOP_ARCH == "arch-3.2":
+    TWO_HOP_ARCH = "comp_corr"
+assert TWO_HOP_ARCH in {"plain", "comp_corr"}, "env.two_hop_arch must be one of: plain, comp_corr, arch-3.2"
 
 VICINITY_M = float(opt.env.vicinity_m)
 MAX_STEPS = int(opt.env.max_steps)
@@ -133,6 +140,8 @@ rp_logger = RidepoolLogger(
         erase_run_dir_on_start=not continue_training,
         erase_episode_dir_on_start=not continue_training,
         console_debug=True,
+        log_conflict_metrics=bool(getattr(opt.logging, "log_conflict_metrics", False)),
+        overwrite_conflicts_log_on_start=not continue_training,
     )
 )
 
@@ -179,7 +188,8 @@ env = RidepoolRTEnv(
     feature_fn=feature_fn,
     global_stats_fn=None, 
     decision_dt=int(opt.env.decision_dt),
-    two_hop=bool(getattr(opt.env, "two_hop", False)),
+    two_hop=TWO_HOP_ENABLED,
+    two_hop_directed=TWO_HOP_DIRECTED,
     normalize_features=bool(getattr(opt.features, "normalize_features", False)),
     use_edge_rt=use_edge_rt,
     edge_feat_dim=edge_feat_dim,
@@ -190,7 +200,11 @@ env = Monitor(env, filename="monitor.csv", info_keywords=("episode_reward",))
 # 4) SB3 PPO with custom GNN policy
 gnn_layers = int(getattr(opt.ppo.policy_kwargs, "gnn_layers", 2))
 gnn_layers_two_hop = int(getattr(opt.ppo.policy_kwargs, "gnn_layers_two_hop", gnn_layers))
-chosen_layers = gnn_layers_two_hop if bool(getattr(opt.env, "two_hop", False)) else gnn_layers
+chosen_layers = gnn_layers_two_hop if TWO_HOP_ENABLED else gnn_layers
+
+use_competitor_fusion = bool(TWO_HOP_ENABLED and TWO_HOP_ARCH == "comp_corr")
+use_two_hop_actor = bool(TWO_HOP_ENABLED and TWO_HOP_ARCH == "plain")
+use_two_hop_critic = bool(TWO_HOP_ENABLED and TWO_HOP_CRITIC)
 
 policy_kwargs = dict(
     in_dim=F,
@@ -200,7 +214,9 @@ policy_kwargs = dict(
     noop_init=float(opt.ppo.policy_kwargs.noop_init),
     freeze_noop_logit=bool(getattr(opt.ppo.policy_kwargs, "freeze_noop_logit", False)),
     edge_dim=edge_feat_dim,
-    use_competitor_fusion=bool(getattr(opt.env, "two_hop", False)),
+    use_competitor_fusion=use_competitor_fusion,
+    use_two_hop_actor=use_two_hop_actor,
+    use_two_hop_critic=use_two_hop_critic,
     eta_index=(edge_features.index("eta") if "eta" in edge_features else -1),
     lambda_init=float(getattr(opt.ppo.policy_kwargs, "lambda_init", 0.0)),
     gnn_kwargs={"layers": chosen_layers},
