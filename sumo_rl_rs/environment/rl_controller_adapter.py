@@ -168,6 +168,9 @@ class RLControllerAdapter:
             "deadline": float(reward_params.get("deadline_cap", 600.0)),
             "travel": float(reward_params.get("travel_cap", 90.0)),
         }
+        self.terminal_wait_share_unowned = bool(
+            reward_params.get("terminal_wait_share_unowned", True)
+        )
         self._terminal_penalties_applied = False
     
 
@@ -1498,12 +1501,28 @@ class RLControllerAdapter:
         if self.reward_type != "wait_travel":
             return {rid: {} for rid in robots}
 
+        robots = [str(rid) for rid in robots]
+        if not robots:
+            return {}
+
         wait_cap = max(1e-6, float(self.reward_caps.get("wait", 600.0)))
         travel_cap = max(1e-6, float(self.reward_caps.get("travel", 90.0)))
         w_wait = float(self.reward_weights.get("wait", 1.5))
         w_travel = float(self.reward_weights.get("travel", 2.0))
 
         out: Dict[str, Dict[str, float]] = {rid: {"wait": 0.0, "travel": 0.0} for rid in robots}
+
+        def add_penalty(target_rid: Optional[str], key: str, value: float) -> None:
+            if value == 0.0:
+                return
+            if target_rid and target_rid in out:
+                out[target_rid][key] += float(value)
+                return
+            if not self.terminal_wait_share_unowned:
+                return
+            share = float(value) / float(len(robots))
+            for rr in robots:
+                out[rr][key] += share
 
         def owner_from_shadow(res_id: str) -> str | None:
             for rid in robots:
@@ -1516,8 +1535,8 @@ class RLControllerAdapter:
                 continue
 
             rid = self._res_owner_by_res.get(task_id) or owner_from_shadow(task_id) or info.get("assigned_taxi")
-            if not rid or rid not in out:
-                continue
+            if rid is not None:
+                rid = str(rid)
 
             if info.get("actual_pickup_time") is None:
                 res_time = info.get("reservation_time")
@@ -1525,14 +1544,7 @@ class RLControllerAdapter:
                     continue
                 wait_s = max(0.0, now - float(res_time))
                 p_wait = -min(wait_s, wait_cap) / wait_cap
-                out[rid]["wait"] += p_wait * w_wait
-
-                est = info.get("estimated_travel_time")
-                if est is not None:
-                    est = float(est)
-                    if est > 0.0:
-                        p_travel = -min(est, travel_cap) / travel_cap
-                        out[rid]["travel"] += p_travel * w_travel
+                add_penalty(rid, "wait", p_wait * w_wait)
             else:
                 est = info.get("estimated_travel_time")
                 pick_time = info.get("actual_pickup_time")
@@ -1544,7 +1556,7 @@ class RLControllerAdapter:
                 elapsed = max(0.0, now - float(pick_time))
                 over = max(0.0, elapsed - est)
                 penalty = -min(over, travel_cap) / travel_cap
-                out[rid]["travel"] += penalty * w_travel
+                add_penalty(rid, "travel", penalty * w_travel)
 
         return out
 
