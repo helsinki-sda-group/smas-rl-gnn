@@ -13,7 +13,6 @@ settings.json
 tripinfo.xml
 *.zip
 .vscode/settings.json
-configs/rp_gnn.yaml
 eval_checkpoint_seed100.py
 eval_saved_models_soft_reset.py
 feature_fns_with_norm_and_pickupdist.py
