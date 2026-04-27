@@ -19,3 +19,5 @@ feature_fns_with_norm_and_pickupdist.py
 holdout_eval_model.py
 train_and_eval_seed100.py
 configs/rp_toy.yaml
+.venv/
+venv/
