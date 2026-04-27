@@ -12,7 +12,7 @@ from sumo_rl_rs.logging.ridepool_logger import RidepoolLogger, RidepoolLogConfig
 from sumo_rl_rs.logging.rp_logger_callback import RPLoggerCallback
 from utils.sumo_bootstrap import start_sumo, make_reset_fn
 import numpy as np
-from utils.feature_fns import make_feature_fn, compute_feature_dim
+from utils.feature_fns import make_feature_fn, compute_feature_dim, expand_edge_features
 
 # to write PPO output to txt file
 import sys
@@ -55,9 +55,13 @@ use_xy_pickup = bool(opt.features.use_xy_pickup)
 use_node_type = bool(getattr(opt.features, "use_node_type", False))
 use_ego_robot = bool(getattr(opt.features, "use_ego_robot", False))
 use_edge_rt = bool(getattr(opt.features, "use_edge_rt", False))
-edge_features = list(getattr(opt.features, "edge_features", []))
 robot_commitment = str(getattr(opt.features, "robot_commitment", "none"))
 route_slots_k = int(getattr(opt.features, "route_slots_k", 2))
+edge_features = expand_edge_features(
+    list(getattr(opt.features, "edge_features", [])),
+    robot_commitment=robot_commitment,
+    route_slots_k=route_slots_k,
+)
 
 F = compute_feature_dim(
     use_xy_pickup=use_xy_pickup,
@@ -69,12 +73,21 @@ F = compute_feature_dim(
 )
 edge_feat_dim = len(edge_features) if use_edge_rt else 0
 G = int(opt.env.G)
+TWO_HOP_ENABLED = bool(getattr(opt.env, "two_hop", False))
+TWO_HOP_DIRECTED = bool(getattr(opt.env, "two_hop_directed", False))
+TWO_HOP_CRITIC = bool(getattr(opt.env, "two_hop_critic", False))
+TWO_HOP_ARCH = str(getattr(opt.env, "two_hop_arch", "comp_corr")).strip().lower()
+if TWO_HOP_ARCH == "arch-3.2":
+    TWO_HOP_ARCH = "comp_corr"
+assert TWO_HOP_ARCH in {"plain", "comp_corr"}, "env.two_hop_arch must be one of: plain, comp_corr, arch-3.2"
 
 VICINITY_M = float(opt.env.vicinity_m)
 MAX_STEPS = int(opt.env.max_steps)
 MAX_WAIT_DELAY_S = float(opt.env.max_wait_delay_s)
 MAX_TRAVEL_DELAY_S = float(opt.env.max_travel_delay_s)
 MAX_ROBOT_CAPACITY = int(opt.env.max_robot_capacity)
+CONFLICT_RESOLUTION = str(getattr(opt.env, "conflict_resolution", "closest_then_capacity"))
+reward_params = dict(getattr(opt.env, "reward_params", {}) or {})
 
 # Training seeds - different from evaluation seeds [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
 TRAIN_SEEDS = list(opt.seeds.train)
@@ -127,6 +140,8 @@ rp_logger = RidepoolLogger(
         erase_run_dir_on_start=not continue_training,
         erase_episode_dir_on_start=not continue_training,
         console_debug=True,
+        log_conflict_metrics=bool(getattr(opt.logging, "log_conflict_metrics", False)),
+        overwrite_conflicts_log_on_start=not continue_training,
     )
 )
 
@@ -145,6 +160,8 @@ controller = RLControllerAdapter(
     max_travel_delay_s=MAX_TRAVEL_DELAY_S,  # no explicit penalty for that now (!)
     max_robot_capacity=MAX_ROBOT_CAPACITY, # should match to taxis.rou.xml
     logger= rp_logger,
+    conflict_resolution=CONFLICT_RESOLUTION,
+    reward_params=reward_params,
 )
 feature_fn = make_feature_fn(
     controller,
@@ -171,7 +188,8 @@ env = RidepoolRTEnv(
     feature_fn=feature_fn,
     global_stats_fn=None, 
     decision_dt=int(opt.env.decision_dt),
-    two_hop=bool(getattr(opt.env, "two_hop", False)),
+    two_hop=TWO_HOP_ENABLED,
+    two_hop_directed=TWO_HOP_DIRECTED,
     normalize_features=bool(getattr(opt.features, "normalize_features", False)),
     use_edge_rt=use_edge_rt,
     edge_feat_dim=edge_feat_dim,
@@ -182,7 +200,11 @@ env = Monitor(env, filename="monitor.csv", info_keywords=("episode_reward",))
 # 4) SB3 PPO with custom GNN policy
 gnn_layers = int(getattr(opt.ppo.policy_kwargs, "gnn_layers", 2))
 gnn_layers_two_hop = int(getattr(opt.ppo.policy_kwargs, "gnn_layers_two_hop", gnn_layers))
-chosen_layers = gnn_layers_two_hop if bool(getattr(opt.env, "two_hop", False)) else gnn_layers
+chosen_layers = gnn_layers_two_hop if TWO_HOP_ENABLED else gnn_layers
+
+use_competitor_fusion = bool(TWO_HOP_ENABLED and TWO_HOP_ARCH == "comp_corr")
+use_two_hop_actor = bool(TWO_HOP_ENABLED and TWO_HOP_ARCH == "plain")
+use_two_hop_critic = bool(TWO_HOP_ENABLED and TWO_HOP_CRITIC)
 
 policy_kwargs = dict(
     in_dim=F,
@@ -192,7 +214,9 @@ policy_kwargs = dict(
     noop_init=float(opt.ppo.policy_kwargs.noop_init),
     freeze_noop_logit=bool(getattr(opt.ppo.policy_kwargs, "freeze_noop_logit", False)),
     edge_dim=edge_feat_dim,
-    use_competitor_fusion=bool(getattr(opt.env, "two_hop", False)),
+    use_competitor_fusion=use_competitor_fusion,
+    use_two_hop_actor=use_two_hop_actor,
+    use_two_hop_critic=use_two_hop_critic,
     eta_index=(edge_features.index("eta") if "eta" in edge_features else -1),
     lambda_init=float(getattr(opt.ppo.policy_kwargs, "lambda_init", 0.0)),
     gnn_kwargs={"layers": chosen_layers},

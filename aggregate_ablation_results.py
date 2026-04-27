@@ -26,8 +26,11 @@ class SummaryStats:
     auc: float
 
 
-TRAINING_METRICS = ["rew", "mdl", "wait", "comp", "noop", "cne_fr", "cne_mn"]
-EVAL_METRICS = ["rew", "mdl", "wait", "comp", "noop", "cne_fr", "cne_mn"]
+COMPONENT_FALLBACKS = {
+    "wait_travel": ["trav", "travel", "mdl", "dln"],
+    "default": ["dln", "mdl", "trav"],
+}
+COMMON_REWARD_METRICS = ["rew", "wait", "comp", "noop", "cne_fr", "cne_mn"]
 TRAIN_OUTPUT_METRICS = [
     "ep_rew_mean",
     "approx_kl",
@@ -36,6 +39,45 @@ TRAIN_OUTPUT_METRICS = [
     "explained_variance",
     "value_loss",
 ]
+
+
+def _normalize_reward_type(reward_type: Optional[str]) -> str:
+    if reward_type is None:
+        return "default"
+    rt = str(reward_type).strip().lower()
+    if rt in {"wait_travel", "travel", "wait+travel", "wait-travel"}:
+        return "wait_travel"
+    return "default"
+
+
+def _reward_type_for_model(model_dir: Path) -> str:
+    cfg_paths = [model_dir / "configs" / "rp_gnn.yaml", Path("configs") / "rp_gnn.yaml"]
+    for cfg_path in cfg_paths:
+        if not cfg_path.exists():
+            continue
+        cfg = OmegaConf.load(str(cfg_path))
+        reward_params = getattr(getattr(cfg, "env", None), "reward_params", None)
+        rt = None
+        if reward_params is not None:
+            rt = getattr(reward_params, "reward_type", None)
+        return _normalize_reward_type(rt)
+    return "default"
+
+
+def _component_metric_for_df(df: pd.DataFrame, reward_type: str) -> Optional[str]:
+    for col in COMPONENT_FALLBACKS.get(reward_type, COMPONENT_FALLBACKS["default"]):
+        if col in df.columns:
+            return col
+    return None
+
+
+def _metrics_for_df(df: pd.DataFrame, reward_type: str) -> List[str]:
+    component = _component_metric_for_df(df, reward_type)
+    out = ["rew"]
+    if component is not None:
+        out.append(component)
+    out.extend([m for m in COMMON_REWARD_METRICS if m != "rew"])
+    return [m for m in out if m in df.columns]
 
 
 def _read_conf(path: Path) -> OmegaConf:
@@ -472,10 +514,25 @@ def _plot_eval_comparison(
     plot_raw_eval: bool,
     plot_raw_eval_std: bool,
     plot_ma_std: bool,
+    include_training_logs: bool,
 ) -> None:
-    metrics = ["rew", "wait", "comp", "mdl"]
-    eval_rows = [r for r in rows if r.get("eval_mode") in {"deterministic", "stochastic"}]
+    modes = {"deterministic", "stochastic"}
+    if include_training_logs:
+        modes.add("train_metrics")
+    eval_rows = [r for r in rows if r.get("eval_mode") in modes]
     if not eval_rows:
+        return
+
+    available_metrics = set()
+    for row in eval_rows:
+        agg = row.get("eval_plot")
+        if agg is None or agg.empty:
+            continue
+        for col in agg.columns:
+            if col.endswith("_mean"):
+                available_metrics.add(col[:-5])
+    metrics = [m for m in ["rew", "wait", "comp", "dln", "trav", "mdl"] if m in available_metrics]
+    if not metrics:
         return
 
     plot_dir = output_dir / "eval_comp_plots"
@@ -561,6 +618,7 @@ def main() -> None:
     for model_dir, exp_params in zip(model_dirs, exp_params_list):
         model_id = model_dir.name
         model_label = exp_name_map.get(model_id, model_id)
+        reward_type = _reward_type_for_model(model_dir)
 
         train_output, train_output_df = _find_first_nonempty(
             model_dir, "train_output*.txt", _parse_train_output
@@ -589,10 +647,11 @@ def main() -> None:
             })
 
         if not training_df.empty:
-            training_agg = _aggregate_by_ts(training_df, TRAINING_METRICS)
+            training_metrics_to_use = _metrics_for_df(training_df, reward_type)
+            training_agg = _aggregate_by_ts(training_df, training_metrics_to_use)
             training_metrics_summary = _summarize_metrics(
                 training_agg,
-                TRAINING_METRICS,
+                training_metrics_to_use,
                 ts_ref,
                 k_eval,
                 allow_floor_ts=True,
@@ -604,6 +663,7 @@ def main() -> None:
                 "ts_last": ts_ref[-1] if ts_ref else None,
                 "ts_step": ts_step,
                 "metrics": training_metrics_summary,
+                "eval_plot": _aggregate_by_ts_with_count(training_df, training_metrics_to_use),
                 **exp_params,
             })
 
@@ -613,9 +673,10 @@ def main() -> None:
                 eval_df = _parse_metrics_log(log_path)
                 if eval_df.empty:
                     continue
-                eval_agg = _aggregate_by_ts(eval_df, EVAL_METRICS)
-                eval_plot = _aggregate_by_ts_with_count(eval_df, EVAL_METRICS)
-                eval_metrics_summary = _summarize_metrics(eval_agg, EVAL_METRICS, ts_ref, k_eval)
+                eval_metrics_to_use = _metrics_for_df(eval_df, reward_type)
+                eval_agg = _aggregate_by_ts(eval_df, eval_metrics_to_use)
+                eval_plot = _aggregate_by_ts_with_count(eval_df, eval_metrics_to_use)
+                eval_metrics_summary = _summarize_metrics(eval_agg, eval_metrics_to_use, ts_ref, k_eval)
                 rows.append({
                     "model_id": model_label,
                     "eval_mode": mode,
@@ -642,6 +703,7 @@ def main() -> None:
             plot_raw_eval,
             plot_raw_eval_std,
             plot_ma_std,
+            include_training_logs=True,
         )
 
     csv_rows = []

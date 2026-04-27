@@ -60,6 +60,8 @@ class EgoActorCritic(nn.Module):
         critic_aggregation: Literal["per_robot", "joint_mean", "joint_attn"] = "joint_attn",
         edge_dim: int = 0,
         use_competitor_fusion: bool = True,
+        use_two_hop_actor: bool = False,
+        use_two_hop_critic: bool = False,
         lambda_init: float = 0.0,
         eta_index: int = -1,
         **gnn_kwargs,
@@ -70,6 +72,8 @@ class EgoActorCritic(nn.Module):
         self.edge_dim = int(edge_dim)
         self.critic_aggregation = critic_aggregation
         self.use_competitor_fusion = bool(use_competitor_fusion)
+        self.use_two_hop_actor = bool(use_two_hop_actor)
+        self.use_two_hop_critic = bool(use_two_hop_critic)
         self.eta_index = int(eta_index)
         self._comp_log_sums: Optional[torch.Tensor] = None
         self._comp_log_count: int = 0
@@ -400,15 +404,20 @@ class EgoActorCritic(nn.Module):
         K_max = obs["cand_mask"].shape[1]
         device = obs["x"].device
 
-        # === Actor on 1-hop graph ===
-        h_a, batch_a = self.enc_actor.encode_graphs(x_list, ei_list, edge_attr_list)
+        actor_x_list = x_list_full if self.use_two_hop_actor else x_list
+        actor_ei_list = ei_list_full if self.use_two_hop_actor else ei_list
+        actor_ea_list = edge_attr_list_full if self.use_two_hop_actor else edge_attr_list
+        actor_cand_idx = cand_loc_idx_full if self.use_two_hop_actor else cand_loc_idx
+
+        # === Actor graph ===
+        h_a, batch_a = self.enc_actor.encode_graphs(actor_x_list, actor_ei_list, actor_ea_list)
         h_a = self.actor_norm(h_a)
 
         logits_list: List[torch.Tensor] = []
-        for i, _x_i in enumerate(x_list):
+        for i in range(R):
             mask_i = (batch_a.batch == i)
             h_i = h_a[mask_i]                          # [n_i, H]
-            cand_i = cand_loc_idx[i]                  # [k_i]
+            cand_i = actor_cand_idx[i]                # [k_i]
 
             if cand_i.numel() > 0 and h_i.numel() > 0:
                 h_t = h_i[cand_i]                     # [k_i, H]
@@ -496,11 +505,15 @@ class EgoActorCritic(nn.Module):
             logits_list.append(li)
         logits = torch.stack(logits_list, dim=0)      # [R, K_max]
 
-        # === Critic on full graph ===
-        h_c, batch_c = self.enc_critic.encode_graphs(x_list_full, ei_list_full, edge_attr_list_full)
+        critic_x_list = x_list_full if self.use_two_hop_critic else x_list
+        critic_ei_list = ei_list_full if self.use_two_hop_critic else ei_list
+        critic_ea_list = edge_attr_list_full if self.use_two_hop_critic else edge_attr_list
+
+        # === Critic graph ===
+        h_c, batch_c = self.enc_critic.encode_graphs(critic_x_list, critic_ei_list, critic_ea_list)
         # First, get one embedding per robot by mean-pooling its nodes
         robot_embeds: List[torch.Tensor] = []
-        for i, _x_i in enumerate(x_list):
+        for i in range(R):
             mask_i = (batch_c.batch == i)
             if mask_i.any():
                 h_i = h_c[mask_i].mean(dim=0, keepdim=True)   # [1, H]

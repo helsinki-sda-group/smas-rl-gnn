@@ -6,6 +6,7 @@ from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
 from .actor_critic import EgoActorCritic  # pluggable GNN-based actor–critic
+from .action_context import set_latest_policy_step
 
 
 class DictPassthroughExtractor(BaseFeaturesExtractor):
@@ -49,6 +50,8 @@ class RTGNNPolicy(ActorCriticPolicy):
         freeze_noop_logit: bool = False,
         edge_dim: int = 0,
         use_competitor_fusion: bool = False,
+        use_two_hop_actor: bool = False,
+        use_two_hop_critic: bool = False,
         eta_index: int = -1,
         lambda_init: float = 0.0,
         backbone: str = "sage",
@@ -92,6 +95,8 @@ class RTGNNPolicy(ActorCriticPolicy):
             critic_aggregation=agg_lit,
             edge_dim=int(edge_dim),
             use_competitor_fusion=bool(use_competitor_fusion),
+            use_two_hop_actor=bool(use_two_hop_actor),
+            use_two_hop_critic=bool(use_two_hop_critic),
             eta_index=int(eta_index),
             lambda_init=float(lambda_init),
             **gnn_kwargs,
@@ -225,6 +230,7 @@ class RTGNNPolicy(ActorCriticPolicy):
 
         logits_k, values = self._build_batch_outputs(obs_dict_b)           # [B,R,K_max], [B,1]
         mask_k = obs_dict_b["cand_mask"]                                   # [B,R,K_max]
+        set_latest_policy_step(logits_k, mask_k)
         logits, mask = self._append_noop(logits_k, mask_k)                 # [B,R,K_max+1] each
         logits = logits.masked_fill(~mask, -1e9)
 

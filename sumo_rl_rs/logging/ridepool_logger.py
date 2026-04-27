@@ -18,6 +18,8 @@ class RidepoolLogConfig:
     erase_run_dir_on_start: bool = False         # if True: delete the whole run directory at construction
     erase_episode_dir_on_start: bool = False     # if True: delete an episode dir when starting it
     csv_postfix: Optional[str] = None    # postfix for all CSV filenames (e.g., "random1"). If None, no postfix added
+    log_conflict_metrics: bool = False    # write run-level conflicts.log with episode summaries
+    overwrite_conflicts_log_on_start: bool = False  # if True: delete root conflicts.log at logger init
 
 class RidepoolLogger:
     """
@@ -57,6 +59,79 @@ class RidepoolLogger:
             "idle": [], "en_route": [], "occupied": [], "pickup_occupied": [],
             "sum_reward": [], "pickups": [], "dropoffs": []
         }
+        self._conflicts_log_path = os.path.abspath("conflicts.log")
+        if bool(getattr(self.cfg, "log_conflict_metrics", False)) and bool(getattr(self.cfg, "overwrite_conflicts_log_on_start", False)):
+            try:
+                if os.path.exists(self._conflicts_log_path):
+                    os.remove(self._conflicts_log_path)
+            except Exception:
+                pass
+        self._reset_conflict_episode_stats()
+
+    def _reset_conflict_episode_stats(self) -> None:
+        self._conflict_stats: Dict[str, float] = {
+            "tasks_total": 0.0,
+            "conflicts_total": 0.0,
+            "winner_pickup": 0.0,
+            "winner_margin": 0.0,
+            "resolver_override": 0.0,
+            "margin_win_sum": 0.0,
+            "margin_win_count": 0.0,
+            "margin_lose_sum": 0.0,
+            "margin_lose_count": 0.0,
+            "margin_gap_sum": 0.0,
+            "margin_gap_count": 0.0,
+        }
+
+    def _append_conflicts_summary(self, episode_idx: int) -> None:
+        if not bool(getattr(self.cfg, "log_conflict_metrics", False)):
+            return
+        tasks_total = float(self._conflict_stats["tasks_total"])
+        conflicts_total = float(self._conflict_stats["conflicts_total"])
+        winner_pickup = float(self._conflict_stats["winner_pickup"])
+        winner_margin = float(self._conflict_stats["winner_margin"])
+        resolver_override = float(self._conflict_stats["resolver_override"])
+
+        margin_win_count = float(self._conflict_stats["margin_win_count"])
+        margin_lose_count = float(self._conflict_stats["margin_lose_count"])
+        margin_gap_count = float(self._conflict_stats["margin_gap_count"])
+
+        conflict_ratio = (conflicts_total / tasks_total) if tasks_total > 0 else 0.0
+        resolver_override_rate = (resolver_override / conflicts_total) if conflicts_total > 0 else 0.0
+        avg_margin_win = (self._conflict_stats["margin_win_sum"] / margin_win_count) if margin_win_count > 0 else 0.0
+        avg_margin_lose = (self._conflict_stats["margin_lose_sum"] / margin_lose_count) if margin_lose_count > 0 else 0.0
+        avg_margin_gap = (self._conflict_stats["margin_gap_sum"] / margin_gap_count) if margin_gap_count > 0 else 0.0
+
+        file_exists = os.path.exists(self._conflicts_log_path)
+        with open(self._conflicts_log_path, "a", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            if (not file_exists) or os.path.getsize(self._conflicts_log_path) == 0:
+                writer.writerow([
+                    "episode",
+                    "conflicts_total",
+                    "tasks_total",
+                    "conflict_ratio",
+                    "winner_pickup",
+                    "winner_margin",
+                    "resolver_override",
+                    "resolver_override_rate",
+                    "avg_margin_win",
+                    "avg_margin_lose",
+                    "avg_margin_gap",
+                ])
+            writer.writerow([
+                int(episode_idx),
+                f"{conflicts_total:.2f}",
+                f"{tasks_total:.2f}",
+                f"{conflict_ratio:.2f}",
+                f"{winner_pickup:.2f}",
+                f"{winner_margin:.2f}",
+                f"{resolver_override:.2f}",
+                f"{resolver_override_rate:.2f}",
+                f"{avg_margin_win:.2f}",
+                f"{avg_margin_lose:.2f}",
+                f"{avg_margin_gap:.2f}",
+            ])
 
     # ---------- lifecycle ----------
     def set_csv_postfix(self, postfix: str) -> None:
@@ -97,10 +172,10 @@ class RidepoolLogger:
         self._open_csv(self._get_csv_filename("dispatch"), ["time","taxi","prev_seq","base_ids","seq","seq_pd","raw_currentCustomers","notes"])
         self._open_csv(self._get_csv_filename("conflicts"), ["time","res_id","taxi_candidates","remaining_caps","distances","winner"])
         self._open_csv(self._get_csv_filename("candidates"), ["time","taxi","cand_slots","cand_res_ids","cand_persons","cand_pd_seq"])
-        self._open_csv(self._get_csv_filename("rewards"), ["time","taxi","reward","capacity","step","missed_deadline","wait_at_pickups","completion", "nonserved"])
+        self._open_csv(self._get_csv_filename("rewards"), ["time","taxi","reward","capacity","step","deadline","wait","travel","completion", "nonserved"])
         self._open_csv(self._get_csv_filename("fleet_counts"), ["time","idle","en_route","occupied","pickup_occupied"])
         self._open_csv(self._get_csv_filename("episode_totals"), ["episode","sum_reward","n_pickups","n_dropoffs","duration"])
-        self._open_csv(self._get_csv_filename("rewards_macro"), ["macro_steps","reward","capacity_avg","step_avg","missed_deadline_avg", "wait_avg", "completion_avg", "nonserved_avg"])
+        self._open_csv(self._get_csv_filename("rewards_macro"), ["macro_steps","reward","capacity_avg","step_avg","deadline_avg", "wait_avg", "travel_avg", "completion_avg", "nonserved_avg"])
 
         self._open_csv(self._get_csv_filename("task_lifecycle"), [
             "task_id", "reservation_time", "pickup_deadline", "estimated_travel_time",
@@ -113,9 +188,11 @@ class RidepoolLogger:
         # reset timeseries
         for k in self._ts:
             self._ts[k].clear()
+        self._reset_conflict_episode_stats()
 
     def end_episode(self, sum_reward: float, n_pickups: int, n_dropoffs: int, duration: float):
         self.last_ep_dir = self.ep_dir
+        self._append_conflicts_summary(self.cfg.episode_index)
         self._write(self._get_csv_filename("episode_totals"), dict(
             episode=self.cfg.episode_index,
             sum_reward=float(sum_reward),
@@ -132,6 +209,61 @@ class RidepoolLogger:
         self._plot_ts("rewards_sum.png", [("sum_reward","Sum reward")], ylabel="Reward")
         self._plot_ts("completions.png", [("pickups","Pickups"), ("dropoffs","Dropoffs")], ylabel="Count")
         self.cfg.episode_index += 1
+
+    def log_conflict_task_count(self, tasks_total: int) -> None:
+        if not bool(getattr(self.cfg, "log_conflict_metrics", False)):
+            return
+        self._conflict_stats["tasks_total"] += float(max(0, int(tasks_total)))
+
+    def log_conflict_metrics_event(
+        self,
+        *,
+        winner: str,
+        pickup_winners: Sequence[str],
+        margin_winners: Sequence[str],
+        winner_margin: Optional[float],
+        loser_margins: Sequence[float],
+    ) -> None:
+        if not bool(getattr(self.cfg, "log_conflict_metrics", False)):
+            return
+
+        winner = str(winner)
+        pickup_set = {str(x) for x in pickup_winners}
+        margin_set = {str(x) for x in margin_winners}
+
+        self._conflict_stats["conflicts_total"] += 1.0
+
+        if winner in pickup_set:
+            self._conflict_stats["winner_pickup"] += 1.0
+        if winner in margin_set:
+            self._conflict_stats["winner_margin"] += 1.0
+
+        if pickup_set and margin_set:
+            pickup_ref = sorted(pickup_set)[0]
+            margin_ref = sorted(margin_set)[0]
+            if margin_ref != pickup_ref:
+                self._conflict_stats["resolver_override"] += 1.0
+
+        if winner_margin is not None:
+            try:
+                win_m = float(winner_margin)
+            except Exception:
+                win_m = float("nan")
+            if win_m == win_m:
+                self._conflict_stats["margin_win_sum"] += win_m
+                self._conflict_stats["margin_win_count"] += 1.0
+
+                for lose_m in loser_margins:
+                    try:
+                        lose = float(lose_m)
+                    except Exception:
+                        continue
+                    if lose != lose:
+                        continue
+                    self._conflict_stats["margin_lose_sum"] += lose
+                    self._conflict_stats["margin_lose_count"] += 1.0
+                    self._conflict_stats["margin_gap_sum"] += (win_m - lose)
+                    self._conflict_stats["margin_gap_count"] += 1.0
 
     def close(self):
         self._close_all()
@@ -249,7 +381,7 @@ class RidepoolLogger:
 
     def log_rewards(self, t: float, taxi: str, reward: float, terms: Dict[str, float]):
         fname = self._get_csv_filename("rewards")
-        self._ensure_csv(fname, ["time","taxi","reward","capacity","step","missed_deadline","wait_at_pickups","completion", "nonserved"])
+        self._ensure_csv(fname, ["time","taxi","reward","capacity","step","deadline","wait","travel","completion", "nonserved"])
 
         terms_round = {k: round(float(v),2) for k,v in terms.items()}
 
@@ -257,8 +389,9 @@ class RidepoolLogger:
             time=float(t), taxi=str(taxi), reward=round(float(reward),2),
             capacity=terms_round["capacity"],
             step=terms_round["step"],
-            missed_deadline=terms_round["missed_deadline"],
-            wait_at_pickups=terms_round["wait_at_pickups"],
+            deadline=terms_round.get("deadline", 0.0),
+            wait=terms_round.get("wait", 0.0),
+            travel=terms_round.get("travel", 0.0),
             completion=terms_round["completion"],
             nonserved=terms_round["nonserved"],
         ))
@@ -266,16 +399,18 @@ class RidepoolLogger:
     def log_macro_step(self, info):
         fname = self._get_csv_filename("rewards_macro")
         self._ensure_csv(fname, 
-                         ["macro_steps","reward","capacity_avg","step_avg","missed_deadline_avg", "wait_avg", "completion_avg", "nonserved_avg"])
+                 ["macro_steps","reward","capacity_avg","step_avg","deadline_avg", "wait_avg", "travel_avg", "completion_avg", "nonserved_avg"])
 
-        missed_deadline_avg = info.get("macro_missed_deadline", info.get("macro_abandoned"))
+        deadline_avg = info.get("macro_deadline", info.get("macro_missed_deadline", info.get("macro_abandoned")))
+        travel_avg = info.get("macro_travel", 0.0)
         self._write(fname, dict(
                 macro_steps = info["macro_steps"],
                 reward = info["macro_reward"],
                 capacity_avg = info["macro_capacity"],
                 step_avg = info["macro_step"],
-                missed_deadline_avg = missed_deadline_avg,
-                wait_avg = info["macro_wait"],
+            deadline_avg = deadline_avg,
+            wait_avg = info["macro_wait"],
+            travel_avg = travel_avg,
                 completion_avg = info["macro_completion"],
                 nonserved_avg = info["macro_nonserved"],
         ))

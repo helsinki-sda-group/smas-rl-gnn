@@ -19,25 +19,56 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 #from scipy.ndimage import uniform_filter1d
 import re
+from omegaconf import OmegaConf
+
+
+def _normalize_metric_key(name: str) -> str | None:
+    name = name.strip().lower()
+    mapping = {
+        "rew": "rew",
+        "cap": "cap",
+        "step": "step",
+        "mdl": "deadline",
+        "dln": "deadline",
+        "deadline": "deadline",
+        "wait": "wait",
+        "trav": "travel",
+        "travel": "travel",
+        "comp": "comp",
+        "nsv": "nsv",
+    }
+    return mapping.get(name)
+
+
+def _extract_header_tokens(lines: list[str]) -> list[str]:
+    for line in lines:
+        if line.startswith("pol") and "|" in line:
+            parts = re.split(r'\s*\|\s*', line)
+            if len(parts) >= 2:
+                return parts[1].split()
+    return []
 
 
 def parse_metrics_log(filepath):
     """Parse the training metrics log file containing episode rewards and components."""
     with open(filepath, 'r') as f:
-        lines = [l.strip() for l in f.readlines() if l.strip() and not l.startswith('pol')]
-    
+        raw_lines = [l.strip() for l in f.readlines() if l.strip()]
+
+    header_tokens = _extract_header_tokens(raw_lines)
+    lines = [l for l in raw_lines if not l.startswith('pol')]
+
     data = []
     for line in lines:
         parts = re.split(r'\s*\|\s*', line)
         if len(parts) < 2:
             continue
-        
+
         seg0 = parts[0].split()
         seg1 = parts[1].split()
-        
-        if len(seg0) < 2 or len(seg1) < 7:
+
+        if len(seg0) < 2 or len(seg1) < 4:
             continue
-        
+
         ts_val = None
         if len(seg0) >= 3:
             try:
@@ -45,25 +76,68 @@ def parse_metrics_log(filepath):
             except Exception:
                 ts_val = None
 
-        data.append({
-            'pol': int(seg0[0]),
-            'seed': int(seg0[1]),
-            'ts': ts_val,
-            'rew': float(seg1[0]),
-            'cap': float(seg1[1]),
-            'step': float(seg1[2]),
-            'mdl': float(seg1[3]),
-            'wait': float(seg1[4]),
-            'comp': float(seg1[5]),
-            'nsv': float(seg1[6]),
-        })
-    
+        row = {
+            "pol": int(seg0[0]),
+            "seed": int(seg0[1]),
+            "ts": ts_val,
+            "rew": 0.0,
+            "cap": 0.0,
+            "step": 0.0,
+            "deadline": 0.0,
+            "wait": 0.0,
+            "travel": 0.0,
+            "comp": 0.0,
+            "nsv": 0.0,
+        }
+
+        if header_tokens and len(header_tokens) == len(seg1):
+            for name, val in zip(header_tokens, seg1):
+                key = _normalize_metric_key(name)
+                if key is None:
+                    continue
+                try:
+                    row[key] = float(val)
+                except Exception:
+                    row[key] = 0.0
+        else:
+            try:
+                row["rew"] = float(seg1[0])
+                row["cap"] = float(seg1[1])
+                row["step"] = float(seg1[2])
+                row["deadline"] = float(seg1[3]) if len(seg1) > 3 else 0.0
+                row["wait"] = float(seg1[4]) if len(seg1) > 4 else 0.0
+                row["travel"] = float(seg1[5]) if len(seg1) > 5 else 0.0
+                row["comp"] = float(seg1[6]) if len(seg1) > 6 else 0.0
+                row["nsv"] = float(seg1[7]) if len(seg1) > 7 else 0.0
+            except Exception:
+                continue
+
+        data.append(row)
+
     df = pd.DataFrame(data)
     if "ts" in df.columns and df["ts"].notna().any():
         df = df.sort_values("ts").drop_duplicates(subset=["ts"], keep="last").reset_index(drop=True)
     else:
         df = df.sort_values('pol').reset_index(drop=True)
     return df
+
+
+def load_reward_type(config_path: str | None) -> str | None:
+    if not config_path:
+        return None
+    try:
+        cfg = OmegaConf.load(config_path)
+        reward_type = str(getattr(getattr(cfg, "env", {}), "reward_params", {}).get("reward_type", ""))
+        reward_type = reward_type.strip().lower()
+        if reward_type in {"default", "missed_deadline"}:
+            return "deadline"
+        if reward_type in {"wait_travel", "wait+travel", "wait-travel", "travel"}:
+            return "wait_travel"
+        if reward_type:
+            return reward_type
+        return None
+    except Exception:
+        return None
 
 
 def parse_train_output(filepath):
@@ -116,14 +190,18 @@ def ma(data, window):
     return result
 
 
-def plot_reward_components(df, output_file='reward_components.png'):
+def plot_reward_components(df, reward_type: str | None, output_file='reward_components.png'):
     """Create reward component breakdown plots."""
     use_ts = 'ts' in df.columns and df['ts'].notna().any()
     eps = df['ts'].values if use_ts else df['pol'].values
     rew = df['rew'].values
-    mdl = df['mdl'].values
+    deadline = df['deadline'].values
     wait = df['wait'].values
+    travel = df['travel'].values
     comp = df['comp'].values
+
+    if reward_type is None:
+        reward_type = "wait_travel" if np.any(travel != 0.0) else "deadline"
     
     N = len(eps)
     
@@ -188,15 +266,17 @@ def plot_reward_components(df, output_file='reward_components.png'):
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     
-    # ── Deadline penalty ──────────────────────────────────────────────────
+    # ── Penalty component ──────────────────────────────────────────────────
     ax = fig.add_subplot(gs[1, 1])
     ax.set_facecolor('#fafafa')
-    #ax.plot(eps, mdl, 'o', markersize=scatter_size//2, alpha=scatter_alpha, color='#e74c3c')
-    ax.plot(eps, ma(mdl, 20), lw=2.5, color='#e74c3c', alpha=0.9)
+    primary_penalty = travel if reward_type == "wait_travel" else deadline
+    primary_label = "Travel Penalty" if reward_type == "wait_travel" else "Deadline Penalty"
+    primary_color = '#9b59b6' if reward_type == "wait_travel" else '#e74c3c'
+    ax.plot(eps, ma(primary_penalty, 20), lw=2.5, color=primary_color, alpha=0.9)
     ax.axhline(0, color='black', lw=1, alpha=0.5)
-    ax.axhline(mdl.mean(), color='#c0392b', lw=2, ls='--', alpha=0.6)
-    ax.set_ylabel('Deadline Penalty', fontsize=10, fontweight='bold')
-    ax.set_title(f'Deadline Penalty (mean: {mdl.mean():.2f})', fontsize=11, fontweight='bold')
+    ax.axhline(primary_penalty.mean(), color=primary_color, lw=2, ls='--', alpha=0.6)
+    ax.set_ylabel(primary_label, fontsize=10, fontweight='bold')
+    ax.set_title(f'{primary_label} (mean: {primary_penalty.mean():.2f})', fontsize=11, fontweight='bold')
     ax.grid(alpha=0.25)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -220,12 +300,20 @@ def plot_reward_components(df, output_file='reward_components.png'):
     ax.set_facecolor('#fafafa')
     
     baseline = np.zeros(len(eps))
-    ax.fill_between(eps, baseline, baseline + mdl,
-                    color='#e74c3c', alpha=0.4, label='Deadline')
-    ax.fill_between(eps, baseline + mdl, baseline + mdl + wait,
-                    color='#f39c12', alpha=0.4, label='Wait')
-    ax.fill_between(eps, baseline + mdl + wait, baseline + mdl + wait + comp,
-                    color='#27ae60', alpha=0.4, label='Completion')
+    if reward_type == "wait_travel":
+        ax.fill_between(eps, baseline, baseline + travel,
+                        color='#9b59b6', alpha=0.4, label='Travel')
+        ax.fill_between(eps, baseline + travel, baseline + travel + wait,
+                        color='#f39c12', alpha=0.4, label='Wait')
+        ax.fill_between(eps, baseline + travel + wait, baseline + travel + wait + comp,
+                        color='#27ae60', alpha=0.4, label='Completion')
+    else:
+        ax.fill_between(eps, baseline, baseline + deadline,
+                        color='#e74c3c', alpha=0.4, label='Deadline')
+        ax.fill_between(eps, baseline + deadline, baseline + deadline + wait,
+                        color='#f39c12', alpha=0.4, label='Wait')
+        ax.fill_between(eps, baseline + deadline + wait, baseline + deadline + wait + comp,
+                        color='#27ae60', alpha=0.4, label='Completion')
     
     # Subsample total line for large datasets
     stride = max(1, N // 500)
@@ -235,7 +323,7 @@ def plot_reward_components(df, output_file='reward_components.png'):
     
     ax.set_xlabel('Episode', fontsize=11, fontweight='bold')
     ax.set_ylabel('Reward', fontsize=10, fontweight='bold')
-    ax.set_title('Component Breakdown', fontsize=11, fontweight='bold')
+    ax.set_title(f'Component Breakdown ({reward_type})', fontsize=11, fontweight='bold')
     ax.legend(fontsize=8, loc='lower right')
     ax.grid(alpha=0.25, axis='y')
     ax.spines['top'].set_visible(False)
@@ -505,6 +593,8 @@ def main():
     )
     parser.add_argument('metrics_log', help='Path to training_metrics_*.log file')
     parser.add_argument('train_output', help='Path to train_output.txt file')
+    parser.add_argument('--config', type=str, default='configs/rp_gnn.yaml',
+                       help='Path to YAML config for reward_type (default: configs/rp_gnn.yaml)')
     parser.add_argument('--ma-window', type=int, default=20, 
                        help='Moving average window size for per-seed plots (default: 20)')
     
@@ -517,13 +607,15 @@ def main():
     print(f"\nLoading {args.train_output}...")
     train_df = parse_train_output(args.train_output)
     print(f"  ✓ Loaded {len(train_df)} training iterations")
+
+    reward_type = load_reward_type(args.config)
     
     # Print summary
     print_summary(df, train_df)
     
     # Generate plots
     print("Generating plots...")
-    plot_reward_components(df, output_file='reward_components.png')
+    plot_reward_components(df, reward_type=reward_type, output_file='reward_components.png')
     plot_ppo_metrics(train_df, output_file='ppo_metrics.png')
     
     print(f"\nGenerating per-seed plots (MA window: {args.ma_window})...")
