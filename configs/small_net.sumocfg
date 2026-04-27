@@ -11,11 +11,10 @@
         <end value="10000"/>
     </time>
     <taxi_device>
-        <device.taxi.dispatch-algorithm value="traci"/>
+        <device.taxi.dispatch-algorithm value="traci" params="relLossThreshold:0.2"/>
         <!--<device.taxi.idle-algorithm value="randomCircling"/>-->
 		<device.taxi.idle-algorithm value="stop"/>
 		<device.taxi.dispatch-period value="1"/>
-		<device.taxi.dispatch-algorithm params="relLossThreshold:0.2"/>
     </taxi_device>
 	<gui_only>
 		<gui-settings-file value="sumoview.xml"/>
