@@ -38,3 +38,13 @@ non-final.
 
 - `train.py` – example training script using PPO + `RTGNNPolicy`.
 
+## Documentation (`readme/`)
+
+- [readme/01_reward.md](readme/01_reward.md) - Reward system reference linked to implementation details and YAML knobs.
+- [readme/02_architecture_variants.md](readme/02_architecture_variants.md) - Model and architecture variant notes used for experiments.
+- [readme/03_robot_task_features.md](readme/03_robot_task_features.md) - Robot/task feature definitions and feature-engineering choices.
+- [readme/04_training_metrics_log.md](readme/04_training_metrics_log.md) - Training metric logging format and metric interpretation.
+- [readme/05_conflicts_log.md](readme/05_conflicts_log.md) - Conflict-resolution logging semantics and related diagnostics.
+- [readme/06_comp_norms_log.md](readme/06_comp_norms_log.md) - Component norm logging for debugging/monitoring representation scale.
+- [readme/07_eval_baselines.md](readme/07_eval_baselines.md) - Baseline evaluation workflow and policy behavior (`random`, `greedy`, `unique`).
+
