@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
-Plot action/candidate columns from training_metrics_*.log
+Plot action/candidate and assignment outcome columns from training_metrics_*.log
 
-Plots columns: noop, overld, mcand, cne_fr, cne_mn, dstep, macmr, msd, ovrlap, shared
+Plots action/candidate columns:
+    noop, overld, mcand, cne_fr, cne_mn, dstep, macmr, msd, ovrlap, shared
+
+Also plots assignment outcome rates:
+    cmr, obsr, anpr, pncr
+
 with optional moving-average smoothing.
 
 Supports multiple log files for comparison.
@@ -37,6 +42,13 @@ ACTION_CANDIDATE_COLS = [
     "shared",
 ]
 
+OUTCOME_RATE_COLS = [
+    "cmr",
+    "obsr",
+    "anpr",
+    "pncr",
+]
+
 # Human-readable labels
 COL_LABELS = {
     "noop": "NO-OP Fraction",
@@ -49,6 +61,10 @@ COL_LABELS = {
     "msd": "Macro Steps Done",
     "ovrlap": "Overlap Rate",
     "shared": "Mean Shared Tasks per Step",
+    "cmr": "Completion Rate (CMR)",
+    "obsr": "Obsolete Rate (OBSR)",
+    "anpr": "Assigned Never Picked Rate (ANPR)",
+    "pncr": "Picked Not Completed Rate (PNCR)",
 }
 
 
@@ -201,9 +217,55 @@ def plot_grouped(
         print(f"[OK] Saved {out_path}")
 
 
+def plot_outcome_rates_grouped(
+    data_dict: Dict[str, pd.DataFrame],
+    window: int,
+    out_dir: Path,
+) -> None:
+    """Plot cmr/obsr/anpr/pncr in a single grouped figure (2x2 subplots)."""
+    valid_cols = [c for c in OUTCOME_RATE_COLS if any(c in df.columns for df in data_dict.values())]
+    if not valid_cols:
+        print("[WARN] No outcome-rate columns found; skipping grouped outcome plot.")
+        return
+
+    n = len(valid_cols)
+    nrows, ncols = (2, 2) if n > 2 else (1, n)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(12, 8) if n > 2 else (6 * n, 4))
+    axes_arr = np.atleast_1d(axes).reshape(-1)
+
+    for i, col in enumerate(valid_cols):
+        ax = axes_arr[i]
+        for label, df in data_dict.items():
+            if col not in df.columns:
+                continue
+
+            x = df.index
+            y_raw = df[col].astype(float)
+            y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
+
+            ax.plot(x, y_smooth, linewidth=1.8, label=label, marker='o', markersize=3)
+            if window > 1:
+                ax.plot(x, y_raw, alpha=0.12, linewidth=0.5, color='gray')
+
+        ax.set_xlabel("Episode")
+        ax.set_ylabel(col)
+        ax.set_title(COL_LABELS.get(col, col))
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='best', fontsize='small')
+
+    for j in range(n, len(axes_arr)):
+        fig.delaxes(axes_arr[j])
+
+    plt.tight_layout()
+    out_path = out_dir / "group_outcome_rates.png"
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"[OK] Saved {out_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Plot action/candidate columns from training_metrics_*.log with smoothing. Support multiple log files for comparison.",
+        description="Plot action/candidate and outcome-rate columns from training_metrics_*.log with smoothing. Support multiple log files for comparison.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples (single file):
@@ -263,7 +325,8 @@ Examples (multiple files for comparison):
     for df in data_dict.values():
         all_cols.update(df.columns)
     
-    missing = [c for c in ACTION_CANDIDATE_COLS if c not in all_cols]
+    expected_cols = ACTION_CANDIDATE_COLS + OUTCOME_RATE_COLS
+    missing = [c for c in expected_cols if c not in all_cols]
     if missing:
         print(f"[WARN] Missing columns across all logs: {missing}")
 
@@ -274,6 +337,10 @@ Examples (multiple files for comparison):
     print("[INFO] Plotting individual columns...")
     for col in ACTION_CANDIDATE_COLS:
         plot_single_column(data_dict, col, args.window, out_dir)
+
+    print("[INFO] Plotting outcome-rate columns...")
+    for col in OUTCOME_RATE_COLS:
+        plot_single_column(data_dict, col, args.window, out_dir)
     
     # Combined plot
     print("[INFO] Plotting all action/candidate columns together...")
@@ -282,6 +349,9 @@ Examples (multiple files for comparison):
     # Grouped plots
     print("[INFO] Plotting grouped metrics...")
     plot_grouped(data_dict, args.window, out_dir)
+
+    print("[INFO] Plotting grouped outcome rates...")
+    plot_outcome_rates_grouped(data_dict, args.window, out_dir)
 
     print(f"[OK] All plots saved to {out_dir}")
     return 0
