@@ -16,7 +16,7 @@ A row is written at episode end by `RidepoolLogger._append_conflicts_summary(...
 ## Header
 
 ```text
-episode,conflicts_total,tasks_total,conflict_ratio,winner_pickup,winner_margin,resolver_override,resolver_override_rate,avg_margin_win,avg_margin_lose,avg_margin_gap
+episode,conflicts_total,tasks_total,conflict_ratio,winner_pickup,winner_margin,p_win_given_ego_action,p_win_given_high_logit,resolver_override,resolver_override_rate,avg_margin_win,avg_margin_lose,avg_margin_gap
 ```
 
 ## How counters are accumulated
@@ -47,11 +47,25 @@ Let:
 | `conflict_ratio` | Share of tasks that were conflicting. | $C/T$ if $T>0$, else $0$. |
 | `winner_pickup` | Count of conflicts where final winner is in pickup-distance winner set. | Increment if selected winner belongs to `pickup_winners`. |
 | `winner_margin` | Count of conflicts where final winner is in margin winner set. | Increment if selected winner belongs to `margin_winners`. |
+| `p_win_given_ego_action` | Probability that resolver winner is pickup-distance winner (episode-level). | $\text{winner\_pickup}/C$ if $C>0$, else $0$. |
+| `p_win_given_high_logit` | Probability that resolver winner is high-margin winner (episode-level). | $\text{winner\_margin}/C$ if $C>0$, else $0$. |
 | `resolver_override` | Count of conflicts where pickup and margin recommendations disagree. | If both winner sets are non-empty and first sorted element differs, increment by 1. |
 | `resolver_override_rate` | Override rate among conflicts. | $C_{ovr}/C$ if $C>0$, else $0$. |
 | `avg_margin_win` | Mean winner margin over events with valid margin. | $\sum m_{win}/N_{win}$. |
 | `avg_margin_lose` | Mean loser margin over valid loser margins. | $\sum m_{lose}/N_{lose}$. |
 | `avg_margin_gap` | Mean winner-loser margin difference. | $\sum (m_{win}-m_{lose})/N_{gap}$. |
+
+## New per-conflict diagnostics
+
+Per-event labels are now also written to each episode-level `conflicts.csv` row:
+
+- `win_label`: 1 if the final resolver winner is in `pickup_winners`, else 0.
+- `win_label_high_logit`: 1 if the final resolver winner is in `margin_winners`, else 0.
+
+Interpretation:
+
+- `win_label` is the per-conflict version of the episode metric `P(win|ego_action)`.
+- `win_label_high_logit` is the per-conflict version of `P(win|high_logit)`.
 
 ## Important nuances
 
@@ -66,7 +80,7 @@ This file is a summary only. Per-conflict details are in episode CSV:
 - `runs/<run>/episode_xxxx/conflicts.csv`
 
 That per-episode file has row-level fields:
-- `time,res_id,taxi_candidates,remaining_caps,distances,winner`
+- `time,res_id,taxi_candidates,remaining_caps,distances,winner,win_label,win_label_high_logit`
 
 ## Plot usage
 
@@ -78,6 +92,8 @@ That per-episode file has row-level fields:
 - `conflict_ratio`
 - `winner_pickup`
 - `winner_margin`
+- `p_win_given_ego_action` (or computed fallback from `winner_pickup/conflicts_total`)
+- `p_win_given_high_logit` (or computed fallback from `winner_margin/conflicts_total`)
 - `resolver_override`
 - `resolver_override_rate`
 - `avg_margin_win`
@@ -89,4 +105,9 @@ and generates:
 - `conflict_ratio.png`
 - `winner_pickup_margin_override.png`
 - `resolver_override_rate.png`
+- `win_probability_diagnostics.png`
 - `avg_margins.png`
+
+For multi-run comparison (`plot_conflicts_comparison.py`), grouped output also includes:
+
+- `group_conflict_win_probabilities.png`
