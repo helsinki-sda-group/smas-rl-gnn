@@ -98,6 +98,8 @@ class RidepoolLogger:
 
         conflict_ratio = (conflicts_total / tasks_total) if tasks_total > 0 else 0.0
         resolver_override_rate = (resolver_override / conflicts_total) if conflicts_total > 0 else 0.0
+        p_win_given_ego_action = (winner_pickup / conflicts_total) if conflicts_total > 0 else 0.0
+        p_win_given_high_logit = (winner_margin / conflicts_total) if conflicts_total > 0 else 0.0
         avg_margin_win = (self._conflict_stats["margin_win_sum"] / margin_win_count) if margin_win_count > 0 else 0.0
         avg_margin_lose = (self._conflict_stats["margin_lose_sum"] / margin_lose_count) if margin_lose_count > 0 else 0.0
         avg_margin_gap = (self._conflict_stats["margin_gap_sum"] / margin_gap_count) if margin_gap_count > 0 else 0.0
@@ -113,6 +115,8 @@ class RidepoolLogger:
                     "conflict_ratio",
                     "winner_pickup",
                     "winner_margin",
+                    "p_win_given_ego_action",
+                    "p_win_given_high_logit",
                     "resolver_override",
                     "resolver_override_rate",
                     "avg_margin_win",
@@ -126,6 +130,8 @@ class RidepoolLogger:
                 f"{conflict_ratio:.2f}",
                 f"{winner_pickup:.2f}",
                 f"{winner_margin:.2f}",
+                f"{p_win_given_ego_action:.4f}",
+                f"{p_win_given_high_logit:.4f}",
                 f"{resolver_override:.2f}",
                 f"{resolver_override_rate:.2f}",
                 f"{avg_margin_win:.2f}",
@@ -170,7 +176,19 @@ class RidepoolLogger:
         os.makedirs(self.ep_dir, exist_ok=True)
 
         self._open_csv(self._get_csv_filename("dispatch"), ["time","taxi","prev_seq","base_ids","seq","seq_pd","raw_currentCustomers","notes"])
-        self._open_csv(self._get_csv_filename("conflicts"), ["time","res_id","taxi_candidates","remaining_caps","distances","winner"])
+        self._open_csv(
+            self._get_csv_filename("conflicts"),
+            [
+                "time",
+                "res_id",
+                "taxi_candidates",
+                "remaining_caps",
+                "distances",
+                "winner",
+                "win_label",
+                "win_label_high_logit",
+            ],
+        )
         self._open_csv(self._get_csv_filename("candidates"), ["time","taxi","cand_slots","cand_res_ids","cand_persons","cand_pd_seq"])
         self._open_csv(self._get_csv_filename("rewards"), ["time","taxi","reward","capacity","step","deadline","wait","travel","completion", "nonserved"])
         self._open_csv(self._get_csv_filename("fleet_counts"), ["time","idle","en_route","occupied","pickup_occupied"])
@@ -348,16 +366,39 @@ class RidepoolLogger:
             notes=str(notes),
         ))
 
-    def log_conflict(self, t: float, res_id: str, taxi_candidates: Sequence[str],
-                     remaining_caps: Sequence[int], distances: Sequence[float], winner: str):
+    def log_conflict(
+        self,
+        t: float,
+        res_id: str,
+        taxi_candidates: Sequence[str],
+        remaining_caps: Sequence[int],
+        distances: Sequence[float],
+        winner: str,
+        win_label: int = 0,
+        win_label_high_logit: int = 0,
+    ):
         fname = self._get_csv_filename("conflicts")
-        self._ensure_csv(fname, ["time","res_id","taxi_candidates","remaining_caps","distances", "winner"])
+        self._ensure_csv(
+            fname,
+            [
+                "time",
+                "res_id",
+                "taxi_candidates",
+                "remaining_caps",
+                "distances",
+                "winner",
+                "win_label",
+                "win_label_high_logit",
+            ],
+        )
         self._write(fname, dict(
             time=float(t), res_id=str(res_id),
             taxi_candidates="|".join(map(str, taxi_candidates)),
             remaining_caps="|".join(map(str, remaining_caps)),
             distances="|".join(map(str, distances)),
             winner=str(winner),
+            win_label=int(win_label),
+            win_label_high_logit=int(win_label_high_logit),
         ))
 
     def log_candidates(self, t: float, taxi: str, cand_slots, cand_res_ids, cand_persons, cand_pd_seq):

@@ -59,6 +59,13 @@ def _plot_conflicts(conflicts_log: Path, out_dir: Path) -> None:
         ],
     )
 
+    if "p_win_given_ego_action" not in cdf.columns:
+        denom = cdf["conflicts_total"].replace(0, pd.NA)
+        cdf["p_win_given_ego_action"] = (cdf["winner_pickup"] / denom).fillna(0.0)
+    if "p_win_given_high_logit" not in cdf.columns:
+        denom = cdf["conflicts_total"].replace(0, pd.NA)
+        cdf["p_win_given_high_logit"] = (cdf["winner_margin"] / denom).fillna(0.0)
+
     x = cdf["episode"]
 
     _save_multi_plot(
@@ -98,6 +105,17 @@ def _plot_conflicts(conflicts_log: Path, out_dir: Path) -> None:
         "Resolver Override Rate",
         "resolver_override_rate",
         out_dir / "resolver_override_rate.png",
+    )
+
+    _save_multi_plot(
+        x,
+        [
+            ("P(win|ego_action)", cdf["p_win_given_ego_action"]),
+            ("P(win|high_logit)", cdf["p_win_given_high_logit"]),
+        ],
+        "Conflict Win Probabilities",
+        "probability",
+        out_dir / "win_probability_diagnostics.png",
     )
 
     _save_multi_plot(

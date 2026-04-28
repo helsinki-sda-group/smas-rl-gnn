@@ -782,7 +782,14 @@ class RLControllerAdapter:
                 else:
                     dists_dict =  {rid: dist for (rid, dist) in dists}
                 self.logger.log_conflict(
-                    self._now(), res_id, rids, [rem_cap[r] for r in rids], [dists_dict[r] for r in rids], winners[res_id]
+                    self._now(),
+                    res_id,
+                    rids,
+                    [rem_cap[r] for r in rids],
+                    [dists_dict[r] for r in rids],
+                    winners[res_id],
+                    win_label=int(winners[res_id] in pickup_winners),
+                    win_label_high_logit=int(winners[res_id] in margin_winners),
                 )
 
         # Build resolved list: losers -> None
