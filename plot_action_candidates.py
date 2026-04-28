@@ -295,16 +295,34 @@ Examples (multiple files for comparison):
         default="action_candidate_plots",
         help="Output directory for plots (default: action_candidate_plots)",
     )
+    parser.add_argument(
+        "--labels",
+        type=str,
+        default="",
+        help="Comma-separated labels for input logs (must match number of logs)",
+    )
 
     args = parser.parse_args()
     out_dir = Path(args.out)
 
+    custom_labels = []
+    if args.labels.strip():
+        custom_labels = [s.strip() for s in args.labels.split(",") if s.strip()]
+        if len(custom_labels) != len(args.metrics_log):
+            print(
+                f"[ERROR] --labels count ({len(custom_labels)}) does not match number of logs ({len(args.metrics_log)})"
+            )
+            return 1
+
     # Load all log files
     data_dict: Dict[str, pd.DataFrame] = {}
-    for log_path_str in args.metrics_log:
+    for idx, log_path_str in enumerate(args.metrics_log):
         try:
             log_path = Path(log_path_str)
             df, label = load_log(log_path)
+
+            if custom_labels:
+                label = custom_labels[idx]
 
             # Keep labels unique so runs with identical filenames do not overwrite each other.
             unique_label = label
