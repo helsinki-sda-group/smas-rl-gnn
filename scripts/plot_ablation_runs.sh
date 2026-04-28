@@ -261,6 +261,7 @@ echo "[INFO] Action window: $ACTION_WINDOW"
 
 "$PYTHON_BIN" "$REPO/plot_action_candidates.py" \
   "${SELECTED_METRICS[@]}" \
+  --labels "$(IFS=,; echo "${SELECTED_LABELS[*]}")" \
   --window "$ACTION_WINDOW" \
   --out "$OUTDIR/$ACTION_OUT_DIRNAME"
 
