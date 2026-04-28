@@ -59,6 +59,20 @@ def _load_conflict_logs(paths: List[str], labels: List[str]) -> Dict[str, pd.Dat
 
         for col in REQUIRED_COLS:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # Backward-compatible fallback for older conflicts logs.
+        if "p_win_given_ego_action" not in df.columns:
+            denom = df["conflicts_total"].replace(0, pd.NA)
+            df["p_win_given_ego_action"] = (df["winner_pickup"] / denom).fillna(0.0)
+        else:
+            df["p_win_given_ego_action"] = pd.to_numeric(df["p_win_given_ego_action"], errors="coerce").fillna(0.0)
+
+        if "p_win_given_high_logit" not in df.columns:
+            denom = df["conflicts_total"].replace(0, pd.NA)
+            df["p_win_given_high_logit"] = (df["winner_margin"] / denom).fillna(0.0)
+        else:
+            df["p_win_given_high_logit"] = pd.to_numeric(df["p_win_given_high_logit"], errors="coerce").fillna(0.0)
+
         df = df.dropna(subset=["episode"]).sort_values("episode").reset_index(drop=True)
         if df.empty:
             print(f"[WARN] Empty conflicts data, skipping: {p}")
@@ -155,6 +169,13 @@ def main() -> int:
         ["avg_margin_win", "avg_margin_lose", "avg_margin_gap"],
         "Conflict Margin Statistics",
         out_dir / "group_conflict_margins.png",
+        args.window,
+    )
+    _plot_group(
+        data,
+        ["p_win_given_ego_action", "p_win_given_high_logit"],
+        "Conflict Win Probability Diagnostics",
+        out_dir / "group_conflict_win_probabilities.png",
         args.window,
     )
 
