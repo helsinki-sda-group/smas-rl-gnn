@@ -168,6 +168,33 @@ scripts/generate_ctc_configs.sh --submit
 scripts/generate_ctc_configs.sh --suffix _ctc_v2
 ~~~
 
+### Batch-generate random-resolver variants
+
+- Use `scripts/generate_random_configs.sh` to create random conflict-resolution variants for all `configs/rp_gnn_*.yaml` files (excluding `rp_gnn.yaml` and `rp_toy.yaml`).
+- Generated files get suffix `_rnd.yaml` and automatically update:
+  - `env.conflict_resolution: random`
+  - `logging.run_name: <old_run_name>_rnd`
+  - `logging.model_save_dir: <logging.out_dir>/<new_run_name>/!saved_models`
+
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+chmod +x scripts/generate_random_configs.sh
+
+# preview only
+scripts/generate_random_configs.sh --dry-run
+
+# generate YAML files only
+scripts/generate_random_configs.sh
+
+# generate and submit all generated configs with slurm/run_train.sbatch
+scripts/generate_random_configs.sh --submit
+~~~
+
+- Optional custom suffix:
+~~~bash
+scripts/generate_random_configs.sh --suffix _rnd_v2
+~~~
+
 ### Sbatch script
 The script `run_train.sbatch` is saved at `smas-rl-gnn\slurm`.
 ~~~bash
@@ -320,7 +347,7 @@ action_comparison/
 ~~~
 - Long example to keep:
 ~~~bash
-/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop-2 1hop-3 2hop-1 2hop-5 1hop_critic-1 1hop_critic-2 1hop_critic-3 1hop_critic-4 1hop_critic-5
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop-2 1hop-3 2hop-1 2hop-5 1hop_critic-1 1hop_critic-2 1hop_critic-3 1hop_critic-4 1hop_critic-5 --job-ids 6580443,6580444,6580449,6580457,6581536,6581537,6581538,6581539,6581540
 
 /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop-2 1hop-3 2hop-1 2hop-5
 

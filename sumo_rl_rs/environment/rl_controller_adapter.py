@@ -59,7 +59,7 @@ class RLControllerAdapter:
         max_travel_delay_s: float = 900.0,      # how late the robot is allowed to deliever to dropoff
         max_robot_capacity: int = 5,
         logger: Optional["RidepoolLogger"]=None,
-        conflict_resolution: str = "closest_then_capacity", # "capacity" | "closest" | "closest_then_capacity" | "logit_diff"
+        conflict_resolution: str = "closest_then_capacity", # "capacity" | "closest" | "closest_then_capacity" | "logit_diff" | "random"
         reward_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
@@ -80,7 +80,7 @@ class RLControllerAdapter:
             max_travel_delay_s: how late the robot is allowed to deliever to dropoff. No explicit penalty for that in the current implementation. 
             max_robot_capacity:
             logger: RidepoolLogger instance.
-            conflict_resolution: how the assignment conflicts are resolved ("capacity" | "closest" | "closest_then_capacity" | "logit_diff")
+            conflict_resolution: how the assignment conflicts are resolved ("capacity" | "closest" | "closest_then_capacity" | "logit_diff" | "random")
             reward_params: reward configuration (reward_type, weights, caps)
         """
         self.sumo = sumo
@@ -91,7 +91,7 @@ class RLControllerAdapter:
         self.completion_mode = completion_mode.lower().strip()
         assert self.completion_mode in {"pickup", "dropoff"}, "completion_mode must be 'pickup' or 'dropoff'"
         self.conflict_resolution = str(conflict_resolution).lower().strip()
-        assert self.conflict_resolution in {"capacity", "closest", "closest_then_capacity", "logit_diff"}, "conflict resolution must be 'capacity', 'closest', 'closest_then_capacity', or 'logit_diff'"
+        assert self.conflict_resolution in {"capacity", "closest", "closest_then_capacity", "logit_diff", "random"}, "conflict resolution must be 'capacity', 'closest', 'closest_then_capacity', 'logit_diff', or 'random'"
         self._warned_missing_logit_diff = False
 
         self.reset_fn = reset_fn
@@ -660,6 +660,7 @@ class RLControllerAdapter:
         - "closest": choose taxi with smallest distance to pickup edge.
         - "closest_then_capacity": closest, then capacity.
         - "logit_diff": largest selected-task logit margin wins.
+        - "random": winner sampled uniformly at random among claimants.
         Returns:
         (resolved_assignments, winners_map) where winners_map is {res_id: rid_winner}.
         """
@@ -743,6 +744,9 @@ class RLControllerAdapter:
                 max_cap = max(c for _, c in caps)
                 best = [rid for rid, c in caps if c == max_cap]
 
+            elif mode == "random":
+                best = list(rids)
+
             elif mode in {"closest", "closest_then_capacity"}:
                 min_d = min(d for _, d in dists)
                 best = [rid for rid, d in dists if d <=min_d + 1e-6]
@@ -777,7 +781,7 @@ class RLControllerAdapter:
             # Conflict log (the actual winner is used)
             # 116.0,1,t0|t1|t3|t4,2|2|2|1, 31.33, 214.15, 176.13, 222.14, t1
             if self.logger:
-                if mode == "capacity": 
+                if mode in {"capacity", "random"}: 
                     dists_dict = {rid: -1.0 for rid in rids}
                 else:
                     dists_dict =  {rid: dist for (rid, dist) in dists}
