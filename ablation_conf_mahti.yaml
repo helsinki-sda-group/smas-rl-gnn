@@ -26,3 +26,5 @@ output_csv: ablation_aggregated.csv
 script:
   action_window: 10
   action_out_dirname: action_comparison
+  conflicts_window: 10
+  conflicts_out_dirname: conflicts_comparison

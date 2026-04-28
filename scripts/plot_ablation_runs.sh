@@ -7,6 +7,7 @@ set -euo pipefail
 # 1. writes a generated ablation config
 # 2. runs aggregate_ablation_results.py with that config
 # 3. runs plot_action_candidates.py across the selected runs
+# 4. runs plot_conflicts_comparison.py across the selected runs
 
 usage() {
   cat <<'EOF'
@@ -25,6 +26,7 @@ Options:
   --out-root <path>           Output root for comparison plots and generated config.
                               Default: /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/plots_ablation
   --action-window <n>         Override action smoothing window from YAML template.
+  --conflicts-window <n>      Override conflict smoothing window from YAML template.
   -h, --help                  Show this help.
 
 Examples:
@@ -44,6 +46,7 @@ TEMPLATE_CONFIG=""
 SCRATCH_ROOT="/scratch/project_2012159/kbocheni/smas-rl-gnn"
 OUT_ROOT="/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/plots_ablation"
 ACTION_WINDOW_OVERRIDE=""
+CONFLICTS_WINDOW_OVERRIDE=""
 JOB_IDS_CSV=""
 LABELS_CSV=""
 
@@ -76,6 +79,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --action-window)
       ACTION_WINDOW_OVERRIDE="$2"
+      shift 2
+      ;;
+    --conflicts-window)
+      CONFLICTS_WINDOW_OVERRIDE="$2"
       shift 2
       ;;
     -h|--help)
@@ -167,6 +174,7 @@ resolve_jobdir() {
 
 SELECTED_JOBDIRS=()
 SELECTED_METRICS=()
+SELECTED_CONFLICTS=()
 SELECTED_LABELS=()
 SELECTED_IDS=()
 
@@ -185,10 +193,12 @@ for i in "${!RUN_NAMES[@]}"; do
     echo "[ERROR] No training_metrics_*.log found in $jobdir"
     exit 1
   fi
+  conflicts_log="$jobdir/conflicts.log"
 
   job_id="${jobdir##*_}"
   SELECTED_JOBDIRS+=("$jobdir")
   SELECTED_METRICS+=("$metrics_log")
+  SELECTED_CONFLICTS+=("$conflicts_log")
   SELECTED_IDS+=("$job_id")
   if [[ ${#LABELS[@]} -gt 0 ]]; then
     SELECTED_LABELS+=("${LABELS[$i]}")
@@ -219,11 +229,11 @@ for i in "${!SELECTED_JOBDIRS[@]}"; do
   printf '%s\t%s\t%s\n' "$base_name" "${SELECTED_LABELS[$i]}" "${SELECTED_JOBDIRS[$i]}" >> "$MAPPING_FILE"
 done
 
-ACTION_PARAMS="$($PYTHON_BIN - "$TEMPLATE_CONFIG" "$GENERATED_CONF" "$MAPPING_FILE" "$OUTDIR" "${ACTION_WINDOW_OVERRIDE:-}" <<'PY'
+ACTION_PARAMS="$($PYTHON_BIN - "$TEMPLATE_CONFIG" "$GENERATED_CONF" "$MAPPING_FILE" "$OUTDIR" "${ACTION_WINDOW_OVERRIDE:-}" "${CONFLICTS_WINDOW_OVERRIDE:-}" <<'PY'
 import sys
 from omegaconf import OmegaConf
 
-template_path, generated_path, mapping_path, outdir, action_override = sys.argv[1:6]
+template_path, generated_path, mapping_path, outdir, action_override, conflicts_override = sys.argv[1:7]
 cfg = OmegaConf.load(template_path)
 
 model_dirs = []
@@ -246,16 +256,18 @@ OmegaConf.save(cfg, generated_path)
 script_cfg = cfg.get("script") or {}
 action_window = int(action_override) if action_override else int(script_cfg.get("action_window", 10))
 action_out_dirname = str(script_cfg.get("action_out_dirname", "action_comparison"))
-print(f"{action_window}\t{action_out_dirname}")
+conflicts_window = int(conflicts_override) if conflicts_override else int(script_cfg.get("conflicts_window", 10))
+conflicts_out_dirname = str(script_cfg.get("conflicts_out_dirname", "conflicts_comparison"))
+print(f"{action_window}\t{action_out_dirname}\t{conflicts_window}\t{conflicts_out_dirname}")
 PY
 )"
 
-ACTION_WINDOW="${ACTION_PARAMS%%$'\t'*}"
-ACTION_OUT_DIRNAME="${ACTION_PARAMS#*$'\t'}"
+IFS=$'\t' read -r ACTION_WINDOW ACTION_OUT_DIRNAME CONFLICTS_WINDOW CONFLICTS_OUT_DIRNAME <<< "$ACTION_PARAMS"
 
 echo "[INFO] Generated config: $GENERATED_CONF"
 echo "[INFO] Comparison output dir: $OUTDIR"
 echo "[INFO] Action window: $ACTION_WINDOW"
+echo "[INFO] Conflicts window: $CONFLICTS_WINDOW"
 
 "$PYTHON_BIN" "$REPO/aggregate_ablation_results.py" --config "$GENERATED_CONF"
 
@@ -264,5 +276,11 @@ echo "[INFO] Action window: $ACTION_WINDOW"
   --labels "$(IFS=,; echo "${SELECTED_LABELS[*]}")" \
   --window "$ACTION_WINDOW" \
   --out "$OUTDIR/$ACTION_OUT_DIRNAME"
+
+"$PYTHON_BIN" "$REPO/plot_conflicts_comparison.py" \
+  "${SELECTED_CONFLICTS[@]}" \
+  --labels "$(IFS=,; echo "${SELECTED_LABELS[*]}")" \
+  --window "$CONFLICTS_WINDOW" \
+  --out "$OUTDIR/$CONFLICTS_OUT_DIRNAME"
 
 echo "[OK] Ablation comparison written to: $OUTDIR"
