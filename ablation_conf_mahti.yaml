@@ -1,0 +1,28 @@
+# Template config for comparing Mahti training runs.
+# This file is intended as a reference template.
+# The script scripts/plot_ablation_runs.sh generates a concrete config with resolved job paths.
+
+model_dirs: []
+
+read_params_from_yaml: true
+
+experiment_names: {}
+
+training_only: true
+
+plot_comp_eval: true
+plot_comp_eval_ma: 100
+plot_raw_eval: false
+plot_raw_eval_std: false
+plot_ma_std: true
+
+k_eval: 50
+
+output_dir: ablation_results_mahti
+output_file: ablation_aggregated.log
+output_csv: ablation_aggregated.csv
+
+# Optional settings used by scripts/plot_ablation_runs.sh
+script:
+	action_window: 10
+	action_out_dirname: action_comparison
