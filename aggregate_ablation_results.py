@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 import re
 from dataclasses import dataclass
@@ -51,7 +52,11 @@ def _normalize_reward_type(reward_type: Optional[str]) -> str:
 
 
 def _reward_type_for_model(model_dir: Path) -> str:
-    cfg_paths = [model_dir / "configs" / "rp_gnn.yaml", Path("configs") / "rp_gnn.yaml"]
+    cfg_paths = [
+        model_dir / "configs" / "rp_gnn.yaml",
+        model_dir / "rp_gnn.yaml",
+        Path("configs") / "rp_gnn.yaml",
+    ]
     for cfg_path in cfg_paths:
         if not cfg_path.exists():
             continue
@@ -101,9 +106,15 @@ def _extract_exp_params(conf: OmegaConf, model_dirs: List[Path]) -> List[Dict[st
     if bool(conf.read_params_from_yaml):
         out = []
         for model_dir in model_dirs:
-            yaml_path = model_dir / "configs" / "rp_gnn.yaml"
-            if not yaml_path.exists():
-                raise FileNotFoundError(f"Missing config in {model_dir}: {yaml_path}")
+            candidate_paths = [
+                model_dir / "configs" / "rp_gnn.yaml",
+                model_dir / "rp_gnn.yaml",
+            ]
+            yaml_path = next((path for path in candidate_paths if path.exists()), None)
+            if yaml_path is None:
+                raise FileNotFoundError(
+                    f"Missing config in {model_dir}: expected one of {candidate_paths}"
+                )
             cfg = OmegaConf.load(str(yaml_path))
             out.append({
                 "use_xy_pickup": bool(getattr(cfg.features, "use_xy_pickup", False)),
@@ -590,7 +601,16 @@ def _plot_eval_comparison(
 
 
 def main() -> None:
-    conf = _read_conf(Path("ablation_conf.yaml"))
+    parser = argparse.ArgumentParser(description="Aggregate and plot ablation comparisons")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="ablation_conf.yaml",
+        help="Path to aggregation config YAML (default: ablation_conf.yaml)",
+    )
+    args = parser.parse_args()
+
+    conf = _read_conf(Path(args.config))
     model_dirs = [Path(p).expanduser().resolve() for p in conf.model_dirs]
     k_eval = int(conf.get("k_eval", 5))
 
