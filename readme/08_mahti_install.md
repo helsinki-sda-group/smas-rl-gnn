@@ -141,6 +141,33 @@ logging:
 mkdir -p /scratch/project_2012159/kbocheni/smas-rl-gnn/slurm
 ~~~
 
+### Batch-generate config variants (no manual copy/rename)
+
+- Use `scripts/generate_ctc_configs.sh` to create variants for all `configs/rp_gnn_*.yaml` files (excluding `rp_gnn.yaml` and `rp_toy.yaml`).
+- Generated files get suffix `_ctc.yaml` and automatically update:
+  - `env.conflict_resolution: closest_then_capacity`
+  - `logging.run_name: <old_run_name>_ctc`
+  - `logging.model_save_dir: <logging.out_dir>/<new_run_name>/!saved_models`
+
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+chmod +x scripts/generate_ctc_configs.sh
+
+# preview only
+scripts/generate_ctc_configs.sh --dry-run
+
+# generate YAML files only
+scripts/generate_ctc_configs.sh
+
+# generate and submit all generated configs with slurm/run_train.sbatch
+scripts/generate_ctc_configs.sh --submit
+~~~
+
+- Optional custom suffix:
+~~~bash
+scripts/generate_ctc_configs.sh --suffix _ctc_v2
+~~~
+
 ### Sbatch script
 The script `run_train.sbatch` is saved at `smas-rl-gnn\slurm`.
 ~~~bash
