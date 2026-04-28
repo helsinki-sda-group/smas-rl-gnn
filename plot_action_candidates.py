@@ -303,8 +303,19 @@ Examples (multiple files for comparison):
     data_dict: Dict[str, pd.DataFrame] = {}
     for log_path_str in args.metrics_log:
         try:
-            df, label = load_log(Path(log_path_str))
-            data_dict[label] = df
+            log_path = Path(log_path_str)
+            df, label = load_log(log_path)
+
+            # Keep labels unique so runs with identical filenames do not overwrite each other.
+            unique_label = label
+            if unique_label in data_dict:
+                unique_label = f"{log_path.parent.name}:{label}"
+            suffix = 2
+            while unique_label in data_dict:
+                unique_label = f"{log_path.parent.name}:{label}_{suffix}"
+                suffix += 1
+
+            data_dict[unique_label] = df
         except FileNotFoundError as e:
             print(f"[ERROR] {e}")
             return 1
