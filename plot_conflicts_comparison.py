@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 import numpy as np
@@ -51,6 +52,58 @@ def _linestyle_for_label(label: str) -> str:
     if "1hop" in lbl:
         return ":"   # dotted
     return "-"       # solid (2hop and default)
+
+
+def _method_from_label(label: str) -> str:
+    """Extract method key from '<method>-<run_idx>[...]' labels."""
+    m = re.match(r"^(.*?)-\d+(?:\D.*)?$", label)
+    return m.group(1) if m else label
+
+
+def _aggregate_series_by_method_conflict(
+    data: Dict[str, pd.DataFrame],
+    metric: str,
+    window: int,
+    mean_runs: bool,
+) -> Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Return label -> (x, mean_curve, std_curve)."""
+    run_series: Dict[str, pd.Series] = {}
+    for label, df in data.items():
+        if metric not in df.columns:
+            continue
+        y = df[metric].astype(float)
+        y_smooth = _smooth(y, window)
+        run_series[label] = pd.Series(y_smooth.values, index=df["episode"].values)
+
+    if not run_series:
+        return {}
+
+    if not mean_runs:
+        out: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        for label, s in run_series.items():
+            std_s = _smooth_std(s.astype(float), window)
+            out[label] = (
+                s.index.to_numpy(dtype=float),
+                s.to_numpy(dtype=float),
+                std_s.to_numpy(dtype=float),
+            )
+        return out
+
+    grouped: Dict[str, List[pd.Series]] = {}
+    for label, s in run_series.items():
+        grouped.setdefault(_method_from_label(label), []).append(s)
+
+    out: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    for method, series_list in grouped.items():
+        wide = pd.concat(series_list, axis=1)
+        mean_s = wide.mean(axis=1, skipna=True)
+        std_s = wide.std(axis=1, ddof=0, skipna=True).fillna(0.0)
+        out[method] = (
+            mean_s.index.to_numpy(dtype=float),
+            mean_s.to_numpy(dtype=float),
+            std_s.to_numpy(dtype=float),
+        )
+    return out
 
 
 def _compute_ylim_from_smoothed_conflict(data: Dict[str, pd.DataFrame], metric: str, window: int) -> Tuple[float, float]:
@@ -131,6 +184,7 @@ def _plot_group(
     out_path: Path,
     window: int,
     plot_std: bool,
+    mean_runs: bool,
 ) -> None:
     n = len(metrics)
     ncols = 2 if n > 1 else 1
@@ -140,14 +194,11 @@ def _plot_group(
 
     for idx, metric in enumerate(metrics):
         ax = axes_arr[idx]
-        for label, df in data.items():
-            x = df["episode"]
-            y = df[metric]
-            y_smooth = _smooth(y, window)
-            ax.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
+        plotted = _aggregate_series_by_method_conflict(data, metric, window, mean_runs)
+        for label, (x, y_mean, y_std) in plotted.items():
+            ax.plot(x, y_mean, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
             if plot_std:
-                y_std = _smooth_std(y, window)
-                ax.fill_between(x, y_smooth - y_std, y_smooth + y_std, alpha=0.12)
+                ax.fill_between(x, y_mean - y_std, y_mean + y_std, alpha=0.12)
 
         ax.set_title(metric)
         ax.set_xlabel("episode")
@@ -155,7 +206,13 @@ def _plot_group(
         ax.grid(True, alpha=0.25)
         
         # Apply dynamic ylim based on smoothed values for all metrics
-        ylim = _compute_ylim_from_smoothed_conflict(data, metric, window)
+        if plotted:
+            min_val = min(float(np.nanmin(y_mean)) for _, (_, y_mean, _) in plotted.items())
+            max_val = max(float(np.nanmax(y_mean)) for _, (_, y_mean, _) in plotted.items())
+            margin = (max_val - min_val) * 0.1 if max_val != min_val else 0.1
+            ylim = (min_val - margin, max_val + margin)
+        else:
+            ylim = _compute_ylim_from_smoothed_conflict(data, metric, window)
         ax.set_ylim(ylim)
         ax.legend(loc="upper left", fontsize="x-small", framealpha=0.65)
 
@@ -188,6 +245,19 @@ def main() -> int:
         action="store_false",
         help="Disable std band plotting",
     )
+    parser.add_argument(
+        "--mean-runs",
+        dest="mean_runs",
+        action="store_true",
+        default=True,
+        help="Group runs by method and plot mean/std across runs (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-mean-runs",
+        dest="mean_runs",
+        action="store_false",
+        help="Disable run grouping and plot each run separately",
+    )
     args = parser.parse_args()
 
     labels = [s.strip() for s in args.labels.split(",") if s.strip()] if args.labels.strip() else []
@@ -212,6 +282,7 @@ def main() -> int:
         out_dir / "group_conflict_volume_rates.png",
         args.window,
         args.plot_std,
+        args.mean_runs,
     )
     _plot_group(
         data,
@@ -220,6 +291,7 @@ def main() -> int:
         out_dir / "group_conflict_winner_signals.png",
         args.window,
         args.plot_std,
+        args.mean_runs,
     )
     _plot_group(
         data,
@@ -228,6 +300,7 @@ def main() -> int:
         out_dir / "group_conflict_margins.png",
         args.window,
         args.plot_std,
+        args.mean_runs,
     )
     _plot_group(
         data,
@@ -236,6 +309,7 @@ def main() -> int:
         out_dir / "group_conflict_win_probabilities.png",
         args.window,
         args.plot_std,
+        args.mean_runs,
     )
 
     print(f"[OK] Wrote conflict comparison plots to {out_dir}")

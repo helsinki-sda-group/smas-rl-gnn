@@ -262,11 +262,12 @@ conflicts_out_dirname = str(script_cfg.get("conflicts_out_dirname", "conflicts_c
 action_grouped_only = int(bool(cfg.get("action_grouped_only", True)))
 action_plot_std = int(bool(cfg.get("action_plot_std", True)))
 conflicts_plot_std = int(bool(cfg.get("conflicts_plot_std", True)))
-print(f"{action_window}\t{action_out_dirname}\t{conflicts_window}\t{conflicts_out_dirname}\t{action_grouped_only}\t{action_plot_std}\t{conflicts_plot_std}")
+mean_runs = int(bool(cfg.get("mean_runs", True)))
+print(f"{action_window}\t{action_out_dirname}\t{conflicts_window}\t{conflicts_out_dirname}\t{action_grouped_only}\t{action_plot_std}\t{conflicts_plot_std}\t{mean_runs}")
 PY
 )"
 
-IFS=$'\t' read -r ACTION_WINDOW ACTION_OUT_DIRNAME CONFLICTS_WINDOW CONFLICTS_OUT_DIRNAME ACTION_GROUPED_ONLY ACTION_PLOT_STD CONFLICTS_PLOT_STD <<< "$ACTION_PARAMS"
+IFS=$'\t' read -r ACTION_WINDOW ACTION_OUT_DIRNAME CONFLICTS_WINDOW CONFLICTS_OUT_DIRNAME ACTION_GROUPED_ONLY ACTION_PLOT_STD CONFLICTS_PLOT_STD MEAN_RUNS <<< "$ACTION_PARAMS"
 
 echo "[INFO] Generated config: $GENERATED_CONF"
 echo "[INFO] Comparison output dir: $OUTDIR"
@@ -282,10 +283,16 @@ fi
 if [[ "$ACTION_PLOT_STD" != "1" ]]; then
   ACTION_FLAGS="$ACTION_FLAGS --no-plot-std"
 fi
+if [[ "$MEAN_RUNS" != "1" ]]; then
+  ACTION_FLAGS="$ACTION_FLAGS --no-mean-runs"
+fi
 
 CONFLICT_FLAGS=""
 if [[ "$CONFLICTS_PLOT_STD" != "1" ]]; then
   CONFLICT_FLAGS="--no-plot-std"
+fi
+if [[ "$MEAN_RUNS" != "1" ]]; then
+  CONFLICT_FLAGS="$CONFLICT_FLAGS --no-mean-runs"
 fi
 
 "$PYTHON_BIN" "$REPO/plot_action_candidates.py" \

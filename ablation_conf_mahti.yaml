@@ -27,6 +27,9 @@ action_plot_std: true
 # Plot std bands for conflicts comparison using the same smoothing window.
 conflicts_plot_std: true
 
+# Group runs by method name and plot mean/std across runs.
+mean_runs: true
+
 output_dir: ablation_results_mahti
 output_file: ablation_aggregated.log
 output_csv: ablation_aggregated.csv

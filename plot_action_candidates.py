@@ -21,6 +21,7 @@ Examples:
 """
 
 import argparse
+import re
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
 import pandas as pd
@@ -82,6 +83,58 @@ def smooth_std_series(series: pd.Series, window: int) -> pd.Series:
     return series.rolling(window=window, center=True, min_periods=1).std(ddof=0).fillna(0.0)
 
 
+def _method_from_label(label: str) -> str:
+    """Extract method key from '<method>-<run_idx>[...]' labels."""
+    m = re.match(r"^(.*?)-\d+(?:\D.*)?$", label)
+    return m.group(1) if m else label
+
+
+def _aggregate_series_by_method(
+    data_dict: Dict[str, pd.DataFrame],
+    col: str,
+    window: int,
+    mean_runs: bool,
+) -> Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Return label -> (x, mean_curve, std_curve)."""
+    run_series: Dict[str, pd.Series] = {}
+    for label, df in data_dict.items():
+        if col not in df.columns:
+            continue
+        y_raw = df[col].astype(float)
+        y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
+        run_series[label] = pd.Series(y_smooth.values, index=df.index)
+
+    if not run_series:
+        return {}
+
+    if not mean_runs:
+        out: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        for label, s in run_series.items():
+            std_s = smooth_std_series(s.astype(float), window)
+            out[label] = (
+                s.index.to_numpy(dtype=float),
+                s.to_numpy(dtype=float),
+                std_s.to_numpy(dtype=float),
+            )
+        return out
+
+    grouped: Dict[str, List[pd.Series]] = {}
+    for label, s in run_series.items():
+        grouped.setdefault(_method_from_label(label), []).append(s)
+
+    out: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    for method, series_list in grouped.items():
+        wide = pd.concat(series_list, axis=1)
+        mean_s = wide.mean(axis=1, skipna=True)
+        std_s = wide.std(axis=1, ddof=0, skipna=True).fillna(0.0)
+        out[method] = (
+            mean_s.index.to_numpy(dtype=float),
+            mean_s.to_numpy(dtype=float),
+            std_s.to_numpy(dtype=float),
+        )
+    return out
+
+
 def _linestyle_for_label(label: str) -> str:
     """Return matplotlib linestyle based on architecture keywords in the label."""
     lbl = label.lower()
@@ -132,6 +185,7 @@ def plot_single_column(
     window: int,
     out_dir: Path,
     plot_std: bool,
+    mean_runs: bool,
 ) -> None:
     """Plot a single column across multiple runs."""
     # Check if column exists in any dataframe
@@ -141,19 +195,11 @@ def plot_single_column(
 
     plt.figure(figsize=(11, 6))
     
-    for label, df in data_dict.items():
-        if col not in df.columns:
-            continue
-        
-        x = df.index
-        y_raw = df[col].astype(float)
-        y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
-        
-        # Plot smoothed line and optional std band
-        plt.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
+    plotted = _aggregate_series_by_method(data_dict, col, window, mean_runs)
+    for label, (x, y_mean, y_std) in plotted.items():
+        plt.plot(x, y_mean, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
         if plot_std:
-            y_std = smooth_std_series(y_raw, window)
-            plt.fill_between(x, y_smooth - y_std, y_smooth + y_std, alpha=0.12)
+            plt.fill_between(x, y_mean - y_std, y_mean + y_std, alpha=0.12)
     
     plt.xlabel("Episode")
     plt.ylabel(col)
@@ -174,6 +220,7 @@ def plot_multi_column(
     window: int,
     out_dir: Path,
     plot_std: bool,
+    mean_runs: bool,
     title_suffix: str = "",
 ) -> None:
     """Plot multiple columns on same axes (one line per run)."""
@@ -185,17 +232,12 @@ def plot_multi_column(
 
     plt.figure(figsize=(13, 7))
     
-    for label, df in data_dict.items():
-        # For multi-column view, plot one metric per run (e.g., noop)
-        # Show first available column
-        if valid_cols and valid_cols[0] in df.columns:
-            x = df.index
-            y_raw = df[valid_cols[0]].astype(float)
-            y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
-            plt.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
-            if plot_std:
-                y_std = smooth_std_series(y_raw, window)
-                plt.fill_between(x, y_smooth - y_std, y_smooth + y_std, alpha=0.12)
+    target_col = valid_cols[0]
+    plotted = _aggregate_series_by_method(data_dict, target_col, window, mean_runs)
+    for label, (x, y_mean, y_std) in plotted.items():
+        plt.plot(x, y_mean, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
+        if plot_std:
+            plt.fill_between(x, y_mean - y_std, y_mean + y_std, alpha=0.12)
     
     plt.xlabel("Episode")
     plt.ylabel("Value")
@@ -215,6 +257,7 @@ def plot_grouped(
     window: int,
     out_dir: Path,
     plot_std: bool,
+    mean_runs: bool,
 ) -> None:
     """Plot groups of related metrics across multiple runs."""
     groups = {
@@ -235,21 +278,20 @@ def plot_grouped(
             axes = [axes]
         
         for ax, col in zip(axes, valid_cols):
-            for label, df in data_dict.items():
-                if col not in df.columns:
-                    continue
-                
-                x = df.index
-                y_raw = df[col].astype(float)
-                y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
-                
-                ax.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
+            plotted = _aggregate_series_by_method(data_dict, col, window, mean_runs)
+            for label, (x, y_mean, y_std) in plotted.items():
+                ax.plot(x, y_mean, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
                 if plot_std:
-                    y_std = smooth_std_series(y_raw, window)
-                    ax.fill_between(x, y_smooth - y_std, y_smooth + y_std, alpha=0.12)
+                    ax.fill_between(x, y_mean - y_std, y_mean + y_std, alpha=0.12)
             
             # Apply dynamic ylim based on smoothed values
-            ylim = _compute_ylim_from_smoothed(data_dict, col, window)
+            if plotted:
+                min_val = min(float(np.nanmin(y_mean)) for _, (_, y_mean, _) in plotted.items())
+                max_val = max(float(np.nanmax(y_mean)) for _, (_, y_mean, _) in plotted.items())
+                margin = (max_val - min_val) * 0.1 if max_val != min_val else 0.1
+                ylim = (min_val - margin, max_val + margin)
+            else:
+                ylim = _compute_ylim_from_smoothed(data_dict, col, window)
             ax.set_ylim(ylim)
             
             ax.set_xlabel("Episode")
@@ -270,6 +312,7 @@ def plot_outcome_rates_grouped(
     window: int,
     out_dir: Path,
     plot_std: bool,
+    mean_runs: bool,
 ) -> None:
     """Plot cmr/obsr/anpr/pncr in a single grouped figure (2x2 subplots)."""
     valid_cols = [c for c in OUTCOME_RATE_COLS if any(c in df.columns for df in data_dict.values())]
@@ -284,21 +327,20 @@ def plot_outcome_rates_grouped(
 
     for i, col in enumerate(valid_cols):
         ax = axes_arr[i]
-        for label, df in data_dict.items():
-            if col not in df.columns:
-                continue
-
-            x = df.index
-            y_raw = df[col].astype(float)
-            y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
-
-            ax.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
+        plotted = _aggregate_series_by_method(data_dict, col, window, mean_runs)
+        for label, (x, y_mean, y_std) in plotted.items():
+            ax.plot(x, y_mean, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
             if plot_std:
-                y_std = smooth_std_series(y_raw, window)
-                ax.fill_between(x, y_smooth - y_std, y_smooth + y_std, alpha=0.12)
+                ax.fill_between(x, y_mean - y_std, y_mean + y_std, alpha=0.12)
 
         # Apply dynamic ylim based on smoothed values
-        ylim = _compute_ylim_from_smoothed(data_dict, col, window)
+        if plotted:
+            min_val = min(float(np.nanmin(y_mean)) for _, (_, y_mean, _) in plotted.items())
+            max_val = max(float(np.nanmax(y_mean)) for _, (_, y_mean, _) in plotted.items())
+            margin = (max_val - min_val) * 0.1 if max_val != min_val else 0.1
+            ylim = (min_val - margin, max_val + margin)
+        else:
+            ylim = _compute_ylim_from_smoothed(data_dict, col, window)
         ax.set_ylim(ylim)
         
         ax.set_xlabel("Episode")
@@ -373,6 +415,19 @@ Examples (multiple files for comparison):
         action="store_false",
         help="Disable std band plotting",
     )
+    parser.add_argument(
+        "--mean-runs",
+        dest="mean_runs",
+        action="store_true",
+        default=True,
+        help="Group runs by method and plot mean/std across runs (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-mean-runs",
+        dest="mean_runs",
+        action="store_false",
+        help="Disable run grouping and plot each run separately",
+    )
 
     args = parser.parse_args()
     out_dir = Path(args.out)
@@ -438,22 +493,22 @@ Examples (multiple files for comparison):
         # Individual plots
         print("[INFO] Plotting individual columns...")
         for col in ACTION_CANDIDATE_COLS:
-            plot_single_column(data_dict, col, args.window, out_dir, args.plot_std)
+            plot_single_column(data_dict, col, args.window, out_dir, args.plot_std, args.mean_runs)
 
         print("[INFO] Plotting outcome-rate columns...")
         for col in OUTCOME_RATE_COLS:
-            plot_single_column(data_dict, col, args.window, out_dir, args.plot_std)
+            plot_single_column(data_dict, col, args.window, out_dir, args.plot_std, args.mean_runs)
         
         # Combined plot
         print("[INFO] Plotting all action/candidate columns together...")
-        plot_multi_column(data_dict, ACTION_CANDIDATE_COLS, args.window, out_dir, args.plot_std)
+        plot_multi_column(data_dict, ACTION_CANDIDATE_COLS, args.window, out_dir, args.plot_std, args.mean_runs)
     
     # Grouped plots
     print("[INFO] Plotting grouped metrics...")
-    plot_grouped(data_dict, args.window, out_dir, args.plot_std)
+    plot_grouped(data_dict, args.window, out_dir, args.plot_std, args.mean_runs)
 
     print("[INFO] Plotting grouped outcome rates...")
-    plot_outcome_rates_grouped(data_dict, args.window, out_dir, args.plot_std)
+    plot_outcome_rates_grouped(data_dict, args.window, out_dir, args.plot_std, args.mean_runs)
 
     print(f"[OK] All plots saved to {out_dir}")
     return 0
