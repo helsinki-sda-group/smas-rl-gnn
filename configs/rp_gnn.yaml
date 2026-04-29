@@ -1,4 +1,4 @@
-env:
+﻿env:
   sumo_cfg: configs/small_net.sumocfg
   use_gui: false
   R: 6
@@ -70,6 +70,7 @@ logging:
   out_dir: runs
   model_save_dir: runs/rp_gnn_debug/!saved_models
   log_conflict_metrics: true
+  prune_episode_dir_after_metrics: true
 
 continue_training: false
 
@@ -79,3 +80,4 @@ baselines:
 
 sorted: false
 sumoport: 8813
+

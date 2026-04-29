@@ -20,6 +20,7 @@ class RidepoolLogConfig:
     csv_postfix: Optional[str] = None    # postfix for all CSV filenames (e.g., "random1"). If None, no postfix added
     log_conflict_metrics: bool = False    # write run-level conflicts.log with episode summaries
     overwrite_conflicts_log_on_start: bool = False  # if True: delete root conflicts.log at logger init
+    prune_episode_dir_after_metrics: bool = False  # if True: callback removes episode_* dir after appending run-level metrics
 
 class RidepoolLogger:
     """

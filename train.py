@@ -142,6 +142,7 @@ rp_logger = RidepoolLogger(
         console_debug=True,
         log_conflict_metrics=bool(getattr(opt.logging, "log_conflict_metrics", False)),
         overwrite_conflicts_log_on_start=not continue_training,
+        prune_episode_dir_after_metrics=bool(getattr(opt.logging, "prune_episode_dir_after_metrics", False)),
     )
 )
 

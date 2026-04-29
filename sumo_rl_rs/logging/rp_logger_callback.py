@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Optional, Dict, Any, List
 import numpy as np
 import os
+import shutil
 from stable_baselines3.common.callbacks import BaseCallback
 from utils.metrics_calculator import (
     compute_episode_metrics_from_logs,
@@ -230,6 +231,17 @@ class RPLoggerCallback(BaseCallback):
                     ts=getattr(self, 'num_timesteps', 0),
                 )
                 append_logit_metrics_log(self.logit_metrics_log_path, logit_metrics)
+
+            # Optional inode-saving mode for HPC: remove per-episode folder only
+            # after run-level metrics have been appended.
+            if bool(getattr(self.rp_logger.cfg, "prune_episode_dir_after_metrics", False)):
+                episode_dir = getattr(self.rp_logger, "last_ep_dir", None) or self.rp_logger.ep_dir
+                if episode_dir and os.path.isdir(episode_dir):
+                    try:
+                        shutil.rmtree(episode_dir, ignore_errors=True)
+                    except Exception as e:
+                        if self.verbose > 0:
+                            print(f"[WARN] Could not remove episode dir {episode_dir}: {e}")
             self.ep_idx += 1
             self.sum_reward = 0.0
             self.steps_in_ep = 0
