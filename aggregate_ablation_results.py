@@ -349,6 +349,12 @@ def _linestyle_for_label(label: str) -> str:
     return "-"       # solid (2hop and default)
 
 
+def _method_from_label(label: str) -> str:
+    """Extract method key from '<method>-<run_idx>[...]' labels."""
+    m = re.match(r"^(.*?)-\d+(?:\D.*)?$", str(label))
+    return m.group(1) if m else str(label)
+
+
 def _ma(data: np.ndarray, window: int) -> np.ndarray:
     data = np.array(data, dtype=float)
     if data.size == 0:
@@ -536,6 +542,7 @@ def _plot_eval_comparison(
     plot_raw_eval_std: bool,
     plot_ma_std: bool,
     include_training_logs: bool,
+    mean_runs: bool,
 ) -> None:
     modes = {"deterministic", "stochastic"}
     if include_training_logs:
@@ -562,19 +569,50 @@ def _plot_eval_comparison(
     for metric in metrics:
         fig, ax = plt.subplots(figsize=(12, 6), facecolor="#fafafa")
         ax.set_facecolor("#fafafa")
+        series_rows: List[Dict[str, object]] = []
         for row in eval_rows:
             agg = row.get("eval_plot")
             if agg is None or agg.empty:
                 continue
             mean_col = f"{metric}_mean"
             std_col = f"{metric}_std"
-            count_col = f"{metric}_count"
             if mean_col not in agg.columns:
                 continue
-            label = f"{row['model_id']}:{row['eval_mode']}"
-            ts = agg["ts"].values
-            means = agg[mean_col].values
-            std_vals = agg[std_col].values if std_col in agg.columns else None
+            series_rows.append({
+                "model_id": str(row["model_id"]),
+                "eval_mode": str(row["eval_mode"]),
+                "ts": agg["ts"].astype(float).values,
+                "means": agg[mean_col].astype(float).values,
+                "std": agg[std_col].astype(float).values if std_col in agg.columns else None,
+            })
+
+        plotted_series: List[Tuple[str, np.ndarray, np.ndarray, Optional[np.ndarray]]] = []
+        if mean_runs:
+            grouped: Dict[Tuple[str, str], List[pd.Series]] = {}
+            for srow in series_rows:
+                method = _method_from_label(srow["model_id"])
+                key = (method, srow["eval_mode"])
+                grouped.setdefault(key, []).append(pd.Series(srow["means"], index=srow["ts"]))
+
+            for (method, eval_mode), series_list in grouped.items():
+                wide = pd.concat(series_list, axis=1)
+                mean_s = wide.mean(axis=1, skipna=True)
+                std_s = wide.std(axis=1, ddof=0, skipna=True).fillna(0.0)
+                label = f"{method}:{eval_mode}"
+                plotted_series.append(
+                    (
+                        label,
+                        mean_s.index.to_numpy(dtype=float),
+                        mean_s.to_numpy(dtype=float),
+                        std_s.to_numpy(dtype=float),
+                    )
+                )
+        else:
+            for srow in series_rows:
+                label = f"{srow['model_id']}:{srow['eval_mode']}"
+                plotted_series.append((label, srow["ts"], srow["means"], srow["std"]))
+
+        for label, ts, means, std_vals in plotted_series:
             if plot_raw_eval:
                 if plot_raw_eval_std and std_vals is not None:
                     ax.errorbar(
@@ -594,7 +632,10 @@ def _plot_eval_comparison(
                 ma_vals = _ma(means, ma_window)
                 ax.plot(ts, ma_vals, lw=2.5, alpha=0.7, linestyle=_linestyle_for_label(label), label=f"MA(w={ma_window}) {label}")
                 if plot_ma_std:
-                    ma_std = _ma_std(means, ma_window)
+                    if std_vals is not None:
+                        ma_std = _ma(std_vals, ma_window)
+                    else:
+                        ma_std = _ma_std(means, ma_window)
                     ax.fill_between(ts, ma_vals - ma_std, ma_vals + ma_std, alpha=0.15)
 
         ax.set_xlabel("Training Steps", fontsize=11, fontweight="bold")
@@ -726,6 +767,7 @@ def main() -> None:
         plot_raw_eval = bool(conf.get("plot_raw_eval", True))
         plot_raw_eval_std = bool(conf.get("plot_raw_eval_std", True))
         plot_ma_std = bool(conf.get("plot_ma_std", False))
+        mean_runs = bool(conf.get("mean_runs", True))
         _plot_eval_comparison(
             rows,
             output_dir,
@@ -734,6 +776,7 @@ def main() -> None:
             plot_raw_eval_std,
             plot_ma_std,
             include_training_logs=True,
+            mean_runs=mean_runs,
         )
 
     csv_rows = []
