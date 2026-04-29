@@ -56,8 +56,9 @@ def _linestyle_for_label(label: str) -> str:
 
 def _method_from_label(label: str) -> str:
     """Extract method key from '<method>-<run_idx>[...]' labels."""
-    m = re.match(r"^(.*?)-\d+(?:\D.*)?$", label)
-    return m.group(1) if m else label
+    # Remove only run-index tokens like '-1' or '-12' when followed by end or '_'.
+    # Examples: '1hop-1_ctc' -> '1hop_ctc', '1hop-3' -> '1hop'.
+    return re.sub(r"-\d+(?=$|_)", "", label)
 
 
 def _aggregate_series_by_method_conflict(

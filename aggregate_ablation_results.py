@@ -351,8 +351,9 @@ def _linestyle_for_label(label: str) -> str:
 
 def _method_from_label(label: str) -> str:
     """Extract method key from '<method>-<run_idx>[...]' labels."""
-    m = re.match(r"^(.*?)-\d+(?:\D.*)?$", str(label))
-    return m.group(1) if m else str(label)
+    # Remove only run-index tokens like '-1' or '-12' when followed by end or '_'.
+    # Examples: '1hop-1_ctc' -> '1hop_ctc', '1hop-3' -> '1hop'.
+    return re.sub(r"-\d+(?=$|_)", "", str(label))
 
 
 def _ma(data: np.ndarray, window: int) -> np.ndarray:
