@@ -125,7 +125,22 @@ def _plot_group(
         ax.set_xlabel("episode")
         ax.set_ylabel("value")
         ax.grid(True, alpha=0.25)
-        ax.legend(loc="best", fontsize="small")
+        
+        # Set ylim for avg_margin_gap based on data range
+        if metric == "avg_margin_gap":
+            all_values = []
+            for df in data.values():
+                all_values.extend(df[metric].dropna().values)
+            if all_values:
+                min_val = min(all_values)
+                max_val = max(all_values)
+                margin = (max_val - min_val) * 0.1 if max_val != min_val else 0.1
+                ax.set_ylim(min_val - margin, max_val + margin)
+        
+        # Legend with semi-transparency
+        legend = ax.legend(loc="upper left", fontsize="small")
+        if legend:
+            legend.set_alpha(0.7)
 
     for idx in range(n, len(axes_arr)):
         fig.delaxes(axes_arr[idx])

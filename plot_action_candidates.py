@@ -212,7 +212,7 @@ def plot_grouped(
                 y_raw = df[col].astype(float)
                 y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
                 
-                ax.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label, marker='o', markersize=3)
+                ax.plot(x, y_smooth, linewidth=2.5, linestyle=_linestyle_for_label(label), label=label)
             
             ax.set_xlabel("Episode")
             ax.set_ylabel(col)
@@ -311,6 +311,11 @@ Examples (multiple files for comparison):
         default="",
         help="Comma-separated labels for input logs (must match number of logs)",
     )
+    parser.add_argument(
+        "--grouped-only",
+        action="store_true",
+        help="Plot only grouped metrics (skip individual and multi-column plots)",
+    )
 
     args = parser.parse_args()
     out_dir = Path(args.out)
@@ -372,18 +377,19 @@ Examples (multiple files for comparison):
     # Generate plots
     print(f"[INFO] Generating plots (smoothing window={args.window}, {len(data_dict)} run(s))...")
     
-    # Individual plots
-    print("[INFO] Plotting individual columns...")
-    for col in ACTION_CANDIDATE_COLS:
-        plot_single_column(data_dict, col, args.window, out_dir)
+    if not args.grouped_only:
+        # Individual plots
+        print("[INFO] Plotting individual columns...")
+        for col in ACTION_CANDIDATE_COLS:
+            plot_single_column(data_dict, col, args.window, out_dir)
 
-    print("[INFO] Plotting outcome-rate columns...")
-    for col in OUTCOME_RATE_COLS:
-        plot_single_column(data_dict, col, args.window, out_dir)
-    
-    # Combined plot
-    print("[INFO] Plotting all action/candidate columns together...")
-    plot_multi_column(data_dict, ACTION_CANDIDATE_COLS, args.window, out_dir)
+        print("[INFO] Plotting outcome-rate columns...")
+        for col in OUTCOME_RATE_COLS:
+            plot_single_column(data_dict, col, args.window, out_dir)
+        
+        # Combined plot
+        print("[INFO] Plotting all action/candidate columns together...")
+        plot_multi_column(data_dict, ACTION_CANDIDATE_COLS, args.window, out_dir)
     
     # Grouped plots
     print("[INFO] Plotting grouped metrics...")

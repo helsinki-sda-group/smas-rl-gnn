@@ -18,6 +18,9 @@ plot_ma_std: true
 
 k_eval: 50
 
+# Action comparison plot: only plot grouped metrics (skip individual and multi-column plots).
+action_grouped_only: true
+
 output_dir: ablation_results_mahti
 output_file: ablation_aggregated.log
 output_csv: ablation_aggregated.csv

@@ -258,11 +258,12 @@ action_window = int(action_override) if action_override else int(script_cfg.get(
 action_out_dirname = str(script_cfg.get("action_out_dirname", "action_comparison"))
 conflicts_window = int(conflicts_override) if conflicts_override else int(script_cfg.get("conflicts_window", 10))
 conflicts_out_dirname = str(script_cfg.get("conflicts_out_dirname", "conflicts_comparison"))
-print(f"{action_window}\t{action_out_dirname}\t{conflicts_window}\t{conflicts_out_dirname}")
+action_grouped_only = int(bool(cfg.get("action_grouped_only", True)))
+print(f"{action_window}\t{action_out_dirname}\t{conflicts_window}\t{conflicts_out_dirname}\t{action_grouped_only}")
 PY
 )"
 
-IFS=$'\t' read -r ACTION_WINDOW ACTION_OUT_DIRNAME CONFLICTS_WINDOW CONFLICTS_OUT_DIRNAME <<< "$ACTION_PARAMS"
+IFS=$'\t' read -r ACTION_WINDOW ACTION_OUT_DIRNAME CONFLICTS_WINDOW CONFLICTS_OUT_DIRNAME ACTION_GROUPED_ONLY <<< "$ACTION_PARAMS"
 
 echo "[INFO] Generated config: $GENERATED_CONF"
 echo "[INFO] Comparison output dir: $OUTDIR"
@@ -271,10 +272,16 @@ echo "[INFO] Conflicts window: $CONFLICTS_WINDOW"
 
 "$PYTHON_BIN" "$REPO/aggregate_ablation_results.py" --config "$GENERATED_CONF"
 
+ACTION_FLAGS=""
+if [[ "$ACTION_GROUPED_ONLY" == "1" ]]; then
+  ACTION_FLAGS="--grouped-only"
+fi
+
 "$PYTHON_BIN" "$REPO/plot_action_candidates.py" \
   "${SELECTED_METRICS[@]}" \
   --labels "$(IFS=,; echo "${SELECTED_LABELS[*]}")" \
   --window "$ACTION_WINDOW" \
+  $ACTION_FLAGS \
   --out "$OUTDIR/$ACTION_OUT_DIRNAME"
 
 "$PYTHON_BIN" "$REPO/plot_conflicts_comparison.py" \
