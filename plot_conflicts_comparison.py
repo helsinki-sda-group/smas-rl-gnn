@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Dict, List
 from typing import Dict, List, Tuple
 import numpy as np
 
@@ -36,6 +35,12 @@ def _smooth(series: pd.Series, window: int) -> pd.Series:
     if window <= 1:
         return series
     return series.rolling(window=window, center=True, min_periods=1).mean()
+
+
+def _smooth_std(series: pd.Series, window: int) -> pd.Series:
+    if window <= 1:
+        return pd.Series(np.zeros(len(series)), index=series.index, dtype=float)
+    return series.rolling(window=window, center=True, min_periods=1).std(ddof=0).fillna(0.0)
 
 
 def _linestyle_for_label(label: str) -> str:
@@ -125,6 +130,7 @@ def _plot_group(
     title: str,
     out_path: Path,
     window: int,
+    plot_std: bool,
 ) -> None:
     n = len(metrics)
     ncols = 2 if n > 1 else 1
@@ -132,19 +138,16 @@ def _plot_group(
     fig, axes = plt.subplots(nrows, ncols, figsize=(6.5 * ncols, 4.0 * nrows))
     axes_arr = axes.ravel() if hasattr(axes, "ravel") else [axes]
 
-    handles_labels = {}
-
     for idx, metric in enumerate(metrics):
         ax = axes_arr[idx]
         for label, df in data.items():
             x = df["episode"]
             y = df[metric]
             y_smooth = _smooth(y, window)
-            line, = ax.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
-            if label not in handles_labels:
-                handles_labels[label] = line
-            if window > 1:
-                ax.plot(x, y, linewidth=0.6, alpha=0.15, color="gray")
+            ax.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
+            if plot_std:
+                y_std = _smooth_std(y, window)
+                ax.fill_between(x, y_smooth - y_std, y_smooth + y_std, alpha=0.12)
 
         ax.set_title(metric)
         ax.set_xlabel("episode")
@@ -154,15 +157,10 @@ def _plot_group(
         # Apply dynamic ylim based on smoothed values for all metrics
         ylim = _compute_ylim_from_smoothed_conflict(data, metric, window)
         ax.set_ylim(ylim)
+        ax.legend(loc="upper left", fontsize="x-small", framealpha=0.65)
 
     for idx in range(n, len(axes_arr)):
         fig.delaxes(axes_arr[idx])
-    
-    # Create single legend outside plot area with semi-transparency
-    if handles_labels:
-        handles = list(handles_labels.values())
-        labels_list = list(handles_labels.keys())
-        fig.legend(handles, labels_list, loc='upper center', bbox_to_anchor=(0.5, -0.02), ncol=len(handles), fontsize='small', framealpha=0.7)
 
     fig.suptitle(title, fontsize=13)
     fig.tight_layout()
@@ -177,6 +175,19 @@ def main() -> int:
     parser.add_argument("--labels", type=str, default="", help="Comma-separated labels for inputs")
     parser.add_argument("--window", type=int, default=10, help="Moving average window")
     parser.add_argument("--out", type=str, default="conflicts_comparison", help="Output directory")
+    parser.add_argument(
+        "--plot-std",
+        dest="plot_std",
+        action="store_true",
+        default=True,
+        help="Plot std band using the same window as smoothing (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-plot-std",
+        dest="plot_std",
+        action="store_false",
+        help="Disable std band plotting",
+    )
     args = parser.parse_args()
 
     labels = [s.strip() for s in args.labels.split(",") if s.strip()] if args.labels.strip() else []
@@ -200,6 +211,7 @@ def main() -> int:
         "Conflict Volume and Rates",
         out_dir / "group_conflict_volume_rates.png",
         args.window,
+        args.plot_std,
     )
     _plot_group(
         data,
@@ -207,6 +219,7 @@ def main() -> int:
         "Conflict Winner Signals",
         out_dir / "group_conflict_winner_signals.png",
         args.window,
+        args.plot_std,
     )
     _plot_group(
         data,
@@ -214,6 +227,7 @@ def main() -> int:
         "Conflict Margin Statistics",
         out_dir / "group_conflict_margins.png",
         args.window,
+        args.plot_std,
     )
     _plot_group(
         data,
@@ -221,6 +235,7 @@ def main() -> int:
         "Conflict Win Probability Diagnostics",
         out_dir / "group_conflict_win_probabilities.png",
         args.window,
+        args.plot_std,
     )
 
     print(f"[OK] Wrote conflict comparison plots to {out_dir}")

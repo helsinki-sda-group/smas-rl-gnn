@@ -21,6 +21,12 @@ k_eval: 50
 # Action comparison plot: only plot grouped metrics (skip individual and multi-column plots).
 action_grouped_only: true
 
+# Plot std bands for action comparison using the same smoothing window.
+action_plot_std: true
+
+# Plot std bands for conflicts comparison using the same smoothing window.
+conflicts_plot_std: true
+
 output_dir: ablation_results_mahti
 output_file: ablation_aggregated.log
 output_csv: ablation_aggregated.csv

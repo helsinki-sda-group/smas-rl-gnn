@@ -75,6 +75,13 @@ def smooth_series(series: pd.Series, window: int) -> pd.Series:
     return series.rolling(window=window, center=True, min_periods=1).mean()
 
 
+def smooth_std_series(series: pd.Series, window: int) -> pd.Series:
+    """Rolling std using the same window as smoothing."""
+    if window <= 1:
+        return pd.Series(np.zeros(len(series)), index=series.index, dtype=float)
+    return series.rolling(window=window, center=True, min_periods=1).std(ddof=0).fillna(0.0)
+
+
 def _linestyle_for_label(label: str) -> str:
     """Return matplotlib linestyle based on architecture keywords in the label."""
     lbl = label.lower()
@@ -124,6 +131,7 @@ def plot_single_column(
     col: str,
     window: int,
     out_dir: Path,
+    plot_std: bool,
 ) -> None:
     """Plot a single column across multiple runs."""
     # Check if column exists in any dataframe
@@ -141,17 +149,16 @@ def plot_single_column(
         y_raw = df[col].astype(float)
         y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
         
-        # Plot smoothed line
-        plt.plot(x, y_smooth, linewidth=2, linestyle=_linestyle_for_label(label), label=label, marker='o', markersize=4)
-        
-        # Optionally plot raw as transparent background
-        if window > 1:
-            plt.plot(x, y_raw, alpha=0.15, linewidth=0.5, color='gray')
+        # Plot smoothed line and optional std band
+        plt.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
+        if plot_std:
+            y_std = smooth_std_series(y_raw, window)
+            plt.fill_between(x, y_smooth - y_std, y_smooth + y_std, alpha=0.12)
     
     plt.xlabel("Episode")
     plt.ylabel(col)
     plt.title(COL_LABELS.get(col, col))
-    plt.legend(loc='best')
+    plt.legend(loc='best', fontsize='x-small', framealpha=0.65)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     
@@ -166,6 +173,7 @@ def plot_multi_column(
     cols: List[str],
     window: int,
     out_dir: Path,
+    plot_std: bool,
     title_suffix: str = "",
 ) -> None:
     """Plot multiple columns on same axes (one line per run)."""
@@ -184,12 +192,15 @@ def plot_multi_column(
             x = df.index
             y_raw = df[valid_cols[0]].astype(float)
             y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
-            plt.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label, marker='o', markersize=3)
+            plt.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
+            if plot_std:
+                y_std = smooth_std_series(y_raw, window)
+                plt.fill_between(x, y_smooth - y_std, y_smooth + y_std, alpha=0.12)
     
     plt.xlabel("Episode")
     plt.ylabel("Value")
     plt.title(f"Action/Candidate Metrics{title_suffix}")
-    plt.legend(loc='best')
+    plt.legend(loc='best', fontsize='x-small', framealpha=0.65)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     
@@ -203,6 +214,7 @@ def plot_grouped(
     data_dict: Dict[str, pd.DataFrame],
     window: int,
     out_dir: Path,
+    plot_std: bool,
 ) -> None:
     """Plot groups of related metrics across multiple runs."""
     groups = {
@@ -222,7 +234,6 @@ def plot_grouped(
         if n_cols == 1:
             axes = [axes]
         
-        handles_labels = {}
         for ax, col in zip(axes, valid_cols):
             for label, df in data_dict.items():
                 if col not in df.columns:
@@ -232,9 +243,10 @@ def plot_grouped(
                 y_raw = df[col].astype(float)
                 y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
                 
-                line, = ax.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
-                if label not in handles_labels:
-                    handles_labels[label] = line
+                ax.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
+                if plot_std:
+                    y_std = smooth_std_series(y_raw, window)
+                    ax.fill_between(x, y_smooth - y_std, y_smooth + y_std, alpha=0.12)
             
             # Apply dynamic ylim based on smoothed values
             ylim = _compute_ylim_from_smoothed(data_dict, col, window)
@@ -244,12 +256,7 @@ def plot_grouped(
             ax.set_ylabel(col)
             ax.set_title(COL_LABELS.get(col, col))
             ax.grid(True, alpha=0.3)
-        
-        # Create single legend outside plot area
-        if handles_labels:
-            handles = list(handles_labels.values())
-            labels = list(handles_labels.keys())
-            fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, -0.02), ncol=len(handles), fontsize='small', framealpha=0.9)
+            ax.legend(loc='best', fontsize='x-small', framealpha=0.65)
         
         plt.tight_layout()
         out_path = out_dir / f"group_{group_key}.png"
@@ -262,6 +269,7 @@ def plot_outcome_rates_grouped(
     data_dict: Dict[str, pd.DataFrame],
     window: int,
     out_dir: Path,
+    plot_std: bool,
 ) -> None:
     """Plot cmr/obsr/anpr/pncr in a single grouped figure (2x2 subplots)."""
     valid_cols = [c for c in OUTCOME_RATE_COLS if any(c in df.columns for df in data_dict.values())]
@@ -274,7 +282,6 @@ def plot_outcome_rates_grouped(
     fig, axes = plt.subplots(nrows, ncols, figsize=(12, 8) if n > 2 else (6 * n, 4))
     axes_arr = np.atleast_1d(axes).reshape(-1)
 
-    handles_labels = {}
     for i, col in enumerate(valid_cols):
         ax = axes_arr[i]
         for label, df in data_dict.items():
@@ -285,11 +292,10 @@ def plot_outcome_rates_grouped(
             y_raw = df[col].astype(float)
             y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
 
-            line, = ax.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
-            if label not in handles_labels:
-                handles_labels[label] = line
-            if window > 1:
-                ax.plot(x, y_raw, alpha=0.12, linewidth=0.5, color='gray')
+            ax.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
+            if plot_std:
+                y_std = smooth_std_series(y_raw, window)
+                ax.fill_between(x, y_smooth - y_std, y_smooth + y_std, alpha=0.12)
 
         # Apply dynamic ylim based on smoothed values
         ylim = _compute_ylim_from_smoothed(data_dict, col, window)
@@ -299,15 +305,10 @@ def plot_outcome_rates_grouped(
         ax.set_ylabel(col)
         ax.set_title(COL_LABELS.get(col, col))
         ax.grid(True, alpha=0.3)
+        ax.legend(loc='best', fontsize='x-small', framealpha=0.65)
 
     for j in range(n, len(axes_arr)):
         fig.delaxes(axes_arr[j])
-
-    # Create single legend outside plot area
-    if handles_labels:
-        handles = list(handles_labels.values())
-        labels = list(handles_labels.keys())
-        fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, -0.02), ncol=len(handles), fontsize='small', framealpha=0.9)
 
     plt.tight_layout()
     out_path = out_dir / "group_outcome_rates.png"
@@ -358,6 +359,19 @@ Examples (multiple files for comparison):
         "--grouped-only",
         action="store_true",
         help="Plot only grouped metrics (skip individual and multi-column plots)",
+    )
+    parser.add_argument(
+        "--plot-std",
+        dest="plot_std",
+        action="store_true",
+        default=True,
+        help="Plot std band using the same window as smoothing (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-plot-std",
+        dest="plot_std",
+        action="store_false",
+        help="Disable std band plotting",
     )
 
     args = parser.parse_args()
@@ -424,22 +438,22 @@ Examples (multiple files for comparison):
         # Individual plots
         print("[INFO] Plotting individual columns...")
         for col in ACTION_CANDIDATE_COLS:
-            plot_single_column(data_dict, col, args.window, out_dir)
+            plot_single_column(data_dict, col, args.window, out_dir, args.plot_std)
 
         print("[INFO] Plotting outcome-rate columns...")
         for col in OUTCOME_RATE_COLS:
-            plot_single_column(data_dict, col, args.window, out_dir)
+            plot_single_column(data_dict, col, args.window, out_dir, args.plot_std)
         
         # Combined plot
         print("[INFO] Plotting all action/candidate columns together...")
-        plot_multi_column(data_dict, ACTION_CANDIDATE_COLS, args.window, out_dir)
+        plot_multi_column(data_dict, ACTION_CANDIDATE_COLS, args.window, out_dir, args.plot_std)
     
     # Grouped plots
     print("[INFO] Plotting grouped metrics...")
-    plot_grouped(data_dict, args.window, out_dir)
+    plot_grouped(data_dict, args.window, out_dir, args.plot_std)
 
     print("[INFO] Plotting grouped outcome rates...")
-    plot_outcome_rates_grouped(data_dict, args.window, out_dir)
+    plot_outcome_rates_grouped(data_dict, args.window, out_dir, args.plot_std)
 
     print(f"[OK] All plots saved to {out_dir}")
     return 0

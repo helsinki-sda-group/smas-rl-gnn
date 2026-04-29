@@ -254,16 +254,19 @@ cfg.output_dir = f"{outdir}/ablation_results"
 OmegaConf.save(cfg, generated_path)
 
 script_cfg = cfg.get("script") or {}
-action_window = int(action_override) if action_override else int(script_cfg.get("action_window", 10))
+default_window = int(cfg.get("k_eval", 10))
+action_window = int(action_override) if action_override else int(script_cfg.get("action_window", default_window))
 action_out_dirname = str(script_cfg.get("action_out_dirname", "action_comparison"))
-conflicts_window = int(conflicts_override) if conflicts_override else int(script_cfg.get("conflicts_window", 10))
+conflicts_window = int(conflicts_override) if conflicts_override else int(script_cfg.get("conflicts_window", default_window))
 conflicts_out_dirname = str(script_cfg.get("conflicts_out_dirname", "conflicts_comparison"))
 action_grouped_only = int(bool(cfg.get("action_grouped_only", True)))
-print(f"{action_window}\t{action_out_dirname}\t{conflicts_window}\t{conflicts_out_dirname}\t{action_grouped_only}")
+action_plot_std = int(bool(cfg.get("action_plot_std", True)))
+conflicts_plot_std = int(bool(cfg.get("conflicts_plot_std", True)))
+print(f"{action_window}\t{action_out_dirname}\t{conflicts_window}\t{conflicts_out_dirname}\t{action_grouped_only}\t{action_plot_std}\t{conflicts_plot_std}")
 PY
 )"
 
-IFS=$'\t' read -r ACTION_WINDOW ACTION_OUT_DIRNAME CONFLICTS_WINDOW CONFLICTS_OUT_DIRNAME ACTION_GROUPED_ONLY <<< "$ACTION_PARAMS"
+IFS=$'\t' read -r ACTION_WINDOW ACTION_OUT_DIRNAME CONFLICTS_WINDOW CONFLICTS_OUT_DIRNAME ACTION_GROUPED_ONLY ACTION_PLOT_STD CONFLICTS_PLOT_STD <<< "$ACTION_PARAMS"
 
 echo "[INFO] Generated config: $GENERATED_CONF"
 echo "[INFO] Comparison output dir: $OUTDIR"
@@ -275,6 +278,14 @@ echo "[INFO] Conflicts window: $CONFLICTS_WINDOW"
 ACTION_FLAGS=""
 if [[ "$ACTION_GROUPED_ONLY" == "1" ]]; then
   ACTION_FLAGS="--grouped-only"
+fi
+if [[ "$ACTION_PLOT_STD" != "1" ]]; then
+  ACTION_FLAGS="$ACTION_FLAGS --no-plot-std"
+fi
+
+CONFLICT_FLAGS=""
+if [[ "$CONFLICTS_PLOT_STD" != "1" ]]; then
+  CONFLICT_FLAGS="--no-plot-std"
 fi
 
 "$PYTHON_BIN" "$REPO/plot_action_candidates.py" \
@@ -288,6 +299,7 @@ fi
   "${SELECTED_CONFLICTS[@]}" \
   --labels "$(IFS=,; echo "${SELECTED_LABELS[*]}")" \
   --window "$CONFLICTS_WINDOW" \
+  $CONFLICT_FLAGS \
   --out "$OUTDIR/$CONFLICTS_OUT_DIRNAME"
 
 echo "[OK] Ablation comparison written to: $OUTDIR"
