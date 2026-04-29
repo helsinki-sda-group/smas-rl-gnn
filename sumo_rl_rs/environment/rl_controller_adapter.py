@@ -651,6 +651,7 @@ class RLControllerAdapter:
         chosen: List[Optional[str]], # list of reservation IDs selected by each taxi ["r4", "r1", "r4"]
         tasks_list: List[Task],
         selection_margins: Optional[Dict[str, float]] = None,
+        selection_raw_logits: Optional[Dict[str, float]] = None,
     ) -> tuple[List[Optional[str]], Dict[str, str]]:
         """
         For each reservation chosen by multiple taxis, keep exactly one winner.
@@ -728,6 +729,17 @@ class RLControllerAdapter:
                 margin_winners = []
                 margin_map = {}
 
+            raw_logit_pairs = [
+                (rid, float(selection_raw_logits[rid]))
+                for rid in rids
+                if selection_raw_logits is not None and rid in selection_raw_logits and np.isfinite(selection_raw_logits[rid])
+            ]
+            if raw_logit_pairs:
+                max_raw_logit = max(v for _, v in raw_logit_pairs)
+                raw_logit_winners = [rid for rid, v in raw_logit_pairs if v >= max_raw_logit - 1e-6]
+            else:
+                raw_logit_winners = []
+
             mode = self.conflict_resolution
             if mode == "logit_diff":
                 if len(margin_pairs) == len(rids):
@@ -772,6 +784,8 @@ class RLControllerAdapter:
                         winner=winner_rid,
                         pickup_winners=pickup_winners,
                         margin_winners=margin_winners,
+                        raw_logit_winners=raw_logit_winners,
+                        policy_action_robot=(sorted(raw_logit_winners)[0] if raw_logit_winners else None),
                         winner_margin=winner_margin,
                         loser_margins=loser_margins,
                     )
@@ -841,6 +855,7 @@ class RLControllerAdapter:
                        assignments: Sequence[Optional[Union[int, str]]],
                        allow_redispatch: bool = True,
                        selection_margins: Optional[Dict[str, float]] = None,
+                       selection_raw_logits: Optional[Dict[str, float]] = None,
                        ) -> Dict[str, Any]:
         """
         Apply assignments (aligned with self.get_robots() order), then advance SUMO one step.
@@ -922,6 +937,7 @@ class RLControllerAdapter:
                 chosen,
                 tasks,
                 selection_margins=selection_margins,
+                selection_raw_logits=selection_raw_logits,
             )
 
             if self.logger:

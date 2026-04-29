@@ -74,6 +74,10 @@ class RidepoolLogger:
             "conflicts_total": 0.0,
             "winner_pickup": 0.0,
             "winner_margin": 0.0,
+            "winner_raw_logit": 0.0,
+            "margin_matches_pickup": 0.0,
+            "raw_logit_matches_pickup": 0.0,
+            "policy_action_matches_resolver": 0.0,
             "resolver_override": 0.0,
             "margin_win_sum": 0.0,
             "margin_win_count": 0.0,
@@ -90,6 +94,10 @@ class RidepoolLogger:
         conflicts_total = float(self._conflict_stats["conflicts_total"])
         winner_pickup = float(self._conflict_stats["winner_pickup"])
         winner_margin = float(self._conflict_stats["winner_margin"])
+        winner_raw_logit = float(self._conflict_stats["winner_raw_logit"])
+        margin_matches_pickup = float(self._conflict_stats["margin_matches_pickup"])
+        raw_logit_matches_pickup = float(self._conflict_stats["raw_logit_matches_pickup"])
+        policy_action_matches_resolver = float(self._conflict_stats["policy_action_matches_resolver"])
         resolver_override = float(self._conflict_stats["resolver_override"])
 
         margin_win_count = float(self._conflict_stats["margin_win_count"])
@@ -98,8 +106,12 @@ class RidepoolLogger:
 
         conflict_ratio = (conflicts_total / tasks_total) if tasks_total > 0 else 0.0
         resolver_override_rate = (resolver_override / conflicts_total) if conflicts_total > 0 else 0.0
-        p_win_given_ego_action = (winner_pickup / conflicts_total) if conflicts_total > 0 else 0.0
-        p_win_given_high_logit = (winner_margin / conflicts_total) if conflicts_total > 0 else 0.0
+        p_resolver_matches_pickup = (winner_pickup / conflicts_total) if conflicts_total > 0 else 0.0
+        p_resolver_matches_margin = (winner_margin / conflicts_total) if conflicts_total > 0 else 0.0
+        p_resolver_matches_raw_logit = (winner_raw_logit / conflicts_total) if conflicts_total > 0 else 0.0
+        p_margin_matches_pickup = (margin_matches_pickup / conflicts_total) if conflicts_total > 0 else 0.0
+        p_raw_logit_matches_pickup = (raw_logit_matches_pickup / conflicts_total) if conflicts_total > 0 else 0.0
+        p_policy_action_matches_resolver = (policy_action_matches_resolver / conflicts_total) if conflicts_total > 0 else 0.0
         avg_margin_win = (self._conflict_stats["margin_win_sum"] / margin_win_count) if margin_win_count > 0 else 0.0
         avg_margin_lose = (self._conflict_stats["margin_lose_sum"] / margin_lose_count) if margin_lose_count > 0 else 0.0
         avg_margin_gap = (self._conflict_stats["margin_gap_sum"] / margin_gap_count) if margin_gap_count > 0 else 0.0
@@ -115,8 +127,12 @@ class RidepoolLogger:
                     "conflict_ratio",
                     "winner_pickup",
                     "winner_margin",
-                    "p_win_given_ego_action",
-                    "p_win_given_high_logit",
+                    "p_resolver_matches_pickup",
+                    "p_resolver_matches_margin",
+                    "p_resolver_matches_raw_logit",
+                    "p_margin_matches_pickup",
+                    "p_raw_logit_matches_pickup",
+                    "p_policy_action_matches_resolver",
                     "resolver_override",
                     "resolver_override_rate",
                     "avg_margin_win",
@@ -130,8 +146,12 @@ class RidepoolLogger:
                 f"{conflict_ratio:.2f}",
                 f"{winner_pickup:.2f}",
                 f"{winner_margin:.2f}",
-                f"{p_win_given_ego_action:.4f}",
-                f"{p_win_given_high_logit:.4f}",
+                f"{p_resolver_matches_pickup:.4f}",
+                f"{p_resolver_matches_margin:.4f}",
+                f"{p_resolver_matches_raw_logit:.4f}",
+                f"{p_margin_matches_pickup:.4f}",
+                f"{p_raw_logit_matches_pickup:.4f}",
+                f"{p_policy_action_matches_resolver:.4f}",
                 f"{resolver_override:.2f}",
                 f"{resolver_override_rate:.2f}",
                 f"{avg_margin_win:.2f}",
@@ -239,6 +259,8 @@ class RidepoolLogger:
         winner: str,
         pickup_winners: Sequence[str],
         margin_winners: Sequence[str],
+        raw_logit_winners: Sequence[str],
+        policy_action_robot: Optional[str],
         winner_margin: Optional[float],
         loser_margins: Sequence[float],
     ) -> None:
@@ -248,6 +270,8 @@ class RidepoolLogger:
         winner = str(winner)
         pickup_set = {str(x) for x in pickup_winners}
         margin_set = {str(x) for x in margin_winners}
+        raw_logit_set = {str(x) for x in raw_logit_winners}
+        policy_action_robot = str(policy_action_robot) if policy_action_robot is not None else None
 
         self._conflict_stats["conflicts_total"] += 1.0
 
@@ -255,6 +279,15 @@ class RidepoolLogger:
             self._conflict_stats["winner_pickup"] += 1.0
         if winner in margin_set:
             self._conflict_stats["winner_margin"] += 1.0
+        if winner in raw_logit_set:
+            self._conflict_stats["winner_raw_logit"] += 1.0
+
+        if pickup_set and margin_set and (pickup_set & margin_set):
+            self._conflict_stats["margin_matches_pickup"] += 1.0
+        if pickup_set and raw_logit_set and (pickup_set & raw_logit_set):
+            self._conflict_stats["raw_logit_matches_pickup"] += 1.0
+        if policy_action_robot is not None and winner == policy_action_robot:
+            self._conflict_stats["policy_action_matches_resolver"] += 1.0
 
         if pickup_set and margin_set:
             pickup_ref = sorted(pickup_set)[0]

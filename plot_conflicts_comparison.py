@@ -150,18 +150,48 @@ def _load_conflict_logs(paths: List[str], labels: List[str]) -> Dict[str, pd.Dat
         for col in REQUIRED_COLS:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        # Backward-compatible fallback for older conflicts logs.
-        if "p_win_given_ego_action" not in df.columns:
-            denom = df["conflicts_total"].replace(0, pd.NA)
-            df["p_win_given_ego_action"] = (df["winner_pickup"] / denom).fillna(0.0)
-        else:
-            df["p_win_given_ego_action"] = pd.to_numeric(df["p_win_given_ego_action"], errors="coerce").fillna(0.0)
+        denom = df["conflicts_total"].replace(0, pd.NA)
 
-        if "p_win_given_high_logit" not in df.columns:
-            denom = df["conflicts_total"].replace(0, pd.NA)
-            df["p_win_given_high_logit"] = (df["winner_margin"] / denom).fillna(0.0)
+        # Canonical metrics for current logs.
+        if "p_resolver_matches_pickup" not in df.columns:
+            if "p_win_given_ego_action" in df.columns:
+                df["p_resolver_matches_pickup"] = pd.to_numeric(df["p_win_given_ego_action"], errors="coerce").fillna(0.0)
+            else:
+                df["p_resolver_matches_pickup"] = (df["winner_pickup"] / denom).fillna(0.0)
         else:
-            df["p_win_given_high_logit"] = pd.to_numeric(df["p_win_given_high_logit"], errors="coerce").fillna(0.0)
+            df["p_resolver_matches_pickup"] = pd.to_numeric(df["p_resolver_matches_pickup"], errors="coerce").fillna(0.0)
+
+        if "p_resolver_matches_margin" not in df.columns:
+            if "p_win_given_high_logit" in df.columns:
+                df["p_resolver_matches_margin"] = pd.to_numeric(df["p_win_given_high_logit"], errors="coerce").fillna(0.0)
+            else:
+                df["p_resolver_matches_margin"] = (df["winner_margin"] / denom).fillna(0.0)
+        else:
+            df["p_resolver_matches_margin"] = pd.to_numeric(df["p_resolver_matches_margin"], errors="coerce").fillna(0.0)
+
+        if "p_resolver_matches_raw_logit" not in df.columns:
+            df["p_resolver_matches_raw_logit"] = 0.0
+        else:
+            df["p_resolver_matches_raw_logit"] = pd.to_numeric(df["p_resolver_matches_raw_logit"], errors="coerce").fillna(0.0)
+
+        if "p_margin_matches_pickup" not in df.columns:
+            df["p_margin_matches_pickup"] = 0.0
+        else:
+            df["p_margin_matches_pickup"] = pd.to_numeric(df["p_margin_matches_pickup"], errors="coerce").fillna(0.0)
+
+        if "p_raw_logit_matches_pickup" not in df.columns:
+            df["p_raw_logit_matches_pickup"] = 0.0
+        else:
+            df["p_raw_logit_matches_pickup"] = pd.to_numeric(df["p_raw_logit_matches_pickup"], errors="coerce").fillna(0.0)
+
+        if "p_policy_action_matches_resolver" not in df.columns:
+            df["p_policy_action_matches_resolver"] = 0.0
+        else:
+            df["p_policy_action_matches_resolver"] = pd.to_numeric(df["p_policy_action_matches_resolver"], errors="coerce").fillna(0.0)
+
+        # Aliases for old plotting flows.
+        df["p_win_given_ego_action"] = df["p_resolver_matches_pickup"]
+        df["p_win_given_high_logit"] = df["p_resolver_matches_margin"]
 
         df = df.dropna(subset=["episode"]).sort_values("episode").reset_index(drop=True)
         if df.empty:
@@ -305,7 +335,14 @@ def main() -> int:
     )
     _plot_group(
         data,
-        ["p_win_given_ego_action", "p_win_given_high_logit"],
+        [
+            "p_resolver_matches_pickup",
+            "p_resolver_matches_margin",
+            "p_resolver_matches_raw_logit",
+            "p_margin_matches_pickup",
+            "p_raw_logit_matches_pickup",
+            "p_policy_action_matches_resolver",
+        ],
         "Conflict Win Probability Diagnostics",
         out_dir / "group_conflict_win_probabilities.png",
         args.window,

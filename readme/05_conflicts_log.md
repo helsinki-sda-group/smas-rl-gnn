@@ -16,7 +16,7 @@ A row is written at episode end by `RidepoolLogger._append_conflicts_summary(...
 ## Header
 
 ```text
-episode,conflicts_total,tasks_total,conflict_ratio,winner_pickup,winner_margin,p_win_given_ego_action,p_win_given_high_logit,resolver_override,resolver_override_rate,avg_margin_win,avg_margin_lose,avg_margin_gap
+episode,conflicts_total,tasks_total,conflict_ratio,winner_pickup,winner_margin,p_resolver_matches_pickup,p_resolver_matches_margin,p_resolver_matches_raw_logit,p_margin_matches_pickup,p_raw_logit_matches_pickup,p_policy_action_matches_resolver,resolver_override,resolver_override_rate,avg_margin_win,avg_margin_lose,avg_margin_gap
 ```
 
 ## How counters are accumulated
@@ -37,6 +37,10 @@ Let:
 - $C = \text{conflicts\_total}$
 - $C_{wp} = \text{winner\_pickup}$
 - $C_{wm} = \text{winner\_margin}$
+- $C_{wr} = \text{winner\_raw\_logit}$
+- $C_{mp} = \text{margin\_matches\_pickup}$
+- $C_{rp} = \text{raw\_logit\_matches\_pickup}$
+- $C_{pr} = \text{policy\_action\_matches\_resolver}$
 - $C_{ovr} = \text{resolver\_override}$
 
 | Column | Meaning | Formula / rule |
@@ -47,8 +51,12 @@ Let:
 | `conflict_ratio` | Share of tasks that were conflicting. | $C/T$ if $T>0$, else $0$. |
 | `winner_pickup` | Count of conflicts where final winner is in pickup-distance winner set. | Increment if selected winner belongs to `pickup_winners`. |
 | `winner_margin` | Count of conflicts where final winner is in margin winner set. | Increment if selected winner belongs to `margin_winners`. |
-| `p_win_given_ego_action` | Probability that resolver winner is pickup-distance winner (episode-level). | $\text{winner\_pickup}/C$ if $C>0$, else $0$. |
-| `p_win_given_high_logit` | Probability that resolver winner is high-margin winner (episode-level). | $\text{winner\_margin}/C$ if $C>0$, else $0$. |
+| `p_resolver_matches_pickup` | Probability that resolver winner matches pickup winner. | $C_{wp}/C$ if $C>0$, else $0$. |
+| `p_resolver_matches_margin` | Probability that resolver winner matches margin winner. | $C_{wm}/C$ if $C>0$, else $0$. |
+| `p_resolver_matches_raw_logit` | Probability that resolver winner matches raw-logit winner. | $C_{wr}/C$ if $C>0$, else $0$. |
+| `p_margin_matches_pickup` | Probability that margin winner and pickup winner agree. | $C_{mp}/C$ if $C>0$, else $0$. |
+| `p_raw_logit_matches_pickup` | Probability that raw-logit winner and pickup winner agree. | $C_{rp}/C$ if $C>0$, else $0$. |
+| `p_policy_action_matches_resolver` | Probability that policy action robot matches resolver winner. | $C_{pr}/C$ if $C>0$, else $0$. |
 | `resolver_override` | Count of conflicts where pickup and margin recommendations disagree. | If both winner sets are non-empty and first sorted element differs, increment by 1. |
 | `resolver_override_rate` | Override rate among conflicts. | $C_{ovr}/C$ if $C>0$, else $0$. |
 | `avg_margin_win` | Mean winner margin over events with valid margin. | $\sum m_{win}/N_{win}$. |
@@ -57,20 +65,24 @@ Let:
 
 ## New per-conflict diagnostics
 
-Per-event labels are now also written to each episode-level `conflicts.csv` row:
+Per-event labels are also written to each episode-level `conflicts.csv` row:
 
 - `win_label`: 1 if the final resolver winner is in `pickup_winners`, else 0.
 - `win_label_high_logit`: 1 if the final resolver winner is in `margin_winners`, else 0.
 
 Interpretation:
 
-- `win_label` is the per-conflict version of the episode metric `P(win|ego_action)`.
-- `win_label_high_logit` is the per-conflict version of `P(win|high_logit)`.
+- `win_label` is the per-conflict version of `p_resolver_matches_pickup`.
+- `win_label_high_logit` is the per-conflict version of `p_resolver_matches_margin`.
+
+Raw-logit winner is computed among conflict claimants using selected-task raw logits.
+Policy action robot is currently the deterministic representative of raw-logit winners (first sorted ID).
 
 ## Important nuances
 
 - `winner_pickup` and `winner_margin` are **counts**, not rates.
 - `winner_margin` can equal `conflicts_total` when margin-based winner set always includes final winner.
+- `p_policy_action_matches_resolver` can track closely with `p_resolver_matches_raw_logit` because policy action robot is derived from raw-logit winners.
 - `resolver_override` is computed from representative set members, not from all tied winners.
 - CSV values are written with two decimals (`:.2f`) in the logger.
 
@@ -92,8 +104,12 @@ That per-episode file has row-level fields:
 - `conflict_ratio`
 - `winner_pickup`
 - `winner_margin`
-- `p_win_given_ego_action` (or computed fallback from `winner_pickup/conflicts_total`)
-- `p_win_given_high_logit` (or computed fallback from `winner_margin/conflicts_total`)
+- `p_resolver_matches_pickup` (or fallback from old `p_win_given_ego_action` / counts)
+- `p_resolver_matches_margin` (or fallback from old `p_win_given_high_logit` / counts)
+- `p_resolver_matches_raw_logit` (fallback 0 for old logs)
+- `p_margin_matches_pickup` (fallback 0 for old logs)
+- `p_raw_logit_matches_pickup` (fallback 0 for old logs)
+- `p_policy_action_matches_resolver` (fallback 0 for old logs)
 - `resolver_override`
 - `resolver_override_rate`
 - `avg_margin_win`

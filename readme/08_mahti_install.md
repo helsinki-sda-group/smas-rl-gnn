@@ -48,6 +48,10 @@ make install
 rsync -a /scratch/project_2012159/kbocheni/sumo-local/ /projappl/project_2012159/kbocheni_temp/sumo-local/
 rsync -a /scratch/project_2012159/kbocheni/xerces-local/ /projappl/project_2012159/kbocheni_temp/xerces-local/
 ~~~
+- Optionally: delete SUMO source files (250K files, can influence file quota)
+~~~bash
+rm -rf /scratch/project_2012159/kbocheni/sumo
+~~~
 - Setting environment variables
 ~~~bash
 export SUMO_HOME=/projappl/project_2012159/kbocheni_temp/sumo-local
@@ -347,11 +351,12 @@ action_comparison/
 ~~~
 - Long example to keep:
 ~~~bash
-/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop-2 1hop-3 2hop-1 2hop-5 1hop_critic-1 1hop_critic-2 1hop_critic-3 1hop_critic-4 1hop_critic-5 --job-ids 6580443,6580444,6580449,6580457,6581536,6581537,6581538,6581539,6581540
 
-/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop-2 1hop-3 2hop-1 2hop-5
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop 1hop_critic 2hop
 
-/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop-1 1hop-2 1hop-3 1hop-4 1hop-5 2hop-1 2hop-2 2hop-3 2hop-4 2hop-5
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop_ctc 1hop_critic_ctc 2hop_ctc
+
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop_rnd 1hop_critic_rnd 2hop_rnd
 ~~~
 
 ## Github notes

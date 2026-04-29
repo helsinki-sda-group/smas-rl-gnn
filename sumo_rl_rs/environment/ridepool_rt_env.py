@@ -231,6 +231,40 @@ class RidepoolRTEnv(gym.Env):
 
         return margins
 
+    def _selected_task_raw_logits(self, action: np.ndarray) -> Dict[str, float]:
+        """Raw selected-task logits per robot, keyed by taxi id (string)."""
+        out: Dict[str, float] = {}
+        if not hasattr(self, "_last_policy_step"):
+            return out
+
+        ps = self._last_policy_step
+        if ps is None or ps.logits is None or ps.mask is None:
+            return out
+
+        logits = np.asarray(ps.logits)
+        mask = np.asarray(ps.mask)
+        if logits.ndim != 2 or mask.ndim != 2 or logits.shape != mask.shape:
+            return out
+
+        robots = self.controller.get_robots()
+        R = min(len(robots), logits.shape[0], len(action))
+        if R <= 0:
+            return out
+
+        mask_k = mask[:R]
+        logits_k = logits[:R]
+
+        for r in range(R):
+            rid = robots[r]
+            chosen_slot = int(action[r])
+            if chosen_slot < 0 or chosen_slot >= logits_k.shape[1]:
+                continue
+            if not bool(mask_k[r, chosen_slot]):
+                continue
+            out[str(rid)] = float(logits_k[r, chosen_slot])
+
+        return out
+
 
     def step(self, action):
         """
@@ -261,10 +295,12 @@ class RidepoolRTEnv(gym.Env):
         # (1) apply chosen assignments now
         assignments = self._decode(action)
         selected_task_margins = self._selected_task_margins(action)
+        selected_task_raw_logits = self._selected_task_raw_logits(action)
         step_out = self.controller.apply_and_step(
             assignments,
             allow_redispatch=True,
             selection_margins=selected_task_margins,
+            selection_raw_logits=selected_task_raw_logits,
         )  # controller aligns with its robot order
          # Expect dict like {"per_robot": {...}, "sum_reward": float, "terms": {...}}
         total_reward += float(step_out.get("sum_reward", 0.0))
