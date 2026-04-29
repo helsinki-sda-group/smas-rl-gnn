@@ -270,6 +270,30 @@ python "$REPO/train.py" --config "$REPO/$CFG" --sumoport "$PORT"
 
 **Note**: it is recommended to submit the task with `job_name` the same as `run_name`. In this case, outputs in `slurm` and `jobs` folder will be named consistently.
 
+#### Batch submission of all 45 configs
+
+To submit all method variants at once (1hop, 1hop_rnd, 1hop_ctc, 1hop_1hop_critic, 1hop_1hop_critic_rnd, 1hop_1hop_critic_ctc, 2hop, 2hop_rnd, 2hop_ctc):
+
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+
+# Preview which configs will be submitted
+bash slurm/slurm_submit.sh 1hop 1hop_rnd 1hop_ctc 1hop_1hop_critic 1hop_1hop_critic_rnd 1hop_1hop_critic_ctc 2hop 2hop_rnd 2hop_ctc --dry-run
+
+# Submit all 45 jobs (5 base × 3 method families × 3 variants/base)
+bash slurm/slurm_submit.sh 1hop 1hop_rnd 1hop_ctc 1hop_1hop_critic 1hop_1hop_critic_rnd 1hop_1hop_critic_ctc 2hop 2hop_rnd 2hop_ctc
+
+# Monitor progress
+squeue -u kbocheni
+~~~
+
+The script automatically:
+- Maps method names to config files (e.g., `1hop_rnd` → all `rp_gnn_1hop-*_rnd.yaml`)
+- Extracts `run_name` from each config for consistent job naming
+- Submits via `sbatch` with appropriate `--job-name`
+
+See [slurm/README.md](../slurm/README.md) for more pattern examples.
+
 #### Train
 ~~~bash
 cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
