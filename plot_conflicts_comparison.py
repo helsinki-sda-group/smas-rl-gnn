@@ -36,6 +36,16 @@ def _smooth(series: pd.Series, window: int) -> pd.Series:
     return series.rolling(window=window, center=True, min_periods=1).mean()
 
 
+def _linestyle_for_label(label: str) -> str:
+    """Return matplotlib linestyle based on architecture keywords in the label."""
+    lbl = label.lower()
+    if "1hop_critic" in lbl:
+        return "--"  # dashed
+    if "1hop" in lbl:
+        return ":"   # dotted
+    return "-"       # solid (2hop and default)
+
+
 def _load_conflict_logs(paths: List[str], labels: List[str]) -> Dict[str, pd.DataFrame]:
     out: Dict[str, pd.DataFrame] = {}
     for i, path_str in enumerate(paths):
@@ -107,7 +117,7 @@ def _plot_group(
             x = df["episode"]
             y = df[metric]
             y_smooth = _smooth(y, window)
-            ax.plot(x, y_smooth, linewidth=1.8, label=label)
+            ax.plot(x, y_smooth, linewidth=1.8, linestyle=_linestyle_for_label(label), label=label)
             if window > 1:
                 ax.plot(x, y, linewidth=0.6, alpha=0.15, color="gray")
 

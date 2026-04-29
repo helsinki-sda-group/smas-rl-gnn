@@ -339,6 +339,16 @@ def _aggregate_by_ts_with_count(df: pd.DataFrame, metrics: List[str]) -> pd.Data
     return agg
 
 
+def _linestyle_for_label(label: str) -> str:
+    """Return matplotlib linestyle based on architecture keywords in the label."""
+    lbl = label.lower()
+    if "1hop_critic" in lbl:
+        return "--"  # dashed
+    if "1hop" in lbl:
+        return ":"   # dotted
+    return "-"       # solid (2hop and default)
+
+
 def _ma(data: np.ndarray, window: int) -> np.ndarray:
     data = np.array(data, dtype=float)
     if data.size == 0:
@@ -578,11 +588,11 @@ def _plot_eval_comparison(
                         label=label,
                     )
                 else:
-                    ax.plot(ts, means, linewidth=1.8, label=label)
+                    ax.plot(ts, means, linewidth=1.8, linestyle=_linestyle_for_label(label), label=label)
 
             if len(means) > 1 and ma_window > 1:
                 ma_vals = _ma(means, ma_window)
-                ax.plot(ts, ma_vals, lw=2.5, alpha=0.7, label=f"MA(w={ma_window}) {label}")
+                ax.plot(ts, ma_vals, lw=2.5, alpha=0.7, linestyle=_linestyle_for_label(label), label=f"MA(w={ma_window}) {label}")
                 if plot_ma_std:
                     ma_std = _ma_std(means, ma_window)
                     ax.fill_between(ts, ma_vals - ma_std, ma_vals + ma_std, alpha=0.15)

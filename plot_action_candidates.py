@@ -75,6 +75,16 @@ def smooth_series(series: pd.Series, window: int) -> pd.Series:
     return series.rolling(window=window, center=True, min_periods=1).mean()
 
 
+def _linestyle_for_label(label: str) -> str:
+    """Return matplotlib linestyle based on architecture keywords in the label."""
+    lbl = label.lower()
+    if "1hop_critic" in lbl:
+        return "--"  # dashed
+    if "1hop" in lbl:
+        return ":"   # dotted
+    return "-"       # solid (2hop and default)
+
+
 def load_log(log_path: Path, label: Optional[str] = None) -> Tuple[pd.DataFrame, str]:
     """Load a metrics log file and return dataframe + label."""
     if not log_path.exists():
@@ -113,7 +123,7 @@ def plot_single_column(
         y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
         
         # Plot smoothed line
-        plt.plot(x, y_smooth, linewidth=2, label=label, marker='o', markersize=4)
+        plt.plot(x, y_smooth, linewidth=2, linestyle=_linestyle_for_label(label), label=label, marker='o', markersize=4)
         
         # Optionally plot raw as transparent background
         if window > 1:
@@ -155,7 +165,7 @@ def plot_multi_column(
             x = df.index
             y_raw = df[valid_cols[0]].astype(float)
             y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
-            plt.plot(x, y_smooth, linewidth=1.5, label=label, marker='o', markersize=3)
+            plt.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label, marker='o', markersize=3)
     
     plt.xlabel("Episode")
     plt.ylabel("Value")
@@ -202,7 +212,7 @@ def plot_grouped(
                 y_raw = df[col].astype(float)
                 y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
                 
-                ax.plot(x, y_smooth, linewidth=1.5, label=label, marker='o', markersize=3)
+                ax.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label, marker='o', markersize=3)
             
             ax.set_xlabel("Episode")
             ax.set_ylabel(col)
@@ -243,7 +253,7 @@ def plot_outcome_rates_grouped(
             y_raw = df[col].astype(float)
             y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
 
-            ax.plot(x, y_smooth, linewidth=1.8, label=label, marker='o', markersize=3)
+            ax.plot(x, y_smooth, linewidth=1.8, linestyle=_linestyle_for_label(label), label=label, marker='o', markersize=3)
             if window > 1:
                 ax.plot(x, y_raw, alpha=0.12, linewidth=0.5, color='gray')
 
