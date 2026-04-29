@@ -75,12 +75,12 @@ function Match-MethodToConfigs {
         }
     } else {
         # No variant (e.g., "2hop" -> match only base configs without variant suffix)
+        # Pattern matches -1.yaml, -2.yaml, etc. but NOT -1_rnd.yaml or -1_ctc.yaml
         $base = $Method
-        $pattern = "rp_gnn_${base}-[0-9]*.yaml"
+        $pattern = "rp_gnn_${base}-[0-9].yaml"
         
         foreach ($yaml in $allYamls) {
-            # Include only if it matches pattern AND doesn't have underscore (variant suffix)
-            if ($yaml.Name -like $pattern -and $yaml.Name -notmatch '_[a-z]+\.yaml$') {
+            if ($yaml.Name -like $pattern) {
                 $matched += $yaml
             }
         }

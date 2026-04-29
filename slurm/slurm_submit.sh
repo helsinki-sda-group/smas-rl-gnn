@@ -69,10 +69,11 @@ find_configs_for_method() {
     pattern="rp_gnn_${base}-[0-9]*_${variant}.yaml"
     find "$CONFIG_DIR" -maxdepth 1 -name "$pattern" -type f | sort
   else
-    # Method is just base (e.g., "2hop" -> match only base configs without variant suffix)
+    # No variant (e.g., "2hop" or "1hop_1hop_critic" -> match only base configs)
+    # Pattern matches -1.yaml, -2.yaml, etc. but NOT -1_rnd.yaml or -1_ctc.yaml
     local base="$method"
-    pattern="rp_gnn_${base}-[0-9]*.yaml"
-    find "$CONFIG_DIR" -maxdepth 1 -name "$pattern" -type f ! -name "*_*.yaml" | sort
+    pattern="rp_gnn_${base}-[0-9].yaml"
+    find "$CONFIG_DIR" -maxdepth 1 -name "$pattern" -type f | sort
   fi
 }
 
