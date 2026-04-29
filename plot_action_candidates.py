@@ -85,6 +85,25 @@ def _linestyle_for_label(label: str) -> str:
     return "-"       # solid (2hop and default)
 
 
+def _compute_ylim_from_smoothed(data_dict: Dict[str, pd.DataFrame], col: str, window: int) -> Tuple[float, float]:
+    """Compute ylim based on min/max of smoothed values across all runs."""
+    all_smooth = []
+    for df in data_dict.values():
+        if col not in df.columns:
+            continue
+        y_raw = df[col].astype(float)
+        y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
+        all_smooth.extend(y_smooth.dropna().values)
+    
+    if not all_smooth:
+        return (0, 1)
+    
+    min_val = float(np.nanmin(all_smooth))
+    max_val = float(np.nanmax(all_smooth))
+    margin = (max_val - min_val) * 0.1 if max_val != min_val else 0.1
+    return (min_val - margin, max_val + margin)
+
+
 def load_log(log_path: Path, label: Optional[str] = None) -> Tuple[pd.DataFrame, str]:
     """Load a metrics log file and return dataframe + label."""
     if not log_path.exists():
@@ -203,6 +222,7 @@ def plot_grouped(
         if n_cols == 1:
             axes = [axes]
         
+        handles_labels = {}
         for ax, col in zip(axes, valid_cols):
             for label, df in data_dict.items():
                 if col not in df.columns:
@@ -212,13 +232,24 @@ def plot_grouped(
                 y_raw = df[col].astype(float)
                 y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
                 
-                ax.plot(x, y_smooth, linewidth=2.5, linestyle=_linestyle_for_label(label), label=label)
+                line, = ax.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
+                if label not in handles_labels:
+                    handles_labels[label] = line
+            
+            # Apply dynamic ylim based on smoothed values
+            ylim = _compute_ylim_from_smoothed(data_dict, col, window)
+            ax.set_ylim(ylim)
             
             ax.set_xlabel("Episode")
             ax.set_ylabel(col)
             ax.set_title(COL_LABELS.get(col, col))
-            ax.legend(loc='best', fontsize='small')
             ax.grid(True, alpha=0.3)
+        
+        # Create single legend outside plot area
+        if handles_labels:
+            handles = list(handles_labels.values())
+            labels = list(handles_labels.keys())
+            fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, -0.02), ncol=len(handles), fontsize='small', framealpha=0.9)
         
         plt.tight_layout()
         out_path = out_dir / f"group_{group_key}.png"
@@ -243,6 +274,7 @@ def plot_outcome_rates_grouped(
     fig, axes = plt.subplots(nrows, ncols, figsize=(12, 8) if n > 2 else (6 * n, 4))
     axes_arr = np.atleast_1d(axes).reshape(-1)
 
+    handles_labels = {}
     for i, col in enumerate(valid_cols):
         ax = axes_arr[i]
         for label, df in data_dict.items():
@@ -253,18 +285,29 @@ def plot_outcome_rates_grouped(
             y_raw = df[col].astype(float)
             y_smooth = smooth_series(y_raw, window) if window > 1 else y_raw
 
-            ax.plot(x, y_smooth, linewidth=1.8, linestyle=_linestyle_for_label(label), label=label, marker='o', markersize=3)
+            line, = ax.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
+            if label not in handles_labels:
+                handles_labels[label] = line
             if window > 1:
                 ax.plot(x, y_raw, alpha=0.12, linewidth=0.5, color='gray')
 
+        # Apply dynamic ylim based on smoothed values
+        ylim = _compute_ylim_from_smoothed(data_dict, col, window)
+        ax.set_ylim(ylim)
+        
         ax.set_xlabel("Episode")
         ax.set_ylabel(col)
         ax.set_title(COL_LABELS.get(col, col))
         ax.grid(True, alpha=0.3)
-        ax.legend(loc='best', fontsize='small')
 
     for j in range(n, len(axes_arr)):
         fig.delaxes(axes_arr[j])
+
+    # Create single legend outside plot area
+    if handles_labels:
+        handles = list(handles_labels.values())
+        labels = list(handles_labels.keys())
+        fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, -0.02), ncol=len(handles), fontsize='small', framealpha=0.9)
 
     plt.tight_layout()
     out_path = out_dir / "group_outcome_rates.png"

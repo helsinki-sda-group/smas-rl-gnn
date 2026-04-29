@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from typing import Dict, List
+from typing import Dict, List, Tuple
+import numpy as np
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -44,6 +46,25 @@ def _linestyle_for_label(label: str) -> str:
     if "1hop" in lbl:
         return ":"   # dotted
     return "-"       # solid (2hop and default)
+
+
+def _compute_ylim_from_smoothed_conflict(data: Dict[str, pd.DataFrame], metric: str, window: int) -> Tuple[float, float]:
+    """Compute ylim based on min/max of smoothed values across all runs."""
+    all_smooth = []
+    for df in data.values():
+        if metric not in df.columns:
+            continue
+        y = df[metric]
+        y_smooth = _smooth(y, window)
+        all_smooth.extend(y_smooth.dropna().values)
+    
+    if not all_smooth:
+        return (0, 1)
+    
+    min_val = float(np.nanmin(all_smooth))
+    max_val = float(np.nanmax(all_smooth))
+    margin = (max_val - min_val) * 0.1 if max_val != min_val else 0.1
+    return (min_val - margin, max_val + margin)
 
 
 def _load_conflict_logs(paths: List[str], labels: List[str]) -> Dict[str, pd.DataFrame]:
@@ -111,13 +132,17 @@ def _plot_group(
     fig, axes = plt.subplots(nrows, ncols, figsize=(6.5 * ncols, 4.0 * nrows))
     axes_arr = axes.ravel() if hasattr(axes, "ravel") else [axes]
 
+    handles_labels = {}
+
     for idx, metric in enumerate(metrics):
         ax = axes_arr[idx]
         for label, df in data.items():
             x = df["episode"]
             y = df[metric]
             y_smooth = _smooth(y, window)
-            ax.plot(x, y_smooth, linewidth=1.8, linestyle=_linestyle_for_label(label), label=label)
+            line, = ax.plot(x, y_smooth, linewidth=1.5, linestyle=_linestyle_for_label(label), label=label)
+            if label not in handles_labels:
+                handles_labels[label] = line
             if window > 1:
                 ax.plot(x, y, linewidth=0.6, alpha=0.15, color="gray")
 
@@ -126,24 +151,18 @@ def _plot_group(
         ax.set_ylabel("value")
         ax.grid(True, alpha=0.25)
         
-        # Set ylim for avg_margin_gap based on data range
-        if metric == "avg_margin_gap":
-            all_values = []
-            for df in data.values():
-                all_values.extend(df[metric].dropna().values)
-            if all_values:
-                min_val = min(all_values)
-                max_val = max(all_values)
-                margin = (max_val - min_val) * 0.1 if max_val != min_val else 0.1
-                ax.set_ylim(min_val - margin, max_val + margin)
-        
-        # Legend with semi-transparency
-        legend = ax.legend(loc="upper left", fontsize="small")
-        if legend:
-            legend.set_alpha(0.7)
+        # Apply dynamic ylim based on smoothed values for all metrics
+        ylim = _compute_ylim_from_smoothed_conflict(data, metric, window)
+        ax.set_ylim(ylim)
 
     for idx in range(n, len(axes_arr)):
         fig.delaxes(axes_arr[idx])
+    
+    # Create single legend outside plot area with semi-transparency
+    if handles_labels:
+        handles = list(handles_labels.values())
+        labels_list = list(handles_labels.keys())
+        fig.legend(handles, labels_list, loc='upper center', bbox_to_anchor=(0.5, -0.02), ncol=len(handles), fontsize='small', framealpha=0.7)
 
     fig.suptitle(title, fontsize=13)
     fig.tight_layout()
