@@ -62,7 +62,7 @@ find_configs_for_method() {
   #   "1hop_1hop_critic" -> base="1hop_1hop_critic" -> match "rp_gnn_1hop_1hop_critic-[0-9]*.yaml" (base only)
   #   "1hop_1hop_critic_rnd" -> base="1hop_1hop_critic", variant="rnd" -> match "rp_gnn_1hop_1hop_critic-*_rnd.yaml"
 
-  if [[ "$method" =~ ^(.+)_([a-z]+)$ ]]; then
+  if [[ "$method" =~ ^(.+)_(rnd|ctc)$ ]]; then
     # Method has variant suffix (e.g., "1hop_rnd" -> base="1hop", variant="rnd")
     local base="${BASH_REMATCH[1]}"
     local variant="${BASH_REMATCH[2]}"

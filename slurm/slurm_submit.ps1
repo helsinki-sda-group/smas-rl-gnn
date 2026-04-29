@@ -62,7 +62,7 @@ function Match-MethodToConfigs {
     $matched = @()
     
     # Parse method pattern
-    if ($Method -match '^(.+)_([a-z]+)$') {
+    if ($Method -match '^(.+)_(rnd|ctc)$') {
         # Has variant (e.g., "1hop_rnd" -> base="1hop", variant="rnd")
         $base = $Matches[1]
         $variant = $Matches[2]
