@@ -174,9 +174,10 @@ for d in "$JOBS_ROOT"/job_*_*; do
   [[ "$id" =~ ^[0-9]+$ ]] || continue
   run_name="${b#job_}"
   run_name="${run_name%_"$id"}"
+  method_key="$(echo "$run_name" | sed -E 's/-[0-9]+(_|$)/\1/g')"
 
   for method in "${METHODS[@]}"; do
-    if [[ "$run_name" != *"${method}-"* ]]; then
+    if [[ "$method_key" != "$method" ]]; then
       continue
     fi
 
@@ -245,8 +246,12 @@ for method in "${METHODS[@]}"; do
     SELECTED_IDS+=("$job_id")
 
     if [[ ${#LABELS[@]} -gt 0 ]]; then
-      run_suffix="${run_name#*${method}}"
-      SELECTED_LABELS+=("${method_label_base}${run_suffix}")
+      run_idx="$(echo "$run_name" | sed -nE 's/^.*-([0-9]+).*/\1/p')"
+      if [[ -n "$run_idx" ]]; then
+        SELECTED_LABELS+=("${method_label_base}-${run_idx}")
+      else
+        SELECTED_LABELS+=("${method_label_base}")
+      fi
     else
       SELECTED_LABELS+=("$run_name")
     fi
