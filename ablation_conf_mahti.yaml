@@ -24,7 +24,7 @@ output_csv: ablation_aggregated.csv
 
 # Optional settings used by scripts/plot_ablation_runs.sh
 script:
-  action_window: 10
+  action_window: 100
   action_out_dirname: action_comparison
-  conflicts_window: 10
+  conflicts_window: 100
   conflicts_out_dirname: conflicts_comparison
