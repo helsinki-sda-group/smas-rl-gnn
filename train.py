@@ -79,7 +79,9 @@ TWO_HOP_CRITIC = bool(getattr(opt.env, "two_hop_critic", False))
 TWO_HOP_ARCH = str(getattr(opt.env, "two_hop_arch", "comp_corr")).strip().lower()
 if TWO_HOP_ARCH == "arch-3.2":
     TWO_HOP_ARCH = "comp_corr"
-assert TWO_HOP_ARCH in {"plain", "comp_corr"}, "env.two_hop_arch must be one of: plain, comp_corr, arch-3.2"
+assert TWO_HOP_ARCH in {"plain", "comp_corr", "comp_corr_maxpool"}, (
+    "env.two_hop_arch must be one of: plain, comp_corr, comp_corr_maxpool, arch-3.2"
+)
 
 VICINITY_M = float(opt.env.vicinity_m)
 MAX_STEPS = int(opt.env.max_steps)
@@ -203,9 +205,10 @@ gnn_layers = int(getattr(opt.ppo.policy_kwargs, "gnn_layers", 2))
 gnn_layers_two_hop = int(getattr(opt.ppo.policy_kwargs, "gnn_layers_two_hop", gnn_layers))
 chosen_layers = gnn_layers_two_hop if TWO_HOP_ENABLED else gnn_layers
 
-use_competitor_fusion = bool(TWO_HOP_ENABLED and TWO_HOP_ARCH == "comp_corr")
+use_competitor_fusion = bool(TWO_HOP_ENABLED and TWO_HOP_ARCH in {"comp_corr", "comp_corr_maxpool"})
 use_two_hop_actor = bool(TWO_HOP_ENABLED and TWO_HOP_ARCH == "plain")
 use_two_hop_critic = bool(TWO_HOP_ENABLED and TWO_HOP_CRITIC)
+comp_fusion_mode = "maxpool" if TWO_HOP_ARCH == "comp_corr_maxpool" else "attn"
 
 policy_kwargs = dict(
     in_dim=F,
@@ -216,6 +219,7 @@ policy_kwargs = dict(
     freeze_noop_logit=bool(getattr(opt.ppo.policy_kwargs, "freeze_noop_logit", False)),
     edge_dim=edge_feat_dim,
     use_competitor_fusion=use_competitor_fusion,
+    comp_fusion_mode=comp_fusion_mode,
     use_two_hop_actor=use_two_hop_actor,
     use_two_hop_critic=use_two_hop_critic,
     eta_index=(edge_features.index("eta") if "eta" in edge_features else -1),
