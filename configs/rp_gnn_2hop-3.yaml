@@ -1,4 +1,4 @@
-﻿env:
+env:
   sumo_cfg: /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/configs/small_net.sumocfg
   use_gui: false
   R: 6
@@ -71,6 +71,10 @@ logging:
   model_save_dir: /scratch/project_2012159/kbocheni/smas-rl-gnn/runs/2hop-3/!saved_models
   log_conflict_metrics: true
   prune_episode_dir_after_metrics: true
+  extended_quality_metrics: false
+  extended_quality_plots: false
+  extended_quality_include_task_level: false
+  extended_quality_include_decision_level: false
 
 continue_training: false
 

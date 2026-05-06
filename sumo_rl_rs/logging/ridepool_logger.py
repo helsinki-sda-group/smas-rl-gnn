@@ -21,6 +21,11 @@ class RidepoolLogConfig:
     log_conflict_metrics: bool = False    # write run-level conflicts.log with episode summaries
     overwrite_conflicts_log_on_start: bool = False  # if True: delete root conflicts.log at logger init
     prune_episode_dir_after_metrics: bool = False  # if True: callback removes episode_* dir after appending run-level metrics
+    # Extended quality diagnostics (Section 3 of quality_episode_metrics spec)
+    extended_quality_metrics: bool = False           # compute and persist episode-level quality metrics
+    extended_quality_plots: bool = False             # generate quality metric plots (used by callback/plotter)
+    extended_quality_include_task_level: bool = False    # write per-task rows to task_quality_events.csv
+    extended_quality_include_decision_level: bool = False  # write per-decision rows to decision_quality_events.csv
 
 class RidepoolLogger:
     """
@@ -224,6 +229,15 @@ class RidepoolLogger:
             "actual_waiting_time", "actual_travel_time"
         ])
         self._open_csv(self._get_csv_filename("taxi_events"), ["step", "taxi", "event_type", "task_id"])
+
+        # Extended quality diagnostics: open additional per-episode CSVs when enabled
+        if bool(getattr(self.cfg, "extended_quality_metrics", False)):
+            self._open_csv(self._get_csv_filename("robot_occupancy"), [
+                "time", "robot_id", "onboard_count", "customer_ids", "shadow_plan_length"
+            ])
+            self._open_csv(self._get_csv_filename("decisions"), [
+                "time", "robot_id", "selected_task_id", "num_candidates", "is_noop"
+            ])
         # reset timeseries
         for k in self._ts:
             self._ts[k].clear()
@@ -578,6 +592,50 @@ class RidepoolLogger:
             event_type=str(event_type),
             task_id=str(task_id)
         ))
+
+    def log_robot_occupancy(
+        self,
+        t: float,
+        robot_id: str,
+        onboard_count: int,
+        customer_ids: str,
+        shadow_plan_length: int,
+    ) -> None:
+        """Log per-robot per-step occupancy. Written only when extended_quality_metrics=True."""
+        fname = self._get_csv_filename("robot_occupancy")
+        self._ensure_csv(fname, ["time", "robot_id", "onboard_count", "customer_ids", "shadow_plan_length"])
+        self._write(fname, dict(
+            time=float(t),
+            robot_id=str(robot_id),
+            onboard_count=int(onboard_count),
+            customer_ids=str(customer_ids),
+            shadow_plan_length=int(shadow_plan_length),
+        ))
+
+    def log_decision(
+        self,
+        t: float,
+        robot_id: str,
+        selected_task_id: str,
+        num_candidates: int,
+        is_noop: bool,
+    ) -> None:
+        """Log per-robot decision (before conflict resolution). Written only when extended_quality_metrics=True."""
+        fname = self._get_csv_filename("decisions")
+        self._ensure_csv(fname, ["time", "robot_id", "selected_task_id", "num_candidates", "is_noop"])
+        self._write(fname, dict(
+            time=float(t),
+            robot_id=str(robot_id),
+            selected_task_id=str(selected_task_id),
+            num_candidates=int(num_candidates),
+            is_noop=int(bool(is_noop)),
+        ))
+
+    def get_episode_conflict_stats(self) -> dict:
+        """Return a copy of the current episode's conflict stats.
+        Must be called BEFORE start_episode() resets them.
+        """
+        return dict(self._conflict_stats)
 
     # ---------- plotting ----------
     def _plot_ts(self, png_name: str, series: List[tuple], ylabel: str = ""):

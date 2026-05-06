@@ -20,7 +20,8 @@ from utils.logit_metrics_logger import (
 class RPLoggerCallback(BaseCallback):
     def __init__(self, rp_logger, controller, verbose: int = 0, metrics_log_path: str | None = None,
                  num_robots: int | None = None, seed: int = 0, reset_fn = None, save_model_dir: str | None = None,
-                 logit_metrics_log_path: str | None = None, continue_training: bool = False):
+                 logit_metrics_log_path: str | None = None, continue_training: bool = False,
+                 config_id: str = ""):
         super().__init__(verbose)
         self.rp_logger = rp_logger                # RidepoolLogger
         self.controller = controller              # RLControllerAdapter
@@ -31,6 +32,7 @@ class RPLoggerCallback(BaseCallback):
         self.reset_fn = reset_fn  # Optional: RotatingSeedResetFn for dynamic seeds
         self.save_model_dir = save_model_dir      # Directory to save models after each rollout
         self.continue_training = continue_training
+        self.config_id = config_id
         self.ep_idx = 0
         self.sum_reward = 0.0
         self.steps_in_ep = 0
@@ -231,6 +233,35 @@ class RPLoggerCallback(BaseCallback):
                     ts=getattr(self, 'num_timesteps', 0),
                 )
                 append_logit_metrics_log(self.logit_metrics_log_path, logit_metrics)
+
+            # Extended quality diagnostics — must run BEFORE pruning episode dir
+            if bool(getattr(self.rp_logger.cfg, "extended_quality_metrics", False)):
+                try:
+                    from utils.quality_episode_metrics import compute_quality_episode_metrics
+                    from utils.quality_episode_writer import QualityEpisodeWriter
+                    _episode_dir = getattr(self.rp_logger, "last_ep_dir", None) or self.rp_logger.ep_dir
+                    _ep_context = self.controller.get_episode_quality_context()
+                    _cf_stats = self.rp_logger.get_episode_conflict_stats()
+                    _config_id = getattr(self, "config_id", "") or str(getattr(self.rp_logger.cfg, "run_name", "") or "")
+                    _run_id = str(getattr(self.rp_logger.cfg, "run_name", "") or "")
+                    _include_task = bool(getattr(self.rp_logger.cfg, "extended_quality_include_task_level", False))
+                    _include_dec = bool(getattr(self.rp_logger.cfg, "extended_quality_include_decision_level", False))
+                    _flat_row, _task_evts, _dec_evts = compute_quality_episode_metrics(
+                        episode_dir=_episode_dir,
+                        context=_ep_context,
+                        conflict_stats=_cf_stats,
+                        config_id=_config_id,
+                        run_id=_run_id,
+                        ts=getattr(self, "num_timesteps", 0),
+                        episode=self.ep_idx,
+                        include_task_level=_include_task,
+                        include_decision_level=_include_dec,
+                    )
+                    _writer = QualityEpisodeWriter(self.rp_logger.run_dir)
+                    _writer.append_episode(_flat_row, _task_evts, _dec_evts)
+                except Exception as _qe:
+                    if self.verbose > 0:
+                        print(f"[WARN] quality_episode_metrics failed: {_qe}")
 
             # Optional inode-saving mode for HPC: remove per-episode folder only
             # after run-level metrics have been appended.

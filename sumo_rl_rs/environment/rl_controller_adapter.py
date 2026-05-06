@@ -169,7 +169,88 @@ class RLControllerAdapter:
             "travel": float(reward_params.get("travel_cap", 90.0)),
         }
         self._terminal_penalties_applied = False
-    
+
+        # Per-episode reward subcomponent accumulators (cleared in reset())
+        # Tracks event/obsolete/terminal breakdown separately from rewards.csv.
+        self._rew_accum: Dict[str, Any] = self._make_rew_accum()
+
+    @staticmethod
+    def _make_rew_accum() -> Dict[str, Any]:
+        """Return a fresh reward-subcomponent accumulator dict."""
+        return {
+            # completion events
+            "completion_event_sum": 0.0,
+            "completion_event_count": 0,
+            # wait: event (at pickup)
+            "wait_event_pickup_sum": 0.0,
+            "wait_event_pickup_count": 0,
+            # wait: obsolete (task timed out before pickup)
+            "wait_obsolete_pickup_sum": 0.0,
+            "wait_obsolete_pickup_count": 0,
+            # wait: obsolete dropoff side (currently zero – future use)
+            "wait_obsolete_dropoff_sum": 0.0,
+            "wait_obsolete_dropoff_count": 0,
+            # wait: terminal never-picked
+            "wait_terminal_never_picked_sum": 0.0,
+            "wait_terminal_never_picked_count": 0,
+            # wait: unattributed / shared-owner fallback
+            "wait_unattributed_sum": 0.0,
+            # travel: event (at dropoff)
+            "travel_event_dropoff_sum": 0.0,
+            "travel_event_dropoff_count": 0,
+            # travel: terminal picked-not-dropped
+            "travel_terminal_picked_not_dropped_sum": 0.0,
+            "travel_terminal_picked_not_dropped_count": 0,
+            # travel: obsolete (currently zero – future use)
+            "travel_obsolete_pickup_sum": 0.0,
+            "travel_obsolete_pickup_count": 0,
+            "travel_obsolete_dropoff_sum": 0.0,
+            "travel_obsolete_dropoff_count": 0,
+            # deadline: at pickup lateness
+            "deadline_pickup_lateness_sum": 0.0,
+            "deadline_pickup_lateness_count": 0,
+            # deadline: at dropoff lateness
+            "deadline_dropoff_lateness_sum": 0.0,
+            "deadline_dropoff_lateness_count": 0,
+            # deadline: obsolete pickup
+            "deadline_obsolete_pickup_sum": 0.0,
+            "deadline_obsolete_pickup_count": 0,
+            # deadline: obsolete dropoff (currently zero – future use)
+            "deadline_obsolete_dropoff_sum": 0.0,
+            "deadline_obsolete_dropoff_count": 0,
+            # obsolete generic (= pickup-side obsolete in current impl)
+            "obsolete_total_sum": 0.0,
+            "obsolete_total_count": 0,
+            # terminal totals
+            "terminal_wait_sum": 0.0,
+            "terminal_wait_count": 0,
+            "terminal_travel_sum": 0.0,
+            "terminal_travel_count": 0,
+            "terminal_total_sum": 0.0,
+            "terminal_total_count": 0,
+        }
+
+    def get_episode_quality_context(self) -> Dict[str, Any]:
+        """Return a snapshot of episode-level quality data for the quality metrics calculator.
+
+        Called by the callback AFTER end_episode() and BEFORE the next reset().
+        """
+        return {
+            "rew_accum": dict(self._rew_accum),
+            "reward_type": self.reward_type,
+            "completion_mode": self.completion_mode,
+            "wait_cap": self.reward_caps.get("wait", 600.0),
+            "travel_cap": self.reward_caps.get("travel", 90.0),
+            "deadline_cap": self.reward_caps.get("deadline", 600.0),
+            "max_wait_delay_s": self.max_wait_delay_s,
+            "max_travel_delay_s": self.max_travel_delay_s,
+            "max_robot_capacity": self.max_robot_capacity,
+            "num_robots": len(self._last_robot_ids) if self._last_robot_ids else 0,
+            "w_comp": self.reward_weights.get("comp", 1.0),
+            "w_wait": self.reward_weights.get("wait", 1.5),
+            "w_deadline": self.reward_weights.get("deadline", 10.0),
+            "w_travel": self.reward_weights.get("travel", 2.0),
+        }
 
     # ---------------- Public API ----------------
 
@@ -415,6 +496,7 @@ class RLControllerAdapter:
         self._res_owner_by_res.clear()
         self._prev_obsolete.clear()
         self._terminal_penalties_applied = False
+        self._rew_accum = self._make_rew_accum()
 
 
 
@@ -914,6 +996,18 @@ class RLControllerAdapter:
                     "chosen_res_ids": chosen,  # None or reservation ids per robot
                 })
 
+            # --- log per-robot decisions (before conflict resolution) ---
+            if self.logger and bool(getattr(self.logger.cfg, "extended_quality_metrics", False)):
+                _tnow_dec = self._now()
+                _cand_lists_dec = getattr(self, "_last_cand_lists", None) or []
+                for _ridx, _rid in enumerate(robots):
+                    _sel = chosen[_ridx] if _ridx < len(chosen) else None
+                    _ncands = len(_cand_lists_dec[_ridx]) if _ridx < len(_cand_lists_dec) else 0
+                    try:
+                        self.logger.log_decision(_tnow_dec, _rid, _sel or "", _ncands, _sel is None)
+                    except Exception:
+                        pass
+
             valid = set(str(t.id) for t in tasks)
             invalid = [c for c in chosen if c is not None and str(c) not in valid]
 
@@ -1112,6 +1206,22 @@ class RLControllerAdapter:
             self.logger.log_ts_reward(total, pickups, dropoffs)
             idle, enr, occ, pocc = self._fleet_state_counts()
             self.logger.log_fleet_counts(tnow, idle, enr, occ, pocc)
+
+            # --- log per-robot occupancy (for quality metrics) ---
+            if bool(getattr(self.logger.cfg, "extended_quality_metrics", False)):
+                try:
+                    _res_idx = self._reservation_index()
+                    _p2r = self._person_to_res_index(_res_idx)
+                    for _rid in robots:
+                        _cust = self._current_reservation_ids_onboard(_rid, _p2r)
+                        _picked = [_r for _r in _cust if self._is_picked(_res_idx.get(_r))]
+                        _shadow_len = len(self._shadow_plan_by_robot.get(_rid, []))
+                        self.logger.log_robot_occupancy(
+                            tnow, _rid, len(_picked),
+                            "|".join(_picked), _shadow_len
+                        )
+                except Exception:
+                    pass
 
             # accumulate totals for episode_totals.csv
             self._cum_sum_reward += total
@@ -1345,7 +1455,12 @@ class RLControllerAdapter:
             for res_id in picked_up_ids_by_robot[rid]:
                 t0 = float(self._res_created_time.get(res_id, now))
                 wait_s = max(0.0, now - t0)
-                w += -min(wait_s, WAIT_CAP)/WAIT_CAP
+                event_pen = -min(wait_s, WAIT_CAP)/WAIT_CAP
+                w += event_pen
+                # --- accumulate wait event subcomponent ---
+                W_WAIT_acc = float(self.reward_weights.get("wait", 1.5))
+                self._rew_accum["wait_event_pickup_sum"] += event_pen * W_WAIT_acc
+                self._rew_accum["wait_event_pickup_count"] += 1
             wait_penalty_by_robot[rid] = w
 
         # missed deadline: single component, counts pickup & dropoff tardiness
@@ -1356,6 +1471,7 @@ class RLControllerAdapter:
         travel_penalty_by_robot: Dict[str, float] = {rid: 0.0 for rid in robots}
 
         if self.reward_type == "deadline":
+            W_DEADLINE_acc = float(self.reward_weights.get("deadline", 10.0))
             for rid in robots:
                 d = 0.0
 
@@ -1367,7 +1483,11 @@ class RLControllerAdapter:
                     pd = info.get("pickup_deadline", None)
                     if pd is not None:
                         late = max(0.0, now - pd)
-                        d += -min(late, DEADLINE_CAP) / DEADLINE_CAP
+                        pen = -min(late, DEADLINE_CAP) / DEADLINE_CAP
+                        d += pen
+                        # --- accumulate deadline pickup-lateness subcomponent ---
+                        self._rew_accum["deadline_pickup_lateness_sum"] += pen * W_DEADLINE_acc
+                        self._rew_accum["deadline_pickup_lateness_count"] += 1
 
                 # dropoff deadline violations (measured at actual dropoff moment)
                 for res_id in dropped_off_ids_by_robot[rid]:
@@ -1377,11 +1497,16 @@ class RLControllerAdapter:
                     dd = info.get("dropoff_deadline", None)
                     if dd is not None:
                         late = max(0.0, now - dd)
-                        d += -min(late, DEADLINE_CAP) / DEADLINE_CAP
+                        pen = -min(late, DEADLINE_CAP) / DEADLINE_CAP
+                        d += pen
+                        # --- accumulate deadline dropoff-lateness subcomponent ---
+                        self._rew_accum["deadline_dropoff_lateness_sum"] += pen * W_DEADLINE_acc
+                        self._rew_accum["deadline_dropoff_lateness_count"] += 1
 
                 deadline_penalty_by_robot[rid] = d
 
         if self.reward_type == "wait_travel":
+            W_TRAVEL_acc = float(self.reward_weights.get("travel", 2.0))
             for rid in robots:
                 t = 0.0
                 for res_id in dropped_off_ids_by_robot[rid]:
@@ -1397,7 +1522,11 @@ class RLControllerAdapter:
                     if est <= 0.0:
                         continue
                     over = max(0.0, actual - est)
-                    t += -min(over, TRAVEL_CAP) / TRAVEL_CAP
+                    pen = -min(over, TRAVEL_CAP) / TRAVEL_CAP
+                    t += pen
+                    # --- accumulate travel event dropoff subcomponent ---
+                    self._rew_accum["travel_event_dropoff_sum"] += pen * W_TRAVEL_acc
+                    self._rew_accum["travel_event_dropoff_count"] += 1
                 travel_penalty_by_robot[rid] = t
 
 
@@ -1433,6 +1562,13 @@ class RLControllerAdapter:
             for rid in robots:
                 completion_by_robot[rid] = float(len(dropped_off_ids_by_robot[rid]))
 
+        # --- accumulate completion subcomponents ---
+        W_COMP_acc = float(self.reward_weights.get("comp", 1.0))
+        for rid in robots:
+            cnt = int(round(completion_by_robot[rid]))
+            self._rew_accum["completion_event_count"] += cnt
+            self._rew_accum["completion_event_sum"] += cnt * W_COMP_acc
+
         cur_obsolete = {res_id for res_id, info in self._task_lifecycle.items() if info.get("was_obsolete", False)}
         newly_obsolete = cur_obsolete - self._prev_obsolete
         self._prev_obsolete = cur_obsolete
@@ -1440,6 +1576,7 @@ class RLControllerAdapter:
         # OPTIONAL: penalize tasks that became obsolete without pickup
         # This makes the deadline signal *much* stronger and avoids "avoid pickup to avoid penalty".
         if self.reward_type == "deadline" and newly_obsolete:
+            W_DEADLINE_obs = float(self.reward_weights.get("deadline", 10.0))
             for res_id in newly_obsolete:
                 info = self._task_lifecycle.get(res_id)
                 if not info:
@@ -1450,17 +1587,25 @@ class RLControllerAdapter:
                 late = max(1.0, now - float(pd))
                 p = -max(0.05, min(late, DEADLINE_CAP) / DEADLINE_CAP)  # negative
 
+                # --- accumulate obsolete deadline subcomponent ---
+                self._rew_accum["deadline_obsolete_pickup_sum"] += p * W_DEADLINE_obs
+                self._rew_accum["deadline_obsolete_pickup_count"] += 1
+                self._rew_accum["obsolete_total_sum"] += p * W_DEADLINE_obs
+                self._rew_accum["obsolete_total_count"] += 1
+
                 # Attribute obsolete penalty: prefer last known owner, else shadow owner.
                 rid = self._res_owner_by_res.get(res_id) or owner_from_shadow(res_id)
                 if rid:
                     deadline_penalty_by_robot[rid] += p
                 else:
                     # fallback: distribute evenly (keeps signal even if ownership missing)
+                    self._rew_accum["wait_unattributed_sum"] += p * W_DEADLINE_obs
                     share = p / max(1, len(robots))
                     for r in robots:
                         deadline_penalty_by_robot[r] += share
 
         if self.reward_type == "wait_travel" and newly_obsolete:
+            W_WAIT_obs = float(self.reward_weights.get("wait", 1.5))
             for res_id in newly_obsolete:
                 info = self._task_lifecycle.get(res_id)
                 if not info:
@@ -1471,10 +1616,17 @@ class RLControllerAdapter:
                 late = max(1.0, now - float(pd))
                 p = -max(0.05, min(late, WAIT_CAP) / WAIT_CAP)
 
+                # --- accumulate obsolete wait subcomponent ---
+                self._rew_accum["wait_obsolete_pickup_sum"] += p * W_WAIT_obs
+                self._rew_accum["wait_obsolete_pickup_count"] += 1
+                self._rew_accum["obsolete_total_sum"] += p * W_WAIT_obs
+                self._rew_accum["obsolete_total_count"] += 1
+
                 rid = self._res_owner_by_res.get(res_id) or owner_from_shadow(res_id)
                 if rid:
                     wait_penalty_by_robot[rid] += p
                 else:
+                    self._rew_accum["wait_unattributed_sum"] += p * W_WAIT_obs
                     share = p / max(1, len(robots))
                     for r in robots:
                         wait_penalty_by_robot[r] += share
@@ -1547,20 +1699,38 @@ class RLControllerAdapter:
                 continue
 
             if info.get("actual_pickup_time") is None:
+                # Never-picked task: terminal wait penalty
                 res_time = info.get("reservation_time")
                 if res_time is None:
                     continue
                 wait_s = max(0.0, now - float(res_time))
                 p_wait = -min(wait_s, wait_cap) / wait_cap
-                out[rid]["wait"] += p_wait * w_wait
+                w_val = p_wait * w_wait
+                out[rid]["wait"] += w_val
+                # --- accumulate terminal never-picked wait subcomponent ---
+                self._rew_accum["wait_terminal_never_picked_sum"] += w_val
+                self._rew_accum["wait_terminal_never_picked_count"] += 1
+                self._rew_accum["terminal_wait_sum"] += w_val
+                self._rew_accum["terminal_wait_count"] += 1
+                self._rew_accum["terminal_total_sum"] += w_val
+                self._rew_accum["terminal_total_count"] += 1
 
                 est = info.get("estimated_travel_time")
                 if est is not None:
                     est = float(est)
                     if est > 0.0:
                         p_travel = -min(est, travel_cap) / travel_cap
-                        out[rid]["travel"] += p_travel * w_travel
+                        t_val = p_travel * w_travel
+                        out[rid]["travel"] += t_val
+                        # --- accumulate terminal never-picked travel estimate subcomponent ---
+                        self._rew_accum["travel_terminal_picked_not_dropped_sum"] += t_val
+                        self._rew_accum["travel_terminal_picked_not_dropped_count"] += 1
+                        self._rew_accum["terminal_travel_sum"] += t_val
+                        self._rew_accum["terminal_travel_count"] += 1
+                        self._rew_accum["terminal_total_sum"] += t_val
+                        self._rew_accum["terminal_total_count"] += 1
             else:
+                # Picked but not dropped: terminal travel overtime penalty
                 est = info.get("estimated_travel_time")
                 pick_time = info.get("actual_pickup_time")
                 if est is None or pick_time is None:
@@ -1571,7 +1741,15 @@ class RLControllerAdapter:
                 elapsed = max(0.0, now - float(pick_time))
                 over = max(0.0, elapsed - est)
                 penalty = -min(over, travel_cap) / travel_cap
-                out[rid]["travel"] += penalty * w_travel
+                t_val = penalty * w_travel
+                out[rid]["travel"] += t_val
+                # --- accumulate terminal picked-not-dropped travel subcomponent ---
+                self._rew_accum["travel_terminal_picked_not_dropped_sum"] += t_val
+                self._rew_accum["travel_terminal_picked_not_dropped_count"] += 1
+                self._rew_accum["terminal_travel_sum"] += t_val
+                self._rew_accum["terminal_travel_count"] += 1
+                self._rew_accum["terminal_total_sum"] += t_val
+                self._rew_accum["terminal_total_count"] += 1
 
         return out
 

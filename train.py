@@ -145,6 +145,10 @@ rp_logger = RidepoolLogger(
         log_conflict_metrics=bool(getattr(opt.logging, "log_conflict_metrics", False)),
         overwrite_conflicts_log_on_start=not continue_training,
         prune_episode_dir_after_metrics=bool(getattr(opt.logging, "prune_episode_dir_after_metrics", False)),
+        extended_quality_metrics=bool(getattr(opt.logging, "extended_quality_metrics", False)),
+        extended_quality_plots=bool(getattr(opt.logging, "extended_quality_plots", False)),
+        extended_quality_include_task_level=bool(getattr(opt.logging, "extended_quality_include_task_level", False)),
+        extended_quality_include_decision_level=bool(getattr(opt.logging, "extended_quality_include_decision_level", False)),
     )
 )
 
@@ -296,6 +300,7 @@ callback = RPLoggerCallback(
     reset_fn=reset_fn,  # Pass reset_fn to get current seed
     save_model_dir=model_save_dir,  # Enable model saving after each rollout
     continue_training=continue_training,
+    config_id=str(getattr(cfg, "prefix", "")),
 )
 
 if continue_training:
