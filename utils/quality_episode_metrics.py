@@ -365,9 +365,22 @@ def _compute_candidate_section(episode_dir: str) -> dict:
         return row
 
     if "cand_slots" in df.columns:
-        slots = df["cand_slots"].astype(float)
-        row["cand_mean_slots"] = float(slots.mean())
-        row["cand_zero_slots_rate"] = float((slots == 0).sum()) / len(slots) if len(slots) > 0 else 0.0
+        def _count_slots(value: Any) -> int:
+            if pd.isna(value):
+                return 0
+            text = str(value).strip()
+            if not text:
+                return 0
+            if "|" in text:
+                return len([part for part in text.split("|") if str(part).strip()])
+            try:
+                return int(float(text))
+            except Exception:
+                return 1
+
+        slot_counts = df["cand_slots"].apply(_count_slots).astype(float)
+        row["cand_mean_slots"] = float(slot_counts.mean())
+        row["cand_zero_slots_rate"] = float((slot_counts == 0).sum()) / len(slot_counts) if len(slot_counts) > 0 else 0.0
     else:
         row["cand_mean_slots"] = 0.0
         row["cand_zero_slots_rate"] = 0.0

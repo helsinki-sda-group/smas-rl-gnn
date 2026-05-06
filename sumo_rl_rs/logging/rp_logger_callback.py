@@ -260,6 +260,15 @@ class RPLoggerCallback(BaseCallback):
                     _writer = QualityEpisodeWriter(self.rp_logger.run_dir)
                     _writer.append_episode(_flat_row, _task_evts, _dec_evts)
                 except Exception as _qe:
+                    try:
+                        _err_path = os.path.join(self.rp_logger.run_dir, "quality_episode_metrics_errors.log")
+                        with open(_err_path, "a", encoding="utf-8") as _fh:
+                            _fh.write(
+                                f"episode={int(self.ep_idx)} ts={int(getattr(self, 'num_timesteps', 0))} "
+                                f"episode_dir={_episode_dir!s} error={type(_qe).__name__}: {_qe}\n"
+                            )
+                    except Exception:
+                        pass
                     if self.verbose > 0:
                         print(f"[WARN] quality_episode_metrics failed: {_qe}")
 
