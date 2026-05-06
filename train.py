@@ -89,6 +89,7 @@ MAX_WAIT_DELAY_S = float(opt.env.max_wait_delay_s)
 MAX_TRAVEL_DELAY_S = float(opt.env.max_travel_delay_s)
 MAX_ROBOT_CAPACITY = int(opt.env.max_robot_capacity)
 CONFLICT_RESOLUTION = str(getattr(opt.env, "conflict_resolution", "closest_then_capacity"))
+COMPLETION_MODE = str(getattr(opt.env, "completion_mode", "dropoff"))
 reward_params = dict(getattr(opt.env, "reward_params", {}) or {})
 
 # Training seeds - different from evaluation seeds [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
@@ -158,7 +159,7 @@ controller = RLControllerAdapter(
     k_max=K_max,
     vicinity_m=VICINITY_M,      # vicinity in meters
     sorted_candidates=bool(opt.sorted),
-    completion_mode="dropoff", # task is marked as completed at dropoff
+    completion_mode=COMPLETION_MODE,
     max_steps=MAX_STEPS,
     min_episode_steps = 100,
     serve_to_empty=True,    # end only when nothing left to do

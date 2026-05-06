@@ -28,6 +28,7 @@ env:
     wait_cap: 600.0
     travel_cap: 90.0
     deadline_cap: 600.0
+  completion_mode: dropoff
 features:
   base_dim: 9
   use_xy_pickup: false
