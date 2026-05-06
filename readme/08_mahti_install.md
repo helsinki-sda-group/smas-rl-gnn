@@ -305,6 +305,11 @@ See [slurm/README.md](../slurm/README.md) for more pattern examples.
 cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
 # fresh run
 sbatch --job-name=rp-train-1hop_critic-1_ctc slurm/run_train.sbatch configs/rp_gnn_1hop_1hop_critic-1_ctc.yaml
+sbatch --job-name=rp-train-1hop_critic-2_ctc slurm/run_train.sbatch configs/rp_gnn_1hop_1hop_critic-2_ctc.yaml
+sbatch --job-name=rp-train-1hop_critic-3_ctc slurm/run_train.sbatch configs/rp_gnn_1hop_1hop_critic-3_ctc.yaml
+sbatch --job-name=rp-train-2hop-maxpool-1_ctc slurm/run_train.sbatch configs/rp_gnn_2hop-maxpool-1_ctc.yaml
+sbatch --job-name=rp-train-2hop-maxpool-2_ctc slurm/run_train.sbatch configs/rp_gnn_2hop-maxpool-2_ctc.yaml
+sbatch --job-name=rp-train-2hop-maxpool-3_ctc slurm/run_train.sbatch configs/rp_gnn_2hop-maxpool-3_ctc.yaml
 sbatch --job-name=rp_gnn_debug slurm/run_train.sbatch configs/rp_gnn.yaml
 sbatch --job-name=rp_gnn_debug_1hop slurm/run_train.sbatch configs/rp_gnn_1hop.yaml
 sbatch --job-name=rp_gnn_debug_2hop slurm/run_train.sbatch configs/rp_gnn_2hop.yaml
@@ -329,6 +334,29 @@ tail -n 5 quality_episode_metrics_errors.log 2>/dev/null || true
 ~~~
 
 #### Evaluation
+
+Run baseline evaluation with a config file parameter:
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+sbatch --job-name=rp-eval-1hop-1 slurm/run_eval_baselines.sbatch configs/rp_gnn_1hop-1.yaml
+~~~
+
+What this does:
+- Runs `eval_baselines.py` (not `train.py`) with `--config <your_yaml>`
+- Creates an isolated job directory under:
+~~~bash
+/scratch/project_2012159/kbocheni/smas-rl-gnn/eval_jobs/job_eval_<RUN_NAME>_<SLURM_JOB_ID>
+~~~
+- Saves a timestamped config snapshot in `config_snapshots/`
+- Writes baseline metric logs to the eval job directory
+
+Quick checks after completion:
+~~~bash
+squeue -u kbocheni
+tail -n 100 /scratch/project_2012159/kbocheni/smas-rl-gnn/slurm/rp-eval-1hop-1-<SLURM_JOB_ID>.out
+~~~
+
+Note: `run_train.sbatch` is currently tied to `train.py`, so baseline evaluation should use `run_eval_baselines.sbatch` unless you refactor the training sbatch into a generic Python-entrypoint runner.
 
 
 #### Plotting

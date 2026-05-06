@@ -18,6 +18,13 @@ cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
 bash slurm/slurm_submit.sh 1hop_rnd 2hop 1hop_ctc
 ```
 
+### Baseline evaluation on Mahti:
+
+```bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+sbatch --job-name=rp-eval-1hop slurm/run_eval_baselines.sbatch configs/rp_gnn_1hop-1.yaml
+```
+
 ## Usage
 
 ### Method Patterns
@@ -66,6 +73,7 @@ bash slurm/slurm_submit.sh 1hop_rnd 2hop --dry-run
 - `slurm_submit.sh` - Main Bash script for Mahti
 - `slurm_submit.ps1` - PowerShell helper for local testing/previewing
 - `run_train.sbatch` - Slurm job template
+- `run_eval_baselines.sbatch` - Slurm job template for `eval_baselines.py`
 
 ## Features
 
