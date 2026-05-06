@@ -20,6 +20,18 @@ class QualityEpisodeWriter:
     METRICS_FILE = "quality_episode_metrics.csv"
     TASK_EVENTS_FILE = "task_quality_events.csv"
     DECISION_EVENTS_FILE = "decision_quality_events.csv"
+    GROUP_FILES = {
+        "reward": "quality_episode_reward_metrics.csv",
+        "task": "quality_episode_task_metrics.csv",
+        "pool": "quality_episode_pool_metrics.csv",
+        "decision": "quality_episode_decision_metrics.csv",
+        "candidate": "quality_episode_candidate_metrics.csv",
+        "conflict": "quality_episode_conflict_metrics.csv",
+    }
+    META_FIELDS = [
+        "config_id", "run_id", "ts", "episode",
+        "reward_type", "completion_mode", "num_robots", "max_robot_capacity",
+    ]
 
     def __init__(self, run_dir: str) -> None:
         self.run_dir = run_dir
@@ -47,7 +59,9 @@ class QualityEpisodeWriter:
             Per-decision rows. Written to decision_quality_events.csv if non-empty.
         """
         if flat_row:
-            self._append_csv(self.METRICS_FILE, self._round_row(flat_row))
+            rounded_row = self._round_row(flat_row)
+            self._append_csv(self.METRICS_FILE, rounded_row)
+            self._append_grouped_metrics(rounded_row)
 
         # Always ensure separate files exist, even if this episode has no events.
         task_default_fields = [
@@ -108,3 +122,26 @@ class QualityEpisodeWriter:
             else:
                 out[k] = v
         return out
+
+    def _append_grouped_metrics(self, row: dict[str, Any]) -> None:
+        """Append grouped per-episode aggregate rows split by metric family."""
+        grouped_rows = {
+            "reward": self._group_row(row, lambda key: key.startswith("rew_") or key.startswith("macro_")),
+            "task": self._group_row(row, lambda key: key.startswith("task_")),
+            "pool": self._group_row(row, lambda key: key.startswith("pool_")),
+            "decision": self._group_row(row, lambda key: key.startswith("dec_")),
+            "candidate": self._group_row(row, lambda key: key.startswith("cand_")),
+            "conflict": self._group_row(row, lambda key: key.startswith("conf_")),
+        }
+        for group_name, grouped_row in grouped_rows.items():
+            self._append_csv(self.GROUP_FILES[group_name], grouped_row)
+
+    def _group_row(self, row: dict[str, Any], predicate) -> dict[str, Any]:
+        """Return a grouped row with shared meta fields plus matching metrics."""
+        grouped = {field: row.get(field) for field in self.META_FIELDS if field in row}
+        for key, value in row.items():
+            if key in grouped:
+                continue
+            if predicate(key):
+                grouped[key] = value
+        return grouped

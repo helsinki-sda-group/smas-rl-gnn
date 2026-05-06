@@ -240,8 +240,8 @@ class RPLoggerCallback(BaseCallback):
                     from utils.quality_episode_metrics import compute_quality_episode_metrics
                     from utils.quality_episode_writer import QualityEpisodeWriter
                     _episode_dir = getattr(self.rp_logger, "last_ep_dir", None) or self.rp_logger.ep_dir
-                    _ep_context = self.controller.get_episode_quality_context()
-                    _cf_stats = self.rp_logger.get_episode_conflict_stats()
+                    _ep_context = self.controller.get_last_episode_quality_context()
+                    _cf_stats = self.rp_logger.get_last_episode_conflict_stats()
                     _config_id = getattr(self, "config_id", "") or str(getattr(self.rp_logger.cfg, "run_name", "") or "")
                     _run_id = str(getattr(self.rp_logger.cfg, "run_name", "") or "")
                     # Always collect separate event-level files for diagnostics.

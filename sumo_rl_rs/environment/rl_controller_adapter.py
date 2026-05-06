@@ -173,6 +173,7 @@ class RLControllerAdapter:
         # Per-episode reward subcomponent accumulators (cleared in reset())
         # Tracks event/obsolete/terminal breakdown separately from rewards.csv.
         self._rew_accum: Dict[str, Any] = self._make_rew_accum()
+        self._last_episode_quality_context: Dict[str, Any] | None = None
 
     @staticmethod
     def _make_rew_accum() -> Dict[str, Any]:
@@ -230,11 +231,8 @@ class RLControllerAdapter:
             "terminal_total_count": 0,
         }
 
-    def get_episode_quality_context(self) -> Dict[str, Any]:
-        """Return a snapshot of episode-level quality data for the quality metrics calculator.
-
-        Called by the callback AFTER end_episode() and BEFORE the next reset().
-        """
+    def _current_episode_quality_context(self) -> Dict[str, Any]:
+        """Return a snapshot of the currently accumulated episode quality context."""
         return {
             "rew_accum": dict(self._rew_accum),
             "reward_type": self.reward_type,
@@ -251,6 +249,16 @@ class RLControllerAdapter:
             "w_deadline": self.reward_weights.get("deadline", 10.0),
             "w_travel": self.reward_weights.get("travel", 2.0),
         }
+
+    def get_episode_quality_context(self) -> Dict[str, Any]:
+        """Return the most recently closed episode's quality context when available."""
+        if self._last_episode_quality_context is not None:
+            return dict(self._last_episode_quality_context)
+        return self._current_episode_quality_context()
+
+    def get_last_episode_quality_context(self) -> Dict[str, Any]:
+        """Return the last closed episode's quality context, falling back to current state."""
+        return self.get_episode_quality_context()
 
     # ---------------- Public API ----------------
 
@@ -1230,6 +1238,7 @@ class RLControllerAdapter:
 
             # if episode is done, write a row to episode_totals.csv once
             if done and self.logger and not self._episode_closed:
+                self._last_episode_quality_context = self._current_episode_quality_context()
                 self.logger.end_episode(
                     sum_reward=self._cum_sum_reward,
                     n_pickups=self._cum_pickups,

@@ -72,6 +72,7 @@ class RidepoolLogger:
                     os.remove(self._conflicts_log_path)
             except Exception:
                 pass
+        self._last_conflict_stats: Dict[str, float] = {}
         self._reset_conflict_episode_stats()
 
     def _reset_conflict_episode_stats(self) -> None:
@@ -245,6 +246,7 @@ class RidepoolLogger:
 
     def end_episode(self, sum_reward: float, n_pickups: int, n_dropoffs: int, duration: float):
         self.last_ep_dir = self.ep_dir
+        self._last_conflict_stats = dict(self._conflict_stats)
         self._append_conflicts_summary(self.cfg.episode_index)
         self._write(self._get_csv_filename("episode_totals"), dict(
             episode=self.cfg.episode_index,
@@ -635,7 +637,13 @@ class RidepoolLogger:
         """Return a copy of the current episode's conflict stats.
         Must be called BEFORE start_episode() resets them.
         """
+        if self._last_conflict_stats:
+            return dict(self._last_conflict_stats)
         return dict(self._conflict_stats)
+
+    def get_last_episode_conflict_stats(self) -> dict:
+        """Return the most recently closed episode's conflict stats."""
+        return self.get_episode_conflict_stats()
 
     # ---------- plotting ----------
     def _plot_ts(self, png_name: str, series: List[tuple], ylabel: str = ""):
