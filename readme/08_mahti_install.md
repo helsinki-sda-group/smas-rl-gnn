@@ -338,8 +338,9 @@ tail -n 5 quality_episode_metrics_errors.log 2>/dev/null || true
 Run baseline evaluation with a config file parameter:
 ~~~bash
 cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
-sbatch --job-name=rp-eval-1hop-1 slurm/run_eval_baselines.sbatch configs/rp_gnn_1hop-1.yaml
+sbatch --job-name=rp-eval-1hop_critic-1_ctc slurm/run_eval_baselines.sbatch configs/rp_gnn_1hop_1hop_critic-1_ctc.yaml
 ~~~
+
 
 What this does:
 - Runs `eval_baselines.py` (not `train.py`) with `--config <your_yaml>`
@@ -424,6 +425,21 @@ action_comparison/
 /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop_ctc 1hop_critic_ctc 2hop_ctc
 
 /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop_rnd 1hop_critic_rnd 2hop_rnd
+~~~
+
+3. Plot quality episode metrics for a specific job (scratch -> projappl)
+-  Activate venv first:
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+source .venv/bin/activate
+~~~
+-  Run plotting for the known job file and save outputs to `episode metrics`:
+~~~bash
+python3 plot_quality_episode_metrics.py --metrics /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_1hop_critic-1_ctc_6627936/quality_episode_metrics.csv --out "/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode metrics"
+~~~
+-  If needed, create output directory first:
+~~~bash
+mkdir -p "/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode metrics"
 ~~~
 
 ## Github notes

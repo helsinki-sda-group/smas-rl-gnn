@@ -89,7 +89,7 @@ class RLControllerAdapter:
         self.sorted_candidates = bool(sorted_candidates)
         self.max_steps = max_steps
         self.completion_mode = completion_mode.lower().strip()
-        assert self.completion_mode in {"pickup", "dropoff"}, "completion_mode must be 'pickup' or 'dropoff'"
+        assert self.completion_mode in {"pickup", "dropoff", "valid_dropoff"}, "completion_mode must be 'pickup', 'dropoff', or 'valid_dropoff'"
         self.conflict_resolution = str(conflict_resolution).lower().strip()
         assert self.conflict_resolution in {"capacity", "closest", "closest_then_capacity", "logit_diff", "random"}, "conflict resolution must be 'capacity', 'closest', 'closest_then_capacity', 'logit_diff', or 'random'"
         self._warned_missing_logit_diff = False
@@ -179,9 +179,18 @@ class RLControllerAdapter:
     def _make_rew_accum() -> Dict[str, Any]:
         """Return a fresh reward-subcomponent accumulator dict."""
         return {
-            # completion events
+            # completion events (mode-dependent: pickup/dropoff/valid_dropoff)
             "completion_event_sum": 0.0,
             "completion_event_count": 0,
+            # dropoff event tracking: all observed dropoffs regardless of mode
+            "dropoff_event_sum": 0.0,
+            "dropoff_event_count": 0,
+            # valid_dropoff: pickup_time <= pickup_deadline AND dropoff_time <= dropoff_deadline
+            "valid_dropoff_sum": 0.0,
+            "valid_dropoff_count": 0,
+            # invalid_dropoff: dropped off but failed validity test
+            "invalid_dropoff_sum": 0.0,
+            "invalid_dropoff_count": 0,
             # wait: event (at pickup)
             "wait_event_pickup_sum": 0.0,
             "wait_event_pickup_count": 0,
@@ -1562,21 +1571,65 @@ class RLControllerAdapter:
         # backlog_penalty = (self._prev_n_res - n_res) * 0.05 / max(1, len(robots))
         # self._prev_n_res = n_res
 
-        # completion count by robot
-        completion_by_robot: Dict[str, float] = {}
-        if self.completion_mode == "pickup":
-            for rid in robots:
-                completion_by_robot[rid] = float(len(picked_up_ids_by_robot[rid]))
-        else:
-            for rid in robots:
-                completion_by_robot[rid] = float(len(dropped_off_ids_by_robot[rid]))
-
         # --- accumulate completion subcomponents ---
         W_COMP_acc = float(self.reward_weights.get("comp", 1.0))
-        for rid in robots:
-            cnt = int(round(completion_by_robot[rid]))
-            self._rew_accum["completion_event_count"] += cnt
-            self._rew_accum["completion_event_sum"] += cnt * W_COMP_acc
+        completion_by_robot: Dict[str, float] = {rid: 0.0 for rid in robots}
+
+        def _is_valid_completion(res_id: str) -> bool:
+            """True iff pickup_time <= pickup_deadline AND dropoff_time <= dropoff_deadline."""
+            info = self._task_lifecycle.get(res_id, {})
+            ptime = info.get("actual_pickup_time")
+            dtime = info.get("actual_dropoff_time")
+            pdl = info.get("pickup_deadline")
+            ddl = info.get("dropoff_deadline")
+            if ptime is None or dtime is None or pdl is None or ddl is None:
+                return False
+            return float(ptime) <= float(pdl) and float(dtime) <= float(ddl)
+
+        if self.completion_mode == "pickup":
+            for rid in robots:
+                cnt = len(picked_up_ids_by_robot[rid])
+                completion_by_robot[rid] = float(cnt)
+                self._rew_accum["completion_event_count"] += cnt
+                self._rew_accum["completion_event_sum"] += cnt * W_COMP_acc
+            # Track all dropoff events for diagnostics (no reward in pickup mode)
+            for rid in robots:
+                for res_id in dropped_off_ids_by_robot[rid]:
+                    self._rew_accum["dropoff_event_count"] += 1
+                    if _is_valid_completion(res_id):
+                        self._rew_accum["valid_dropoff_count"] += 1
+                    else:
+                        self._rew_accum["invalid_dropoff_count"] += 1
+
+        elif self.completion_mode == "valid_dropoff":
+            for rid in robots:
+                for res_id in dropped_off_ids_by_robot[rid]:
+                    self._rew_accum["dropoff_event_count"] += 1
+                    if _is_valid_completion(res_id):
+                        completion_by_robot[rid] += 1.0
+                        self._rew_accum["completion_event_count"] += 1
+                        self._rew_accum["completion_event_sum"] += W_COMP_acc
+                        self._rew_accum["dropoff_event_sum"] += W_COMP_acc
+                        self._rew_accum["valid_dropoff_count"] += 1
+                        self._rew_accum["valid_dropoff_sum"] += W_COMP_acc
+                    else:
+                        self._rew_accum["invalid_dropoff_count"] += 1
+                        # invalid_dropoff_sum stays 0 (no reward for invalid dropoffs)
+
+        else:  # "dropoff" (default — reward all dropoffs)
+            for rid in robots:
+                for res_id in dropped_off_ids_by_robot[rid]:
+                    completion_by_robot[rid] += 1.0
+                    self._rew_accum["completion_event_count"] += 1
+                    self._rew_accum["completion_event_sum"] += W_COMP_acc
+                    self._rew_accum["dropoff_event_count"] += 1
+                    self._rew_accum["dropoff_event_sum"] += W_COMP_acc
+                    if _is_valid_completion(res_id):
+                        self._rew_accum["valid_dropoff_count"] += 1
+                        self._rew_accum["valid_dropoff_sum"] += W_COMP_acc
+                    else:
+                        self._rew_accum["invalid_dropoff_count"] += 1
+                        self._rew_accum["invalid_dropoff_sum"] += W_COMP_acc
 
         cur_obsolete = {res_id for res_id, info in self._task_lifecycle.items() if info.get("was_obsolete", False)}
         newly_obsolete = cur_obsolete - self._prev_obsolete

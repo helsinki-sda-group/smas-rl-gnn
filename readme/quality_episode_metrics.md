@@ -9,6 +9,8 @@ The episode-level quality diagnostics system provides detailed per-episode metri
 - **Is the policy choosing good tasks?** → `dec_noop_rate`, `dec_noop_with_candidates_count`
 - **Is NOOP caused by no feasible tasks or conservative behavior?** → `dec_noop_no_candidates_count` vs `dec_noop_with_candidates_count`
 - **How many tasks complete vs expire?** → `task_completed_rate`, `task_obsolete_rate`
+- **Are raw dropoffs actually valid completions?** → `task_valid_completed_rate` vs `task_dropoff_event_rate`
+- **Are deadlines being systematically violated?** → `task_pickup_deadline_violation_rate`, `task_dropoff_deadline_violation_rate`
 
 This system **does not replace** any existing logs (`training_metrics_*.log`, `conflicts.log`, `rewards.csv`, etc.). It writes additional files to the run directory.
 
@@ -54,7 +56,7 @@ Additionally, when enabled, two extra CSVs are written **per episode** (inside t
 | `ts` | Training timestep at episode end |
 | `episode` | Episode index |
 | `reward_type` | `wait_travel` or `deadline` |
-| `completion_mode` | Task completion mode (e.g. `dropoff`) |
+| `completion_mode` | Task completion mode: `pickup`, `dropoff`, or `valid_dropoff` |
 | `num_robots` | Number of robots in this episode |
 | `max_robot_capacity` | Robot capacity |
 
@@ -64,9 +66,18 @@ These come from internal accumulators in `RLControllerAdapter` (not stored in ex
 
 | Column | Description | Relevant reward_type |
 |--------|-------------|---------------------|
-| `rew_completion_sum` | Sum of completion bonuses | both |
-| `rew_completion_count` | Number of completions | both |
-| `rew_completion_mean` | Mean completion bonus per task | both |
+| `rew_completion_sum` | Sum of completion bonuses (mode-dependent: counts pickups, all dropoffs, or valid dropoffs only) | both |
+| `rew_completion_count` | Number of completions credited (depends on `completion_mode`) | both |
+| `rew_completion_mean` | Mean completion bonus per credited event | both |
+| `rew_dropoff_event_sum` | Reward assigned to all dropoff events (= 0 in `pickup` mode, = `rew_completion_sum` in `dropoff` mode, = `rew_valid_dropoff_sum` in `valid_dropoff` mode) | both |
+| `rew_dropoff_event_count` | Count of all observed dropoff events regardless of mode | both |
+| `rew_dropoff_event_mean` | Mean dropoff reward per event | both |
+| `rew_valid_dropoff_sum` | Reward given for valid completions (pickup ≤ deadline AND dropoff ≤ deadline) | both |
+| `rew_valid_dropoff_count` | Number of valid dropoff events | both |
+| `rew_valid_dropoff_mean` | Mean reward per valid dropoff | both |
+| `rew_invalid_dropoff_sum` | Reward given for invalid dropoffs (0.0 in `valid_dropoff` mode; > 0 in `dropoff` mode since all dropoffs are rewarded) | both |
+| `rew_invalid_dropoff_count` | Number of invalid dropoff events (failed validity check) | both |
+| `rew_invalid_dropoff_mean` | Mean reward per invalid dropoff | both |
 | `rew_wait_event_pickup_sum` | Total wait penalty at pickups | `wait_travel` |
 | `rew_wait_event_pickup_count` | Number of pickup wait events | `wait_travel` |
 | `rew_wait_event_pickup_mean` | Mean wait penalty per pickup | `wait_travel` |
@@ -101,9 +112,9 @@ Computed from `task_lifecycle.csv` in the episode directory.
 | Column | Description |
 |--------|-------------|
 | `task_total_count` | Total tasks in episode |
-| `task_completed_count` | Tasks with successful dropoff |
+| `task_completed_count` | Tasks dropped off while `was_obsolete=False` (backward-compat definition) |
 | `task_completed_rate` | `completed / total` |
-| `task_obsolete_count` | Tasks marked as obsolete |
+| `task_obsolete_count` | Tasks marked as obsolete (missed pickup window) |
 | `task_obsolete_rate` | `obsolete / total` |
 | `task_never_picked_count` | Tasks never picked up |
 | `task_never_picked_rate` | `never_picked / total` |
@@ -111,6 +122,20 @@ Computed from `task_lifecycle.csv` in the episode directory.
 | `task_picked_not_dropped_rate` | `picked_not_dropped / total` |
 | `task_obs_dropoff_count` | Picked up but not dropped off before `dropoff_deadline` |
 | `task_obs_dropoff_rate` | `obs_dropoff / total` |
+| `task_dropoff_event_count` | All tasks with `actual_dropoff_time != None` (raw dropoff count) |
+| `task_dropoff_event_rate` | `dropoff_event / total` |
+| `task_valid_completed_count` | Tasks where `actual_pickup_time <= pickup_deadline AND actual_dropoff_time <= dropoff_deadline` |
+| `task_valid_completed_rate` | `valid_completed / total` |
+| `task_invalid_dropoff_count` | Dropped off tasks that failed the validity test (`dropoff_event - valid_completed`) |
+| `task_invalid_dropoff_rate` | `invalid_dropoff / total` |
+| `task_pickup_deadline_violation_count` | Tasks with `actual_pickup_time > pickup_deadline` |
+| `task_pickup_deadline_violation_rate` | `pickup_violation / total` |
+| `task_dropoff_deadline_violation_count` | Tasks with `actual_dropoff_time > dropoff_deadline` |
+| `task_dropoff_deadline_violation_rate` | `dropoff_violation / total` |
+| `task_obsolete_pickup_count` | Tasks where `was_obsolete=True` (missed pickup deadline) |
+| `task_obsolete_pickup_rate` | `obsolete_pickup / total` |
+| `task_obsolete_dropoff_count` | Dropped-off tasks that were already obsolete or missed dropoff deadline |
+| `task_obsolete_dropoff_rate` | `obsolete_dropoff / total` |
 | `task_wait_time_mean` | Mean actual wait time (pickup - reservation) |
 | `task_wait_time_std` | Std of wait times |
 | `task_wait_time_p50/p90/p95` | Percentile wait times |
@@ -184,6 +209,39 @@ From in-memory `_conflict_stats` dict captured at episode end.
 
 ---
 
+## Completion Modes
+
+The `completion_mode` config parameter controls when the `+w_comp` bonus is awarded:
+
+| Mode | When `+w_comp` is given | Typical use |
+|------|------------------------|-------------|
+| `pickup` | At pickup event | Reward pickup speed |
+| `dropoff` | At every dropoff event (regardless of deadlines) | Default; matches `rew_completion_count > task_valid_completed_count` |
+| `valid_dropoff` | Only when `actual_pickup_time <= pickup_deadline AND actual_dropoff_time <= dropoff_deadline` | Aligns reward with service-quality objective |
+
+### Valid completion definition
+
+```text
+valid_completion(task) =
+    actual_pickup_time is not None
+    AND actual_dropoff_time is not None
+    AND actual_pickup_time <= pickup_deadline
+    AND actual_dropoff_time <= dropoff_deadline
+```
+
+### Backward compatibility
+
+- `completion_mode=dropoff` preserves exact pre-existing behavior.
+- Old CSV columns (`rew_completion_*`, `task_completed_*`) are still present for all modes.
+- New columns (`rew_valid_dropoff_*`, `task_valid_completed_*`, etc.) are appended; parsers expecting old columns are unaffected.
+- Old logs that lack the new columns can still be read by plotting scripts — missing columns are handled gracefully.
+
+### Why `rew_completion_count > task_valid_completed_count` in `dropoff` mode
+
+Under `completion_mode=dropoff`, all dropoffs receive completion reward — including tasks that had already been marked obsolete or that missed their pickup deadline. The `task_valid_completed_count` metric only counts tasks satisfying both deadline constraints, so the two numbers legitimately diverge when late-pickup tasks are still served.
+
+---
+
 ## Reward Type Mapping
 
 | `reward_type` | Active reward subcomponents |
@@ -244,6 +302,14 @@ Watch `task_completed_rate` increasing over training (x-axis = `ts`). A stagnant
 ### Are deadlines being violated?
 
 `task_pickup_lateness_mean` > 0 indicates average deadline violations. In `deadline` mode, `rew_deadline_pickup_lateness_mean` should track this. High `task_obs_dropoff_rate` indicates dropoff deadline violations.
+
+### Is the policy actually solving the real objective?
+
+Compare `task_valid_completed_rate` vs `task_dropoff_event_rate`. If the gap is large, vehicles are reaching destinations but failing deadline constraints — the reward signal (`completion_mode=dropoff`) may be rewarding low-quality service. Switch to `completion_mode=valid_dropoff` to gate the reward on genuine deadline compliance.
+
+### Are dropoff deadline violations driving the gap?
+
+Check `task_dropoff_deadline_violation_rate` and `task_pickup_deadline_violation_rate` separately. Pickup violations (`actual_pickup_time > pickup_deadline`) indicate slow dispatch. Dropoff violations indicate the task was picked up but travel took too long.
 
 ### Conflict resolution quality
 

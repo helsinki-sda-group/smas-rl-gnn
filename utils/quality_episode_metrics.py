@@ -85,10 +85,23 @@ def _compute_reward_section(context: dict) -> dict:
     def _get(key: str, default: float = 0.0) -> float:
         return float(ra.get(key, default))
 
-    # completion
+    # completion (mode-dependent: pickup/dropoff/valid_dropoff)
     row["rew_completion_sum"] = _get("completion_event_sum")
     row["rew_completion_count"] = int(_get("completion_event_count"))
     row["rew_completion_mean"] = _safe_ratio(row["rew_completion_sum"], row["rew_completion_count"])
+
+    # dropoff event tracking (all modes — diagnostic breakdown)
+    row["rew_dropoff_event_sum"] = _get("dropoff_event_sum")
+    row["rew_dropoff_event_count"] = int(_get("dropoff_event_count"))
+    row["rew_dropoff_event_mean"] = _safe_ratio(row["rew_dropoff_event_sum"], row["rew_dropoff_event_count"])
+
+    row["rew_valid_dropoff_sum"] = _get("valid_dropoff_sum")
+    row["rew_valid_dropoff_count"] = int(_get("valid_dropoff_count"))
+    row["rew_valid_dropoff_mean"] = _safe_ratio(row["rew_valid_dropoff_sum"], row["rew_valid_dropoff_count"])
+
+    row["rew_invalid_dropoff_sum"] = _get("invalid_dropoff_sum")
+    row["rew_invalid_dropoff_count"] = int(_get("invalid_dropoff_count"))
+    row["rew_invalid_dropoff_mean"] = _safe_ratio(row["rew_invalid_dropoff_sum"], row["rew_invalid_dropoff_count"])
 
     # wait
     row["rew_wait_event_pickup_sum"] = _get("wait_event_pickup_sum")
@@ -154,6 +167,20 @@ def _compute_task_section(episode_dir: str, context: dict) -> tuple[dict, list[d
             "task_picked_not_dropped_rate": 0.0,
             "task_obs_dropoff_count": 0,
             "task_obs_dropoff_rate": 0.0,
+            "task_dropoff_event_count": 0,
+            "task_dropoff_event_rate": 0.0,
+            "task_valid_completed_count": 0,
+            "task_valid_completed_rate": 0.0,
+            "task_invalid_dropoff_count": 0,
+            "task_invalid_dropoff_rate": 0.0,
+            "task_pickup_deadline_violation_count": 0,
+            "task_pickup_deadline_violation_rate": 0.0,
+            "task_dropoff_deadline_violation_count": 0,
+            "task_dropoff_deadline_violation_rate": 0.0,
+            "task_obsolete_pickup_count": 0,
+            "task_obsolete_pickup_rate": 0.0,
+            "task_obsolete_dropoff_count": 0,
+            "task_obsolete_dropoff_rate": 0.0,
         })
         return row, task_events
 
@@ -204,6 +231,73 @@ def _compute_task_section(episode_dir: str, context: dict) -> tuple[dict, list[d
         row["task_picked_not_dropped_rate"] = 0.0
         row["task_obs_dropoff_count"] = 0
         row["task_obs_dropoff_rate"] = 0.0
+
+    # --- new deadline/validity metrics ---
+    has_pdl = "pickup_deadline" in df.columns
+    has_ddl = "dropoff_deadline" in df.columns
+
+    dropoff_event_count = 0
+    valid_completed_count = 0
+    invalid_dropoff_count = 0
+    pickup_deadline_violation_count = 0
+    dropoff_deadline_violation_count = 0
+    obsolete_pickup_count = 0
+    obsolete_dropoff_count = 0
+
+    if has_dropoff and has_pickup:
+        for _, r in df.iterrows():
+            ptime = r.get("actual_pickup_time") if has_pickup else None
+            dtime = r.get("actual_dropoff_time") if has_dropoff else None
+            pdl = r.get("pickup_deadline") if has_pdl else None
+            ddl = r.get("dropoff_deadline") if has_ddl else None
+
+            has_ptime = pd.notna(ptime)
+            has_dtime = pd.notna(dtime)
+            has_pdl_val = has_pdl and pd.notna(pdl)
+            has_ddl_val = has_ddl and pd.notna(ddl)
+
+            if has_dtime:
+                dropoff_event_count += 1
+                # valid: both deadlines met
+                pickup_ok = has_ptime and has_pdl_val and float(ptime) <= float(pdl)
+                dropoff_ok = has_ddl_val and float(dtime) <= float(ddl)
+                if pickup_ok and dropoff_ok:
+                    valid_completed_count += 1
+                else:
+                    invalid_dropoff_count += 1
+                # dropoff deadline violation
+                if has_dtime and has_ddl_val and float(dtime) > float(ddl):
+                    dropoff_deadline_violation_count += 1
+
+            if has_ptime:
+                # pickup deadline violation
+                if has_pdl_val and float(ptime) > float(pdl):
+                    pickup_deadline_violation_count += 1
+                # obsolete_pickup: was marked obsolete (missed pickup window)
+                if bool(r.get("was_obsolete", False)):
+                    obsolete_pickup_count += 1
+
+            # obsolete_dropoff: dropped off but deadline was missed (or was already obsolete)
+            if has_dtime:
+                is_obs = bool(r.get("was_obsolete", False))
+                ddl_missed = has_ddl_val and float(dtime) > float(ddl)
+                if is_obs or ddl_missed:
+                    obsolete_dropoff_count += 1
+
+    row["task_dropoff_event_count"] = dropoff_event_count
+    row["task_dropoff_event_rate"] = _safe_ratio(dropoff_event_count, n_total)
+    row["task_valid_completed_count"] = valid_completed_count
+    row["task_valid_completed_rate"] = _safe_ratio(valid_completed_count, n_total)
+    row["task_invalid_dropoff_count"] = invalid_dropoff_count
+    row["task_invalid_dropoff_rate"] = _safe_ratio(invalid_dropoff_count, n_total)
+    row["task_pickup_deadline_violation_count"] = pickup_deadline_violation_count
+    row["task_pickup_deadline_violation_rate"] = _safe_ratio(pickup_deadline_violation_count, n_total)
+    row["task_dropoff_deadline_violation_count"] = dropoff_deadline_violation_count
+    row["task_dropoff_deadline_violation_rate"] = _safe_ratio(dropoff_deadline_violation_count, n_total)
+    row["task_obsolete_pickup_count"] = obsolete_pickup_count
+    row["task_obsolete_pickup_rate"] = _safe_ratio(obsolete_pickup_count, n_total)
+    row["task_obsolete_dropoff_count"] = obsolete_dropoff_count
+    row["task_obsolete_dropoff_rate"] = _safe_ratio(obsolete_dropoff_count, n_total)
 
     # wait time distribution
     if has_pickup and "reservation_time" in df.columns:
