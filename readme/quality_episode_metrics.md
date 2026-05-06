@@ -176,9 +176,9 @@ From in-memory `_conflict_stats` dict captured at episode end.
 | `conf_tasks_total` | Total tasks processed in conflicts |
 | `conf_winner_pickup` | Conflicts won by the robot with shortest pickup ETA |
 | `conf_winner_pickup_rate` | `winner_pickup / total` |
-| `conf_resolver_override` | Times resolver overrode the policy action |
-| `conf_resolver_override_rate` | `resolver_override / total` |
-| `conf_policy_matches_resolver_rate` | Rate at which policy agreed with resolver |
+| `conf_resolver_override` | Number of conflict **events** where the margin-based winner differed from the pickup-distance-based winner. Increments by at most 1 per conflict event regardless of how many robots competed. |
+| `conf_resolver_override_rate` | `resolver_override / total` — how often the margin ranking disagreed with the distance ranking per conflict event |
+| `conf_policy_matches_resolver_rate` | Rate at which the robot with the highest raw policy logit for the contested task also won the conflict (i.e., policy and resolver agreed on the winner). **Note:** these two rates are NOT complementary — `override_rate + policy_matches_rate` does not equal 1. `override_rate` measures distance-vs-margin disagreement; `policy_matches_rate` measures policy-vs-resolver disagreement. |
 | `conf_margin_win_count` | Conflicts where winner had highest margin logit |
 | `conf_margin_lose_count` | Conflicts where winner did NOT have highest margin logit |
 
@@ -247,4 +247,6 @@ Watch `task_completed_rate` increasing over training (x-axis = `ts`). A stagnant
 
 ### Conflict resolution quality
 
-High `conf_resolver_override_rate` means the distributed resolver frequently overrides the policy. Low `conf_policy_matches_resolver_rate` indicates policy and resolver are often in disagreement.
+**`conf_resolver_override_rate`** measures how often the margin-based ranking disagrees with the pickup-distance ranking — i.e., the robot selected by margin was NOT the closest robot. A value of 0.64–0.78 is normal and means margin and distance frequently pick different winners. It counts per conflict *event* (not per competing robot), so a 3-robot conflict adds at most 1.
+
+**`conf_policy_matches_resolver_rate`** measures how often the robot with the highest raw policy logit for the contested task actually won the resolver decision. A value of 0.0 was previously caused by a bug where raw logits were never forwarded to the conflict resolver. This should now report a non-zero value reflecting genuine policy-resolver alignment.

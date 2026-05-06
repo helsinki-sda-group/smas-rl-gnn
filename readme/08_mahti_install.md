@@ -304,6 +304,7 @@ See [slurm/README.md](../slurm/README.md) for more pattern examples.
 ~~~bash
 cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
 # fresh run
+sbatch --job-name=rp-train-1hop_critic-1_ctc slurm/run_train.sbatch configs/rp_gnn_1hop_1hop_critic-1_ctc.yaml
 sbatch --job-name=rp_gnn_debug slurm/run_train.sbatch configs/rp_gnn.yaml
 sbatch --job-name=rp_gnn_debug_1hop slurm/run_train.sbatch configs/rp_gnn_1hop.yaml
 sbatch --job-name=rp_gnn_debug_2hop slurm/run_train.sbatch configs/rp_gnn_2hop.yaml
