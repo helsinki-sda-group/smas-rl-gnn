@@ -244,8 +244,9 @@ class RPLoggerCallback(BaseCallback):
                     _cf_stats = self.rp_logger.get_episode_conflict_stats()
                     _config_id = getattr(self, "config_id", "") or str(getattr(self.rp_logger.cfg, "run_name", "") or "")
                     _run_id = str(getattr(self.rp_logger.cfg, "run_name", "") or "")
-                    _include_task = bool(getattr(self.rp_logger.cfg, "extended_quality_include_task_level", False))
-                    _include_dec = bool(getattr(self.rp_logger.cfg, "extended_quality_include_decision_level", False))
+                    # Always collect separate event-level files for diagnostics.
+                    _include_task = True
+                    _include_dec = True
                     _flat_row, _task_evts, _dec_evts = compute_quality_episode_metrics(
                         episode_dir=_episode_dir,
                         context=_ep_context,
@@ -257,11 +258,13 @@ class RPLoggerCallback(BaseCallback):
                         include_task_level=_include_task,
                         include_decision_level=_include_dec,
                     )
-                    _writer = QualityEpisodeWriter(self.rp_logger.run_dir)
+                    # Write quality outputs to the current working directory (job dir on Mahti)
+                    # so they are co-located with conflicts.log and training_metrics*.log.
+                    _writer = QualityEpisodeWriter(os.path.abspath(os.getcwd()))
                     _writer.append_episode(_flat_row, _task_evts, _dec_evts)
                 except Exception as _qe:
                     try:
-                        _err_path = os.path.join(self.rp_logger.run_dir, "quality_episode_metrics_errors.log")
+                        _err_path = os.path.join(os.path.abspath(os.getcwd()), "quality_episode_metrics_errors.log")
                         with open(_err_path, "a", encoding="utf-8") as _fh:
                             _fh.write(
                                 f"episode={int(self.ep_idx)} ts={int(getattr(self, 'num_timesteps', 0))} "

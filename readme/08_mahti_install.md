@@ -109,6 +109,8 @@ logging:
   run_name: rp_gnn_debug
   out_dir: /scratch/project_2012159/kbocheni/smas-rl-gnn/runs
   model_save_dir: /scratch/project_2012159/kbocheni/smas-rl-gnn/runs/rp_gnn_debug/!saved_models
+  extended_quality_metrics: true
+  # Separate quality files are now written to JOBDIR (current working dir in sbatch)
 ~~~
 - Launch to get the results of a test run in scratch partition.
 ~~~bash
@@ -254,7 +256,11 @@ python "$REPO/train.py" --config "$REPO/$CFG" --sumoport "$PORT"
 │       ├── monitor.csv             # SB3 training monitor
 │       ├── conflicts.log
 │       ├── comp_norms.log
-│       └── training_metrics_*.log
+│       ├── training_metrics_*.log
+│       ├── quality_episode_metrics.csv      # one row per episode (rounded to 2 decimals)
+│       ├── task_quality_events.csv          # per-task quality rows
+│       ├── decision_quality_events.csv      # per-decision quality rows
+│       └── quality_episode_metrics_errors.log  # only if quality writer fails
 │
 └── runs/                           # created by train.py (from out_dir in yaml)
     └── [RUN_NAME]/               # run_name in yaml
@@ -312,6 +318,14 @@ Recommended workflow for continuation:
 2. Set `continue_training: true`.
 3. Set `ppo.total_timesteps` to extra steps only.
 4. Reuse same `JOBDIR` if you want one combined local log set.
+
+Quick check after a run (inside the job directory):
+~~~bash
+cd /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_<RUN_NAME>_<SLURM_JOB_ID>
+ls -lh quality_episode_metrics.csv task_quality_events.csv decision_quality_events.csv
+head -n 3 quality_episode_metrics.csv
+tail -n 5 quality_episode_metrics_errors.log 2>/dev/null || true
+~~~
 
 #### Evaluation
 
