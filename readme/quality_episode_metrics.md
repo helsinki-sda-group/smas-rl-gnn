@@ -259,24 +259,36 @@ Columns from the other mode will be zero-valued but present in the CSV for schem
 # Plot a single run
 python plot_quality_episode_metrics.py \
     --metrics runs/my_run/quality_episode_metrics.csv \
-    --out plots/quality
+    --out plots/quality \
+    --smooth-window 500 \
+    --plot_std
 
-# Overlay multiple runs
+# Overlay multiple runs (max 5)
 python plot_quality_episode_metrics.py \
     --metrics runs/run1/quality_episode_metrics.csv runs/run2/quality_episode_metrics.csv \
     --label-from run_id \
-    --out plots/quality_comparison
+    --out plots/quality_comparison \
+    --smooth-window 1000
 
 # Plot specific metric groups only
 python plot_quality_episode_metrics.py \
     --metrics runs/my_run/quality_episode_metrics.csv \
-    --groups task_rates pooling decisions \
+    --groups task_rates pooling_rates conflicts_rates \
     --out plots/quality
+
+# Disable std ranges
+python plot_quality_episode_metrics.py \
+    --metrics runs/my_run/quality_episode_metrics.csv \
+    --out plots/quality \
+    --no-plot_std
 ```
 
-Available metric groups: `reward_components`, `task_rates`, `task_counts`, `task_wait_time`, `task_travel_time`, `pooling`, `decisions`, `conflicts`.
+Available metric groups: `reward_big_components`, `reward_wait_subcomponents`, `reward_deadline_subcomponents`, `reward_travel_subcomponents`, `task_rates`, `task_counts`, `task_wait_time`, `task_travel_time`, `pooling_absolute`, `pooling_rates`, `decisions_rates`, `decisions_absolute`, `conflicts_absolute`, `conflicts_rates`.
 
 X-axis is `ts` (training timestep) when available, otherwise `episode` index.
+
+When multiple runs are plotted together, line style is assigned by run order (solid, dashed, dotted, dash-dot, custom dash).
+Std is shown only as shaded ranges (never as separate std lines), and only when `--smooth-window > 1` and std plotting is enabled.
 
 ---
 

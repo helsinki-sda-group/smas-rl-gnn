@@ -399,6 +399,11 @@ chmod +x /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablati
 ~~~bash
 /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh rp_gnn_debug_1hop rp_gnn_debug_2hop --labels "1 hop,2 hop"
 ~~~
+-  Optionally print mean and std for several training runs of the same configuration:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh rp_gnn_debug_1hop rp_gnn_debug_2hop --mean_runs
+~~~
+
 -  Optionally select explicit job IDs instead of latest jobs:
 ~~~bash
 /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh rp_gnn_debug_1hop rp_gnn_debug_2hop --job-ids 6574001,6574582
@@ -427,19 +432,47 @@ action_comparison/
 /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop_rnd 1hop_critic_rnd 2hop_rnd
 ~~~
 
-3. Plot quality episode metrics for a specific job (scratch -> projappl)
+3. Plot quality episode metrics (scratch -> projappl)
 -  Activate venv first:
 ~~~bash
 cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
 source .venv/bin/activate
 ~~~
--  Run plotting for the known job file and save outputs to `episode metrics`:
+-  Plot one job with timestep smoothing (default window is 500):
 ~~~bash
-python3 plot_quality_episode_metrics.py --metrics /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_1hop_critic-1_ctc_6627936/quality_episode_metrics.csv --out "/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode metrics"
+python3 plot_quality_episode_metrics.py \
+  --metrics /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_1hop_critic-1_ctc_6627936/quality_episode_metrics.csv \
+  --out "/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode_metrics" \
+  --smooth-window 500 \
+  --plot_std
+~~~
+-  Compare multiple jobs (max 5). Line style is fixed by job order:
+   first solid, second dashed, third dotted, fourth dash-dot, fifth custom dash.
+~~~bash
+python3 plot_quality_episode_metrics.py \
+  --metrics \
+    /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_1hop_critic-1_ctc_6627936/quality_episode_metrics.csv \
+    /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_2hop-maxpool-3_ctc_6635401/quality_episode_metrics.csv \
+    /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_1hop_critic-3_ctc_6635395/quality_episode_metrics.csv \
+  --out "/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode_metrics" \
+  --smooth-window 1000 \
+  --plot_std
+~~~
+-  Disable std ranges explicitly:
+~~~bash
+python3 plot_quality_episode_metrics.py \
+  --metrics /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_1hop_critic-1_ctc_6627936/quality_episode_metrics.csv \
+  --out "/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode_metrics" \
+  --smooth-window 500 \
+  --no-plot_std
 ~~~
 -  If needed, create output directory first:
 ~~~bash
-mkdir -p "/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode metrics"
+mkdir -p "/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode_metrics"
+~~~
+-  Plot outputs are written under a generated run-name subfolder in `--out`, for example:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode_metrics/1hop_critic_ctc__2hop-maxpool_ctc/
 ~~~
 
 ## Github notes
