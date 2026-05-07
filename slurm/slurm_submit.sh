@@ -53,25 +53,35 @@ fi
 find_configs_for_method() {
   local method="$1"
   local pattern=""
+  local normalize_base
+
+  normalize_base() {
+    local base_in="$1"
+    case "$base_in" in
+      1hop_1hop_critic) echo "1hop-critic" ;;
+      *) echo "$base_in" ;;
+    esac
+  }
 
   # Parse method pattern to extract base and variant
   # Patterns:
   #   "1hop_rnd" -> base="1hop", variant="rnd" -> match "rp_gnn_1hop-*_rnd.yaml"
   #   "2hop" -> base="2hop", no variant -> match "rp_gnn_2hop-[0-9]*.yaml" (base only, no variants)
   #   "1hop_ctc" -> base="1hop", variant="ctc" -> match "rp_gnn_1hop-*_ctc.yaml"
-  #   "1hop_1hop_critic" -> base="1hop_1hop_critic" -> match "rp_gnn_1hop_1hop_critic-[0-9]*.yaml" (base only)
-  #   "1hop_1hop_critic_rnd" -> base="1hop_1hop_critic", variant="rnd" -> match "rp_gnn_1hop_1hop_critic-*_rnd.yaml"
+  #   "1hop_1hop_critic" -> normalized base="1hop-critic" -> match "rp_gnn_1hop-critic-[0-9]*.yaml" (base only)
+  #   "1hop_1hop_critic_rnd" -> normalized base="1hop-critic", variant="rnd" -> match "rp_gnn_1hop-critic-*_rnd.yaml"
+  #   "1hop-critic_ctc" -> base="1hop-critic", variant="ctc" -> match "rp_gnn_1hop-critic-*_ctc.yaml"
 
   if [[ "$method" =~ ^(.+)_(rnd|ctc)$ ]]; then
     # Method has variant suffix (e.g., "1hop_rnd" -> base="1hop", variant="rnd")
-    local base="${BASH_REMATCH[1]}"
+    local base="$(normalize_base "${BASH_REMATCH[1]}")"
     local variant="${BASH_REMATCH[2]}"
     pattern="rp_gnn_${base}-[0-9]*_${variant}.yaml"
     find "$CONFIG_DIR" -maxdepth 1 -name "$pattern" -type f | sort
   else
-    # No variant (e.g., "2hop" or "1hop_1hop_critic" -> match only base configs)
+    # No variant (e.g., "2hop" or "1hop_1hop_critic"/"1hop-critic" -> match only base configs)
     # Pattern matches -1.yaml, -2.yaml, etc. but NOT -1_rnd.yaml or -1_ctc.yaml
-    local base="$method"
+    local base="$(normalize_base "$method")"
     pattern="rp_gnn_${base}-[0-9].yaml"
     find "$CONFIG_DIR" -maxdepth 1 -name "$pattern" -type f | sort
   fi
