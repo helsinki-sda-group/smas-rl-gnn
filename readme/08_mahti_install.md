@@ -446,8 +446,8 @@ python3 plot_quality_episode_metrics.py \
   --smooth-window 500 \
   --plot_std
 ~~~
--  Compare multiple jobs (max 5). Line style is fixed by job order:
-   first solid, second dashed, third dotted, fourth dash-dot, fifth custom dash.
+-  Compare multiple jobs (max 5). In multi-job mode, metrics are not combined into one panel;
+  each metric is saved as a separate plot, and job lines are distinguished by color.
 ~~~bash
 python3 plot_quality_episode_metrics.py \
   --metrics \

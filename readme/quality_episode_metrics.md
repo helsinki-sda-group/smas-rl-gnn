@@ -287,7 +287,7 @@ Available metric groups: `reward_big_components`, `reward_wait_subcomponents`, `
 
 X-axis is `ts` (training timestep) when available, otherwise `episode` index.
 
-When multiple runs are plotted together, line style is assigned by run order (solid, dashed, dotted, dash-dot, custom dash).
+When multiple runs are plotted together, each metric is saved as a separate figure and runs are distinguished by color.
 Std is shown only as shaded ranges (never as separate std lines), and only when `--smooth-window > 1` and std plotting is enabled.
 
 ---

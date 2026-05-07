@@ -109,7 +109,6 @@ METRIC_GROUPS: dict[str, list[str]] = {
 }
 
 MAX_JOBS = 5
-LINE_STYLES = ["-", "--", ":", "-.", (0, (3, 1, 1, 1))]
 
 WAIT_SUBCOMPONENTS = [
     "rew_wait_event_pickup_sum",
@@ -141,25 +140,42 @@ def _is_percentile_metric(metric: str) -> bool:
     return bool(re.search(r"percentile|p\d+$", metric))
 
 
-def _aggregate_sum(df: pd.DataFrame, columns: list[str], target_col: str) -> None:
+def _aggregate_sum(df: pd.DataFrame, columns: list[str]) -> pd.Series | None:
     present_cols = [c for c in columns if c in df.columns]
     if not present_cols:
-        return
+        return None
     numeric = df[present_cols].apply(pd.to_numeric, errors="coerce")
-    df[target_col] = numeric.sum(axis=1)
+    return numeric.sum(axis=1)
 
 
-def _add_reward_aggregates(df: pd.DataFrame) -> None:
+def _add_reward_aggregates(df: pd.DataFrame) -> pd.DataFrame:
+    additions: dict[str, pd.Series] = {}
+
     completion_source = None
     for candidate in ["rew_valid_dropoff_sum", "rew_completion_sum"]:
         if candidate in df.columns:
             completion_source = candidate
             break
     if completion_source is not None:
-        df["rew_completion_agg_sum"] = pd.to_numeric(df[completion_source], errors="coerce")
-    _aggregate_sum(df, WAIT_SUBCOMPONENTS, "rew_wait_agg_sum")
-    _aggregate_sum(df, DEADLINE_SUBCOMPONENTS, "rew_deadline_agg_sum")
-    _aggregate_sum(df, TRAVEL_SUBCOMPONENTS, "rew_travel_agg_sum")
+        additions["rew_completion_agg_sum"] = pd.to_numeric(df[completion_source], errors="coerce")
+
+    wait_sum = _aggregate_sum(df, WAIT_SUBCOMPONENTS)
+    if wait_sum is not None:
+        additions["rew_wait_agg_sum"] = wait_sum
+
+    deadline_sum = _aggregate_sum(df, DEADLINE_SUBCOMPONENTS)
+    if deadline_sum is not None:
+        additions["rew_deadline_agg_sum"] = deadline_sum
+
+    travel_sum = _aggregate_sum(df, TRAVEL_SUBCOMPONENTS)
+    if travel_sum is not None:
+        additions["rew_travel_agg_sum"] = travel_sum
+
+    if not additions:
+        return df
+
+    additions_df = pd.DataFrame(additions, index=df.index)
+    return pd.concat([df, additions_df], axis=1)
 
 
 def _rolling_stats_by_timestep(x: np.ndarray, y: np.ndarray, window_timesteps: int) -> tuple[np.ndarray, np.ndarray]:
@@ -218,7 +234,6 @@ def _plot_group(
             if metric not in df.columns:
                 continue
             color = colors[m_idx % len(colors)]
-            linestyle = LINE_STYLES[d_idx % len(LINE_STYLES)]
             x = pd.to_numeric(df[x_col], errors="coerce").to_numpy(dtype=float)
             y = pd.to_numeric(df[metric], errors="coerce").to_numpy(dtype=float)
             valid = np.isfinite(x) & np.isfinite(y)
@@ -234,9 +249,50 @@ def _plot_group(
                 y_std = np.zeros_like(y)
 
             line_label = metric if len(labels) == 1 else f"{lbl} / {metric}"
-            ax.plot(x, y_mean, label=line_label, color=color, linestyle=linestyle, alpha=0.9)
+            ax.plot(x, y_mean, label=line_label, color=color, linestyle="-", alpha=0.9)
             if plot_std and smooth_window > 1:
                 ax.fill_between(x, y_mean - y_std, y_mean + y_std, color=color, alpha=0.15)
+    ax.set_title(title, fontsize=9)
+    ax.set_xlabel(x_col, fontsize=8)
+    ax.legend(fontsize=6, loc="best", ncol=1)
+    ax.grid(True, alpha=0.3)
+
+
+def _plot_metric_multi_job(
+    ax: "plt.Axes",
+    dataframes: list[pd.DataFrame],
+    labels: list[str],
+    metric: str,
+    x_col: str,
+    title: str,
+    smooth_window: int,
+    plot_std: bool,
+) -> None:
+    """Plot one metric across multiple jobs, using color per job."""
+    colors = plt.cm.tab10.colors  # type: ignore[attr-defined]
+    for d_idx, (df, lbl) in enumerate(zip(dataframes, labels)):
+        if metric not in df.columns:
+            continue
+
+        color = colors[d_idx % len(colors)]
+        x = pd.to_numeric(df[x_col], errors="coerce").to_numpy(dtype=float)
+        y = pd.to_numeric(df[metric], errors="coerce").to_numpy(dtype=float)
+        valid = np.isfinite(x) & np.isfinite(y)
+        if not np.any(valid):
+            continue
+        x = x[valid]
+        y = y[valid]
+
+        if smooth_window > 1:
+            y_mean, y_std = _rolling_stats_by_timestep(x, y, smooth_window)
+        else:
+            y_mean = y
+            y_std = np.zeros_like(y)
+
+        ax.plot(x, y_mean, label=lbl, color=color, linestyle="-", alpha=0.9)
+        if plot_std and smooth_window > 1:
+            ax.fill_between(x, y_mean - y_std, y_mean + y_std, color=color, alpha=0.15)
+
     ax.set_title(title, fontsize=9)
     ax.set_xlabel(x_col, fontsize=8)
     ax.legend(fontsize=6, loc="best", ncol=1)
@@ -311,7 +367,7 @@ def main() -> None:
             print(f"[WARN] File not found: {path} — skipping.")
             continue
         df = pd.read_csv(path)
-        _add_reward_aggregates(df)
+        df = _add_reward_aggregates(df)
         dataframes.append(df)
         if args.label_from == "filename":
             lbl = Path(path).stem
@@ -336,6 +392,7 @@ def main() -> None:
             dataframes[i] = df.sort_values(x_col)
 
     groups_to_plot = args.groups if args.groups else list(METRIC_GROUPS.keys())
+    is_multi_job = len(dataframes) > 1
 
     for group_name in groups_to_plot:
         if group_name not in METRIC_GROUPS:
@@ -347,22 +404,41 @@ def main() -> None:
         if not present:
             continue
 
-        fig, ax = plt.subplots(figsize=(10, 4))
-        _plot_group(
-            ax=ax,
-            dataframes=dataframes,
-            labels=labels,
-            metrics=present,
-            x_col=x_col,
-            title=group_name,
-            smooth_window=max(1, int(args.smooth_window)),
-            plot_std=bool(args.plot_std),
-        )
-        fig.tight_layout()
-        out_path = out_dir / f"quality_{group_name}.png"
-        fig.savefig(out_path, dpi=args.dpi)
-        plt.close(fig)
-        print(f"Saved: {out_path}")
+        if is_multi_job:
+            for metric in present:
+                fig, ax = plt.subplots(figsize=(10, 4))
+                _plot_metric_multi_job(
+                    ax=ax,
+                    dataframes=dataframes,
+                    labels=labels,
+                    metric=metric,
+                    x_col=x_col,
+                    title=f"{group_name}: {metric}",
+                    smooth_window=max(1, int(args.smooth_window)),
+                    plot_std=bool(args.plot_std),
+                )
+                fig.tight_layout()
+                out_path = out_dir / f"quality_{group_name}_{metric}.png"
+                fig.savefig(out_path, dpi=args.dpi)
+                plt.close(fig)
+                print(f"Saved: {out_path}")
+        else:
+            fig, ax = plt.subplots(figsize=(10, 4))
+            _plot_group(
+                ax=ax,
+                dataframes=dataframes,
+                labels=labels,
+                metrics=present,
+                x_col=x_col,
+                title=group_name,
+                smooth_window=max(1, int(args.smooth_window)),
+                plot_std=bool(args.plot_std),
+            )
+            fig.tight_layout()
+            out_path = out_dir / f"quality_{group_name}.png"
+            fig.savefig(out_path, dpi=args.dpi)
+            plt.close(fig)
+            print(f"Saved: {out_path}")
 
     print(f"Done. Plots written to: {out_dir}")
 
