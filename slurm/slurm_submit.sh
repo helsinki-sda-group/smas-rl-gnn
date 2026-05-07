@@ -68,15 +68,28 @@ find_configs_for_method() {
   #   "1hop_rnd" -> base="1hop", variant="rnd" -> match "rp_gnn_1hop-*_rnd.yaml"
   #   "2hop" -> base="2hop", no variant -> match "rp_gnn_2hop-[0-9]*.yaml" (base only, no variants)
   #   "1hop_ctc" -> base="1hop", variant="ctc" -> match "rp_gnn_1hop-*_ctc.yaml"
+  #   "1hop_ctc_cap2" -> base="1hop", variant="ctc", postfix="cap2" -> match "rp_gnn_1hop-*_ctc_cap2.yaml"
+  #   "2hop_cap2" -> base="2hop", postfix="cap2" -> match "rp_gnn_2hop-[0-9]*_cap2.yaml" (base-only cap2)
   #   "1hop_1hop_critic" -> normalized base="1hop-critic" -> match "rp_gnn_1hop-critic-[0-9]*.yaml" (base only)
   #   "1hop_1hop_critic_rnd" -> normalized base="1hop-critic", variant="rnd" -> match "rp_gnn_1hop-critic-*_rnd.yaml"
   #   "1hop-critic_ctc" -> base="1hop-critic", variant="ctc" -> match "rp_gnn_1hop-critic-*_ctc.yaml"
 
-  if [[ "$method" =~ ^(.+)_(rnd|ctc)$ ]]; then
+  if [[ "$method" =~ ^(.+)_(rnd|ctc)_cap2$ ]]; then
+    # Method has variant and cap2 suffix (e.g., "1hop_ctc_cap2")
+    local base="$(normalize_base "${BASH_REMATCH[1]}")"
+    local variant="${BASH_REMATCH[2]}"
+    pattern="rp_gnn_${base}-[0-9]*_${variant}_cap2.yaml"
+    find "$CONFIG_DIR" -maxdepth 1 -name "$pattern" -type f | sort
+  elif [[ "$method" =~ ^(.+)_(rnd|ctc)$ ]]; then
     # Method has variant suffix (e.g., "1hop_rnd" -> base="1hop", variant="rnd")
     local base="$(normalize_base "${BASH_REMATCH[1]}")"
     local variant="${BASH_REMATCH[2]}"
     pattern="rp_gnn_${base}-[0-9]*_${variant}.yaml"
+    find "$CONFIG_DIR" -maxdepth 1 -name "$pattern" -type f | sort
+  elif [[ "$method" =~ ^(.+)_cap2$ ]]; then
+    # No variant, cap2 postfix (e.g., "2hop_cap2")
+    local base="$(normalize_base "${BASH_REMATCH[1]}")"
+    pattern="rp_gnn_${base}-[0-9]*_cap2.yaml"
     find "$CONFIG_DIR" -maxdepth 1 -name "$pattern" -type f | sort
   else
     # No variant (e.g., "2hop" or "1hop_1hop_critic"/"1hop-critic" -> match only base configs)
