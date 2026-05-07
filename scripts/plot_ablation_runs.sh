@@ -29,6 +29,8 @@ Options:
                               Default: /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/plots_ablation
   --action-window <n>         Override action smoothing window from YAML template.
   --conflicts-window <n>      Override conflict smoothing window from YAML template.
+  --mean_runs                 Enable mean-runs aggregation (sets mean_runs=true in generated config).
+                              Default when omitted: false.
   -h, --help                  Show this help.
 
 Examples:
@@ -51,6 +53,7 @@ ACTION_WINDOW_OVERRIDE=""
 CONFLICTS_WINDOW_OVERRIDE=""
 JOB_IDS_CSV=""
 LABELS_CSV=""
+MEAN_RUNS_OVERRIDE="0"
 
 METHODS=()
 while [[ $# -gt 0 ]]; do
@@ -86,6 +89,10 @@ while [[ $# -gt 0 ]]; do
     --conflicts-window)
       CONFLICTS_WINDOW_OVERRIDE="$2"
       shift 2
+      ;;
+    --mean_runs)
+      MEAN_RUNS_OVERRIDE="1"
+      shift
       ;;
     -h|--help)
       usage
@@ -285,11 +292,11 @@ for i in "${!SELECTED_JOBDIRS[@]}"; do
   printf '%s\t%s\t%s\n' "$base_name" "${SELECTED_LABELS[$i]}" "${SELECTED_JOBDIRS[$i]}" >> "$MAPPING_FILE"
 done
 
-ACTION_PARAMS="$($PYTHON_BIN - "$TEMPLATE_CONFIG" "$GENERATED_CONF" "$MAPPING_FILE" "$OUTDIR" "${ACTION_WINDOW_OVERRIDE:-}" "${CONFLICTS_WINDOW_OVERRIDE:-}" <<'PY'
+ACTION_PARAMS="$($PYTHON_BIN - "$TEMPLATE_CONFIG" "$GENERATED_CONF" "$MAPPING_FILE" "$OUTDIR" "${ACTION_WINDOW_OVERRIDE:-}" "${CONFLICTS_WINDOW_OVERRIDE:-}" "$MEAN_RUNS_OVERRIDE" <<'PY'
 import sys
 from omegaconf import OmegaConf
 
-template_path, generated_path, mapping_path, outdir, action_override, conflicts_override = sys.argv[1:7]
+template_path, generated_path, mapping_path, outdir, action_override, conflicts_override, mean_runs_override = sys.argv[1:8]
 cfg = OmegaConf.load(template_path)
 
 model_dirs = []
@@ -306,6 +313,7 @@ with open(mapping_path, "r", encoding="utf-8") as f:
 cfg.model_dirs = model_dirs
 cfg.experiment_names = experiment_names
 cfg.output_dir = f"{outdir}/ablation_results"
+cfg.mean_runs = bool(int(mean_runs_override))
 
 OmegaConf.save(cfg, generated_path)
 
@@ -318,7 +326,7 @@ conflicts_out_dirname = str(script_cfg.get("conflicts_out_dirname", "conflicts_c
 action_grouped_only = int(bool(cfg.get("action_grouped_only", True)))
 action_plot_std = int(bool(cfg.get("action_plot_std", True)))
 conflicts_plot_std = int(bool(cfg.get("conflicts_plot_std", True)))
-mean_runs = int(bool(cfg.get("mean_runs", True)))
+mean_runs = int(bool(cfg.get("mean_runs", False)))
 print(f"{action_window}\t{action_out_dirname}\t{conflicts_window}\t{conflicts_out_dirname}\t{action_grouped_only}\t{action_plot_std}\t{conflicts_plot_std}\t{mean_runs}")
 PY
 )"
