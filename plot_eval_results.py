@@ -322,10 +322,6 @@ def main():
     if metrics_log is None and not compare_logs:
         raise ValueError('Expected an evaluation_metrics.log path or at least one --compare-log LABEL=PATH argument.')
     
-    print(f"Loading evaluation metrics from: {metrics_log}")
-    df = parse_metrics_log(metrics_log)
-    print(f"Loaded {len(df)} evaluation records\n")
-    
     # Load baseline data if provided
     baselines = {}
     if baseline_log:
