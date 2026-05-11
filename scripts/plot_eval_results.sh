@@ -173,25 +173,41 @@ find_baseline_log() {
   local family
   family="$(run_to_family "$run_name")"
 
-  for candidate in "$run_name" "$family"; do
-    local match_dir
-    match_dir="$(
-      find "$BASELINE_ROOT" -mindepth 1 -maxdepth 1 -type d \
-           -name "job_eval_${candidate}_*" 2>/dev/null \
+  local match_dir
+  match_dir="$(
+    find "$BASELINE_ROOT" -mindepth 1 -maxdepth 1 -type d \
+         -name "job_eval_${run_name}_*" 2>/dev/null \
       | sort | tail -n1
+  )"
+
+  if [[ -z "$match_dir" ]]; then
+    local family_regex
+    family_regex="$(family_to_regex "$family")"
+    match_dir="$(
+      find "$BASELINE_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null \
+        | sed -E 's/^job_eval_(.+)_[0-9]+$/\1/' \
+        | grep -E "$family_regex" \
+        | sort -u \
+        | while IFS= read -r matched_run; do
+            find "$BASELINE_ROOT" -mindepth 1 -maxdepth 1 -type d \
+                 -name "job_eval_${matched_run}_*" 2>/dev/null
+          done \
+        | sort | tail -n1
     )"
-    if [[ -n "$match_dir" ]]; then
-      local mf
-      mf="$(find "$match_dir" -maxdepth 1 -name 'metrics_*.log' 2>/dev/null \
-              | sort | tail -n1)"
-      if [[ -n "$mf" ]]; then
-        printf '%s\n' "$mf"
-        return 0
-      else
-        echo "  [WARN] Baseline dir found but no metrics_*.log inside: $match_dir" >&2
-      fi
+  fi
+
+  if [[ -n "$match_dir" ]]; then
+    local mf
+    mf="$(find "$match_dir" -maxdepth 1 -name 'metrics_*.log' 2>/dev/null \
+            | sort | tail -n1)"
+    if [[ -n "$mf" ]]; then
+      printf '%s\n' "$mf"
+      return 0
+    else
+      echo "  [WARN] Baseline dir found but no metrics_*.log inside: $match_dir" >&2
     fi
-  done
+  fi
+
   return 1
 }
 
