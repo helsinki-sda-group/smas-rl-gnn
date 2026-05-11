@@ -124,6 +124,11 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
                 erase_episode_dir_on_start=True,
                 console_debug=False,
                 log_conflict_metrics=bool(config.get('log_conflict_metrics', False)),
+                prune_episode_dir_after_metrics=bool(config.get('prune_episode_dir_after_metrics', False)),
+                extended_quality_metrics=bool(config.get('extended_quality_metrics', False)),
+                extended_quality_plots=bool(config.get('extended_quality_plots', False)),
+                extended_quality_include_task_level=bool(config.get('extended_quality_include_task_level', False)),
+                extended_quality_include_decision_level=bool(config.get('extended_quality_include_decision_level', False)),
             )
         )
         
@@ -147,7 +152,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             k_max=config['k_max'],
             vicinity_m=config['vicinity_m'],
             sorted_candidates=config.get('sorted_candidates', False),
-            completion_mode="dropoff",
+            completion_mode=config.get('completion_mode', 'dropoff'),
             max_steps=config['max_steps'],
             min_episode_steps=config['min_episode_steps'],
             serve_to_empty=True,
@@ -555,6 +560,8 @@ def main():
     edge_feat_dim = len(edge_features) if use_edge_rt else 0
 
     # Configuration
+    completion_mode = str(getattr(opt.env, "completion_mode", "dropoff"))
+    reward_params = dict(getattr(opt.env, "reward_params", {}) or {})
     config = {
         'sumo_cfg': opt.env.sumo_cfg,
         'use_gui': bool(opt.env.use_gui) or bool(getattr(args, "gui", False)),
@@ -582,6 +589,7 @@ def main():
         'max_travel_delay_s': float(opt.env.max_travel_delay_s),
         'max_robot_capacity': int(opt.env.max_robot_capacity),
         'conflict_resolution': str(getattr(opt.env, 'conflict_resolution', 'closest_then_capacity')),
+        'reward_params': reward_params,
         'decision_dt': int(opt.env.decision_dt),
         'min_episode_steps': int(opt.env.min_episode_steps),
         'eval_runs': int(getattr(args, "eval_runs", 3)),
@@ -589,7 +597,13 @@ def main():
         'print_steps': bool(getattr(args, "print_steps", False)),
         'deterministic': bool(getattr(args, "deterministic", False)),
         'sorted_candidates': bool(getattr(args, "sorted", False)) or bool(opt.env.sorted_candidates),
+        'completion_mode': completion_mode,
         'log_conflict_metrics': bool(getattr(opt.logging, 'log_conflict_metrics', False)),
+        'prune_episode_dir_after_metrics': bool(getattr(opt.logging, 'prune_episode_dir_after_metrics', False)),
+        'extended_quality_metrics': bool(getattr(opt.logging, 'extended_quality_metrics', False)),
+        'extended_quality_plots': bool(getattr(opt.logging, 'extended_quality_plots', False)),
+        'extended_quality_include_task_level': bool(getattr(opt.logging, 'extended_quality_include_task_level', False)),
+        'extended_quality_include_decision_level': bool(getattr(opt.logging, 'extended_quality_include_decision_level', False)),
     }
     
     # Create output directories
@@ -608,6 +622,8 @@ def main():
     print(f"Timestamp: {timestamp}")
     print(f"Model directory: {model_dir}")
     print(f"Output directory: {output_base}")
+    print(f"Completion mode: {completion_mode}")
+    print(f"Reward params: {reward_params}")
     print(f"Seeds: {args.seed_set} ({len(seeds_to_eval)} seeds)")
     print(f"Eval runs per seed: {getattr(args, 'eval_runs', 3)}")
     print(f"Moving average window: {getattr(args, 'ma_window', 10)}")
