@@ -265,6 +265,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
         # Extract detailed metrics
         from utils.metrics_calculator import EpisodeMetrics
         ep_dir = getattr(rp_logger, 'last_ep_dir', None) or rp_logger.ep_dir
+        run_dir = getattr(rp_logger, 'run_dir', None)
         episode_metrics = None
         if ep_dir and os.path.exists(ep_dir):
             try:
@@ -292,11 +293,20 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
 
         # Match training behavior: optionally prune per-episode directory after
         # metrics have been extracted and appended to run-level logs.
-        if bool(config.get('prune_episode_dir_after_metrics', False)) and ep_dir and os.path.isdir(ep_dir):
+        prune_after_metrics = bool(config.get('prune_episode_dir_after_metrics', False))
+        if prune_after_metrics and ep_dir and os.path.isdir(ep_dir):
             try:
                 shutil.rmtree(ep_dir, ignore_errors=True)
             except Exception as e:
                 print(f"Warning: Could not prune episode dir {ep_dir}: {e}")
+
+        # Also remove the per-evaluation run directory under evaluation_runs
+        # (e.g. model_ep*_ts*_seed*_att*) to avoid empty folder buildup.
+        if prune_after_metrics and run_dir and os.path.isdir(run_dir):
+            try:
+                shutil.rmtree(run_dir, ignore_errors=True)
+            except Exception as e:
+                print(f"Warning: Could not prune eval run dir {run_dir}: {e}")
 
         return {
             'reward': ep_reward,
