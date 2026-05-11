@@ -359,6 +359,85 @@ tail -n 100 /scratch/project_2012159/kbocheni/smas-rl-gnn/slurm/rp-eval-1hop-1-<
 
 Note: `run_train.sbatch` is currently tied to `train.py`, so baseline evaluation should use `run_eval_baselines.sbatch` unless you refactor the training sbatch into a generic Python-entrypoint runner.
 
+#### Evaluation of saved models (eval_saved_models.py)
+
+Use this workflow to evaluate checkpoint folders `!saved_models` on Mahti.
+
+New scripts:
+- `slurm/run_eval_saved_models.sbatch`: runs one evaluation job for one training run.
+- `slurm/eval_saved_models_submit.sh`: expands model families to concrete run names and submits one job per run.
+
+Output location follows training run names:
+~~~bash
+/scratch/project_2012159/kbocheni/smas-rl-gnn/eval_saved_models_jobs/<run_name>/
+~~~
+
+Each run writes into that folder; `eval_saved_models.py` creates timestamped subfolders there (`evaluation_YYYYmmdd_HHMMSS`).
+
+1. First use (make scripts executable)
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+chmod +x slurm/run_eval_saved_models.sbatch slurm/eval_saved_models_submit.sh
+~~~
+
+2. Submit evaluation for a list of model families
+
+Example matching your case (`2hop-maxpool_ctc_cap2` and `1hop_critic_ctc`):
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+bash slurm/eval_saved_models_submit.sh \
+  2hop-maxpool_ctc_cap2 \
+  1hop_critic_ctc \
+  --seeds eval \
+  --eval-runs 1 \
+  --model-sample 0.5 \
+  --deterministic
+~~~
+
+How family matching works:
+- `2hop-maxpool_ctc_cap2` matches run directories like `2hop-maxpool-1_ctc_cap2`, `2hop-maxpool-3_ctc_cap2`, ...
+- `1hop_critic_ctc` matches run directories like `1hop_critic-1_ctc`, `1hop_critic-2_ctc`, ...
+- If you pass an exact run name (for example `2hop-maxpool-3_ctc_cap2`), only that run is submitted.
+- Matching is strict: family text must match exactly (no auto-normalization between `_` and `-`).
+
+3. Dry-run preview before submission
+~~~bash
+bash slurm/eval_saved_models_submit.sh \
+  2hop-maxpool_ctc_cap2 1hop_critic_ctc \
+  --seeds eval --eval-runs 1 --model-sample 0.5 --deterministic \
+  --dry-run
+~~~
+
+4. Single-run manual submission (without family expansion)
+~~~bash
+sbatch --job-name=rp-eval-2hop-maxpool-3_ctc_cap2 \
+  slurm/run_eval_saved_models.sbatch \
+  2hop-maxpool-3_ctc_cap2 \
+  configs/rp_gnn_2hop-maxpool-3_ctc_cap2.yaml \
+  --seeds eval --eval-runs 1 --model-sample 0.5 --deterministic
+~~~
+
+5. Monitoring and outputs
+~~~bash
+squeue -u kbocheni
+ls -lah /scratch/project_2012159/kbocheni/smas-rl-gnn/eval_saved_models_jobs/2hop-maxpool-3_ctc_cap2
+tail -n 100 /scratch/project_2012159/kbocheni/smas-rl-gnn/slurm/rp-eval-2hop-maxpool-3_ctc_cap2-<JOB_ID>.out
+~~~
+
+Notes:
+- Model input path is resolved automatically as:
+~~~bash
+/scratch/project_2012159/kbocheni/smas-rl-gnn/runs/<run_name>/!saved_models
+~~~
+- The submit script maps each `run_name` to a config by searching `configs/rp_gnn*.yaml` for matching `logging.run_name`.
+- In batch mode, SUMO ports are auto-assigned per submitted run: `port = --sumoport-base + index` (default base `8813`).
+- You can change the base with `--sumoport-base`, for example:
+~~~bash
+bash slurm/eval_saved_models_submit.sh 2hop-maxpool_ctc_cap2 --sumoport-base 9000
+~~~
+- `--sumoport` is intentionally blocked in batch submit mode so each run gets a unique port automatically.
+- All other extra options after model names are forwarded to `eval_saved_models.py` (`--seeds`, `--eval-runs`, `--model-sample`, `--deterministic`, etc.).
+
 
 #### Plotting
 
@@ -441,8 +520,8 @@ source .venv/bin/activate
 -  Plot one job with timestep smoothing (default window is 500):
 ~~~bash
 python3 plot_quality_episode_metrics.py \
-  --metrics /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_1hop_critic-1_ctc_6627936/quality_episode_metrics.csv \
-  --out "/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode_metrics" \
+  --metrics /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_2hop-maxpool-3_ctc_cap2_6636655/quality_episode_metrics.csv \
+  --out "/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode_metrics_cap2" \
   --smooth-window 500 \
   --plot_std
 ~~~
@@ -451,10 +530,10 @@ python3 plot_quality_episode_metrics.py \
 ~~~bash
 python3 plot_quality_episode_metrics.py \
   --metrics \
-    /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_1hop_critic-1_ctc_6627936/quality_episode_metrics.csv \
-    /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_2hop-maxpool-3_ctc_6635401/quality_episode_metrics.csv \
-    /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_1hop_critic-3_ctc_6635395/quality_episode_metrics.csv \
-  --out "/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode_metrics" \
+    /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_1hop_critic-2_ctc_cap2_6636651/quality_episode_metrics.csv \
+    /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_2hop-maxpool-3_ctc_cap2_6636655/quality_episode_metrics.csv \
+    
+  --out "/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode_metrics_cap2" \
   --smooth-window 1000 \
   --plot_std
 ~~~
