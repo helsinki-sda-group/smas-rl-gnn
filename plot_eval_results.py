@@ -142,7 +142,7 @@ def parse_baseline_log(filepath):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python plot_eval_results.py <evaluation_metrics.log> [--ma-window WINDOW] [--baseline-log BASELINE_LOG]")
+        print("Usage: python plot_eval_results.py <evaluation_metrics.log> [--ma-window WINDOW] [--ma WINDOW] [--baseline-log BASELINE_LOG] [--baseline-std] [--output-dir DIR]")
         print("Example: python plot_eval_results.py eval_results/evaluation_20260206_231327/evaluation_metrics.log --baseline-log baseline_train_seeds_v2000_ms1200_mwd240_mtd900_cap2.log")
         sys.exit(1)
     
@@ -150,13 +150,14 @@ def main():
     ma_window = 10
     baseline_log = None
     baseline_std = False
+    output_dir_arg = None
 
     # Parse arguments
     args = sys.argv[2:]
     i = 0
     while i < len(args):
         arg = args[i]
-        if arg == '--ma-window' and i + 1 < len(args):
+        if arg in ('--ma-window', '--ma') and i + 1 < len(args):
             ma_window = int(args[i + 1])
             i += 2
         elif arg == '--baseline-log' and i + 1 < len(args):
@@ -165,6 +166,9 @@ def main():
         elif arg == '--baseline-std':
             baseline_std = True
             i += 1
+        elif arg == '--output-dir' and i + 1 < len(args):
+            output_dir_arg = args[i + 1]
+            i += 2
         else:
             i += 1
     
@@ -188,9 +192,13 @@ def main():
         else:
             print(f"[WARN] Baseline log not found: {baseline_log}\n")
     
-    # Output directory (same as log file)
+    # Output directory: --output-dir overrides, otherwise same dir as log file
     import os
-    output_dir = os.path.dirname(metrics_log)
+    if output_dir_arg:
+        output_dir = output_dir_arg
+        os.makedirs(output_dir, exist_ok=True)
+    else:
+        output_dir = os.path.dirname(metrics_log)
     log_name = os.path.basename(metrics_log)
     log_path = os.path.relpath(metrics_log)
     

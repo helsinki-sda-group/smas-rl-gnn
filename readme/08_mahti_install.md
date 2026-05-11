@@ -554,6 +554,86 @@ mkdir -p "/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode_metrics"
 /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode_metrics/1hop_critic_ctc__2hop-maxpool_ctc/
 ~~~
 
+4. Plot evaluation results from eval_saved_models.py (`scripts/plot_eval_results.sh`)
+
+The script finds the latest `evaluation_metrics.log` for a run (or all instances of a model family),
+auto-discovers the matching baseline log from `eval_jobs/`, checks the config snapshot for
+`completion_mode` and reward weights, and calls `plot_eval_results.py`.
+
+- For the first use, make the helper script executable:
+~~~bash
+chmod +x /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_eval_results.sh
+~~~
+
+- Plot a single evaluated run (exact run name):
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_eval_results.sh \
+  1hop_critic-1_ctc_cap2 \
+  --ma 10 --baseline-std
+~~~
+Plots are saved to:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/plots_evaluation/1hop_critic-1_ctc_cap2/
+~~~
+
+- Plot all instances of a model family at once:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_eval_results.sh \
+  1hop_critic_ctc_cap2 \
+  --ma 10 --baseline-std
+~~~
+Family `1hop_critic_ctc_cap2` expands to `1hop_critic-1_ctc_cap2`, `1hop_critic-2_ctc_cap2`, …
+Plots are saved under:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/plots_evaluation/1hop_critic_ctc_cap2/<run_name>/
+~~~
+
+- Multiple families or individual runs in one call:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_eval_results.sh \
+  1hop_critic_ctc_cap2 2hop-maxpool_ctc_cap2 \
+  --ma 10 --baseline-std
+~~~
+
+- Dry-run (preview commands without executing):
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_eval_results.sh \
+  1hop_critic_ctc_cap2 --dry-run
+~~~
+
+- Override the baseline log manually:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_eval_results.sh \
+  1hop_critic-1_ctc_cap2 \
+  --baseline-log /scratch/project_2012159/kbocheni/smas-rl-gnn/eval_jobs/job_eval_1hop_critic-1_ctc_cap2_6651232/metrics_v2000_ms2400_mwd240_mtd900_cap3.log \
+  --baseline-std
+~~~
+
+- Backward-compatible usage (direct file path, same as local):
+~~~bash
+python plot_eval_results.py \
+  /scratch/.../eval_saved_models_jobs/1hop_critic-1_ctc_cap2/evaluation_20260217_162721/evaluation_metrics.log \
+  --baseline-log .../metrics_v2000_ms2400_mwd240_mtd900_cap3.log \
+  --baseline-std --ma 10
+~~~
+Or via the shell script:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_eval_results.sh \
+  /scratch/.../evaluation_metrics.log --ma 10 --baseline-std
+~~~
+
+**Baseline auto-discovery:** the script scans
+`/scratch/project_2012159/kbocheni/smas-rl-gnn/eval_jobs/` for folders named
+`job_eval_<run_name>_<jobid>` (or the model-family variant).  It picks the
+`metrics_*.log` file inside.  If nothing is found, a warning is printed and
+plots are generated without a baseline.
+
+**Config check:** the script reads the most recent YAML snapshot from
+`eval_saved_models_jobs/<run>/config_snapshots/` and prints
+`completion_mode` (including a note for `valid_dropoff`) and reward weights
+(`w_comp`, `w_wait`, `w_travel`) so you can verify the plotted metrics
+correspond to the intended training configuration.
+
 ## Github notes
 
 ### Updating the repo from remote
