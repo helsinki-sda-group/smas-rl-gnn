@@ -518,6 +518,58 @@ cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
 source .venv/bin/activate
 ~~~
 -  Plot one job with timestep smoothing (default window is 500):
+
+4. Plot evaluation results from `eval_saved_models.py`
+-  For the first use, make the helper script executable.
+~~~bash
+chmod +x /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_eval_results.sh
+~~~
+-  The plotting wrapper resolves evaluation logs from:
+~~~bash
+/scratch/project_2012159/kbocheni/smas-rl-gnn/eval_saved_models_jobs/<run_name>/evaluation_*/evaluation_metrics.log
+~~~
+-  It also resolves baseline logs from:
+~~~bash
+/scratch/project_2012159/kbocheni/smas-rl-gnn/eval_jobs/job_eval_<run_name>_<jobid>/metrics_*.log
+~~~
+
+-  Plot one exact evaluation run:
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+bash scripts/plot_eval_results.sh 1hop_critic-3_ctc_cap2
+~~~
+-  Output is written to:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/plots_evaluation/1hop_critic-3_ctc_cap2/
+~~~
+
+-  Plot a whole model family:
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+bash scripts/plot_eval_results.sh 1hop_critic_ctc_cap2
+~~~
+-  Family plotting creates:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/plots_evaluation/1hop_critic_ctc_cap2/
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/plots_evaluation/1hop_critic_ctc_cap2/<run_name>/
+~~~
+-  In family mode, the combined family folder contains one figure per metric with baseline lines plus separate lines for all matched evaluation runs.
+
+-  To plot baselines plus mean and std across evaluation runs instead of separate run lines:
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+bash scripts/plot_eval_results.sh 1hop_critic_ctc_cap2 --mean-run
+~~~
+-  In `--mean-run` mode, per-run subfolders are still generated, but the combined family-level figures switch to mean across runs with shaded `± std`.
+
+-  Useful options:
+~~~bash
+bash scripts/plot_eval_results.sh 1hop_critic_ctc_cap2 --ma 20
+bash scripts/plot_eval_results.sh 1hop_critic_ctc_cap2 --baseline-std
+bash scripts/plot_eval_results.sh 1hop_critic_ctc_cap2 --baseline-log /path/to/metrics_v2000_ms2400_mwd240_mtd900_cap2.log
+bash scripts/plot_eval_results.sh 1hop_critic_ctc_cap2 --dry-run
+~~~
+-  Baseline lookup first tries an exact run-name match. If that is missing, it falls back to any baseline run from the same family, so a baseline log from `1hop_critic-1_ctc_cap2` can be reused for `1hop_critic-3_ctc_cap2`.
 ~~~bash
 python3 plot_quality_episode_metrics.py \
   --metrics /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_2hop-maxpool-3_ctc_cap2_6636655/quality_episode_metrics.csv \

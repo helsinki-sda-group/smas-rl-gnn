@@ -4,6 +4,7 @@ Plot evaluation results from evaluation_metrics.log
 """
 
 import sys
+import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -140,20 +141,153 @@ def parse_baseline_log(filepath):
     return baselines
 
 
+def parse_compare_log_spec(spec):
+    """Parse LABEL=PATH compare-log specs."""
+    if '=' in spec:
+        label, path = spec.split('=', 1)
+        return label, path
+    path = spec
+    label = os.path.basename(os.path.dirname(os.path.dirname(path))) or os.path.basename(path)
+    return label, path
+
+
+def group_metric_by_ts(df, metric_key):
+    """Aggregate a metric by timestep within one evaluation log."""
+    grouped = df.groupby('ts')[metric_key].agg(['mean', 'std', 'count']).reset_index()
+    grouped['std'] = grouped['std'].fillna(0.0)
+    return grouped
+
+
+def add_baseline_lines(ax, baselines, reward_key, baseline_std):
+    """Add baseline mean lines and optional std bands for a metric."""
+    if not baselines:
+        return
+
+    baseline_colors = {'random': '#d62728', 'greedy': '#ff7f0e', 'unique': '#8c564b'}
+    baseline_labels = {'random': 'Random', 'greedy': 'Greedy', 'unique': 'Greedy-Unique'}
+    mean_key = 'mean' if reward_key == 'rew' else f'{reward_key}_mean'
+    std_key = 'std' if reward_key == 'rew' else f'{reward_key}_std'
+
+    for pol, stats in baselines.items():
+        mean_val = stats.get(mean_key)
+        std_val = stats.get(std_key)
+        if mean_val is None:
+            continue
+        color = baseline_colors.get(pol, '#95a5a6')
+        label = baseline_labels.get(pol, pol.capitalize())
+        ax.axhline(mean_val, color=color, linestyle='--', linewidth=2.5, alpha=0.9, label=f'{label} Baseline')
+        if baseline_std and std_val is not None:
+            ax.axhline(mean_val + std_val, color=color, linestyle=':', linewidth=1.5, alpha=0.7)
+            ax.axhline(mean_val - std_val, color=color, linestyle=':', linewidth=1.5, alpha=0.7)
+
+
+def plot_aggregate_metric(run_frames, reward_key, ylabel, fname, output_dir, baselines, baseline_std, mean_run):
+    """Plot one metric across multiple evaluation runs."""
+    available = []
+    for label, df in run_frames:
+        if reward_key not in df.columns:
+            continue
+        grouped = group_metric_by_ts(df, reward_key)
+        series = grouped[['ts', 'mean']].rename(columns={'mean': label}).set_index('ts')
+        available.append(series)
+
+    if not available:
+        print(f"[INFO] Column '{reward_key}' not present in any compare log — skipping {fname}")
+        return
+
+    merged = pd.concat(available, axis=1, sort=True).sort_index()
+    ts = merged.index.to_numpy()
+
+    fig, ax = plt.subplots(figsize=(12, 6), facecolor='#fafafa')
+    ax.set_facecolor('#fafafa')
+
+    if mean_run:
+        run_mean = merged.mean(axis=1, skipna=True)
+        run_std = merged.std(axis=1, skipna=True).fillna(0.0)
+        ax.plot(ts, run_mean.values, color='#3498db', linewidth=2.5, alpha=0.95, label='Mean Across Runs')
+        ax.fill_between(ts, (run_mean - run_std).values, (run_mean + run_std).values,
+                        color='#3498db', alpha=0.2, label='Run Std')
+        export_df = pd.DataFrame({
+            'ts': ts,
+            'mean': run_mean.values,
+            'std': run_std.values,
+            'count_runs': merged.notna().sum(axis=1).values,
+        })
+    else:
+        cmap = plt.get_cmap('tab10')
+        for idx, col in enumerate(merged.columns):
+            ax.plot(ts, merged[col].values, linewidth=2.0, alpha=0.9,
+                    color=cmap(idx % 10), label=col)
+        export_df = merged.reset_index()
+
+    add_baseline_lines(ax, baselines, reward_key, baseline_std)
+
+    ax.set_xlabel('Training Steps', fontsize=11, fontweight='bold')
+    ax.set_ylabel(ylabel, fontsize=11, fontweight='bold')
+    title_mode = 'Mean ± Std Across Evaluation Runs' if mean_run else 'Separate Evaluation Runs'
+    ax.set_title(f'{ylabel} vs Training Steps ({title_mode})', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=9, loc='best')
+    ax.grid(alpha=0.25)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    plt.tight_layout()
+    output_file = os.path.join(output_dir, fname)
+    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    print(f"[OK] Saved {output_file}")
+    plt.close()
+
+    csv_name = os.path.splitext(fname)[0] + '_data.csv'
+    export_path = os.path.join(output_dir, csv_name)
+    export_df.to_csv(export_path, index=False)
+    print(f"[OK] Saved {export_path}")
+
+
+def plot_aggregate_runs(compare_logs, output_dir, baselines, baseline_std, mean_run):
+    """Plot family-level comparisons across multiple evaluation runs."""
+    run_frames = []
+    for spec in compare_logs:
+        label, path = parse_compare_log_spec(spec)
+        if not os.path.exists(path):
+            print(f"[WARN] Compare log not found: {path}")
+            continue
+        df = parse_metrics_log(path)
+        print(f"Loaded compare log for {label}: {path} ({len(df)} rows)")
+        run_frames.append((label, df))
+
+    if not run_frames:
+        raise ValueError('No valid compare logs were provided.')
+
+    plot_aggregate_metric(run_frames, 'rew', 'Mean Evaluation Reward', 'reward_vs_timesteps.png',
+                          output_dir, baselines, baseline_std, mean_run)
+
+    for reward_key, ylabel, fname in [
+        ('trav', 'Travel Reward', 'reward_trav_vs_timesteps.png'),
+        ('dln', 'Deadline Reward', 'reward_dln_vs_timesteps.png'),
+        ('wait', 'Wait Reward', 'reward_wait_vs_timesteps.png'),
+        ('comp', 'Completion Reward', 'reward_comp_vs_timesteps.png'),
+    ]:
+        plot_aggregate_metric(run_frames, reward_key, ylabel, fname,
+                              output_dir, baselines, baseline_std, mean_run)
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python plot_eval_results.py <evaluation_metrics.log> [--ma-window WINDOW] [--ma WINDOW] [--baseline-log BASELINE_LOG] [--baseline-std] [--output-dir DIR]")
+        print("   or: python plot_eval_results.py --compare-log LABEL=PATH [--compare-log LABEL=PATH ...] [--mean-run] [--baseline-log BASELINE_LOG] [--output-dir DIR]")
         print("Example: python plot_eval_results.py eval_results/evaluation_20260206_231327/evaluation_metrics.log --baseline-log baseline_train_seeds_v2000_ms1200_mwd240_mtd900_cap2.log")
         sys.exit(1)
-    
-    metrics_log = sys.argv[1]
+
+    metrics_log = None
     ma_window = 10
     baseline_log = None
     baseline_std = False
     output_dir_arg = None
+    compare_logs = []
+    mean_run = False
 
     # Parse arguments
-    args = sys.argv[2:]
+    args = sys.argv[1:]
     i = 0
     while i < len(args):
         arg = args[i]
@@ -166,11 +300,27 @@ def main():
         elif arg == '--baseline-std':
             baseline_std = True
             i += 1
+        elif arg == '--compare-log' and i + 1 < len(args):
+            compare_logs.append(args[i + 1])
+            i += 2
+        elif arg.startswith('--compare-log='):
+            compare_logs.append(arg.split('=', 1)[1])
+            i += 1
+        elif arg in ('--mean-run', '--mean_run'):
+            mean_run = True
+            i += 1
         elif arg == '--output-dir' and i + 1 < len(args):
             output_dir_arg = args[i + 1]
             i += 2
-        else:
+        elif arg.startswith('--'):
             i += 1
+        else:
+            if metrics_log is None:
+                metrics_log = arg
+            i += 1
+
+    if metrics_log is None and not compare_logs:
+        raise ValueError('Expected an evaluation_metrics.log path or at least one --compare-log LABEL=PATH argument.')
     
     print(f"Loading evaluation metrics from: {metrics_log}")
     df = parse_metrics_log(metrics_log)
@@ -179,7 +329,6 @@ def main():
     # Load baseline data if provided
     baselines = {}
     if baseline_log:
-        import os
         if os.path.exists(baseline_log):
             baselines = parse_baseline_log(baseline_log)
             print(f"Loaded baselines from: {baseline_log}")
@@ -193,12 +342,21 @@ def main():
             print(f"[WARN] Baseline log not found: {baseline_log}\n")
     
     # Output directory: --output-dir overrides, otherwise same dir as log file
-    import os
     if output_dir_arg:
         output_dir = output_dir_arg
         os.makedirs(output_dir, exist_ok=True)
     else:
-        output_dir = os.path.dirname(metrics_log)
+        output_dir = os.path.dirname(metrics_log) if metrics_log else os.getcwd()
+
+    if compare_logs:
+        print("Generating aggregate comparison plots...")
+        plot_aggregate_runs(compare_logs, output_dir, baselines, baseline_std, mean_run)
+        print(f"\n[OK] Aggregate plots saved to {output_dir}")
+        return
+
+    print(f"Loading evaluation metrics from: {metrics_log}")
+    df = parse_metrics_log(metrics_log)
+    print(f"Loaded {len(df)} evaluation records\n")
     log_name = os.path.basename(metrics_log)
     log_path = os.path.relpath(metrics_log)
     

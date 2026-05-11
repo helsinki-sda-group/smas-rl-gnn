@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # scripts/plot_eval_results.sh
 #
 # Plot evaluation results from eval_saved_models.py runs on Mahti.
@@ -23,6 +23,7 @@
 # Options:
 #   --ma N             Moving average window (default: 10)
 #   --baseline-std     Show baseline +/-1 std bands
+#   --mean-run         For family plots, show mean +/- std across runs instead of separate run lines
 #   --baseline-log F   Override baseline log path (applies to all runs)
 #   --output-dir D     Override plots output root
 #   --dry-run          Print commands without executing
@@ -48,6 +49,7 @@ Usage:
 Options:
   --ma N             Moving average window (default: 10)
   --baseline-std     Show baseline +/-1 std bands
+  --mean-run         For family plots, show mean +/- std across runs
   --baseline-log F   Override baseline log path for all runs
   --output-dir D     Override plots output root (default: plots_evaluation/)
   --dry-run          Print commands without executing
@@ -62,6 +64,7 @@ EOF
 TARGETS=()
 MA_WINDOW=10
 BASELINE_STD=0
+MEAN_RUN=0
 BASELINE_LOG_OVERRIDE=""
 OUTPUT_DIR_OVERRIDE=""
 DRY_RUN=0
@@ -77,6 +80,8 @@ while [[ $# -gt 0 ]]; do
       MA_WINDOW="$2"; shift 2 ;;
     --baseline-std)
       BASELINE_STD=1; shift ;;
+    --mean-run|--mean_run)
+      MEAN_RUN=1; shift ;;
     --baseline-log)
       BASELINE_LOG_OVERRIDE="$2"; shift 2 ;;
     --output-dir)
@@ -273,6 +278,8 @@ fi
 
 declare -a RUN_LIST       # run names
 declare -a SUBDIR_LIST    # output subfolder per run
+declare -a AGG_TARGETS    # family target names for combined plots
+declare -a AGG_RUNS       # newline-separated run lists per aggregate target
 
 for target in "${TARGETS[@]}"; do
 
@@ -315,6 +322,11 @@ for target in "${TARGETS[@]}"; do
     RUN_LIST+=("$rn")
     SUBDIR_LIST+=("$local_subdir")
   done
+
+  if [[ ! ( ${#resolved[@]} -eq 1 && "${resolved[0]}" == "$target" ) ]]; then
+    AGG_TARGETS+=("$target")
+    AGG_RUNS+=("$(printf '%s\n' "${resolved[@]}")")
+  fi
 done
 
 # --------------------------------------------------------------------------- #
@@ -388,6 +400,82 @@ for idx in "${!RUN_LIST[@]}"; do
       SUCCESS=$((SUCCESS + 1))
     else
       echo "  [ERROR] Plotting failed for $run_name"
+      FAILED=$((FAILED + 1))
+    fi
+  fi
+done
+
+# --------------------------------------------------------------------------- #
+# Plot combined family-level views
+# --------------------------------------------------------------------------- #
+
+for idx in "${!AGG_TARGETS[@]}"; do
+  target="${AGG_TARGETS[$idx]}"
+  mapfile -t target_runs <<< "${AGG_RUNS[$idx]}"
+
+  echo ""
+  echo "=== Combined: $target ==="
+
+  out_dir="$PLOTS_ROOT/$target"
+  mkdir -p "$out_dir"
+
+  compare_args=()
+  valid_runs=0
+  for rn in "${target_runs[@]}"; do
+    metrics_log="$(find_metrics_log "$EVAL_ROOT/$rn")"
+    if [[ -z "$metrics_log" ]]; then
+      echo "  [WARN] Skipping $rn in combined plots: no evaluation_metrics.log found"
+      continue
+    fi
+    compare_args+=("--compare-log" "$rn=$metrics_log")
+    valid_runs=$((valid_runs + 1))
+  done
+
+  if [[ $valid_runs -eq 0 ]]; then
+    echo "  [ERROR] No valid evaluation logs found for combined target '$target'"
+    FAILED=$((FAILED + 1))
+    continue
+  fi
+
+  baseline_arg=""
+  if [[ -n "$BASELINE_LOG_OVERRIDE" ]]; then
+    baseline_arg="$BASELINE_LOG_OVERRIDE"
+    echo "  Baseline log: $baseline_arg  (override)"
+  else
+    for rn in "${target_runs[@]}"; do
+      if baseline_log="$(find_baseline_log "$rn")"; then
+        baseline_arg="$baseline_log"
+        break
+      fi
+    done
+    if [[ -n "$baseline_arg" ]]; then
+      echo "  Baseline log: $baseline_arg"
+    else
+      echo "  [WARN] No baseline log found for combined target '$target' in $BASELINE_ROOT"
+    fi
+  fi
+
+  py_cmd=(
+    python "$REPO/plot_eval_results.py"
+    --output-dir "$out_dir"
+    --ma "$MA_WINDOW"
+  )
+  [[ $MEAN_RUN -eq 1 ]] && py_cmd+=("--mean-run")
+  [[ $BASELINE_STD -eq 1 ]] && py_cmd+=("--baseline-std")
+  [[ -n "$baseline_arg" ]] && py_cmd+=("--baseline-log" "$baseline_arg")
+  py_cmd+=("${compare_args[@]}")
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    printf '  [DRY-RUN] '
+    printf '%q ' "${py_cmd[@]}"
+    printf '\n'
+    SUCCESS=$((SUCCESS + 1))
+  else
+    if "${py_cmd[@]}"; then
+      echo "  [OK] Combined plots saved to: $out_dir"
+      SUCCESS=$((SUCCESS + 1))
+    else
+      echo "  [ERROR] Combined plotting failed for $target"
       FAILED=$((FAILED + 1))
     fi
   fi
