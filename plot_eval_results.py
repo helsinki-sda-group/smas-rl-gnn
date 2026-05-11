@@ -355,20 +355,31 @@ def main():
     print(f"[OK] Saved {len(seeds_unique)} per-seed plots")
     
     # Plot 4: Component breakdown
+    # Columns: rew=total, comp=completion, wait=wait, trav=travel (wait_travel),
+    #          dln=deadline (deadline reward type). cap/step not plotted.
     try:
         eval_sorted = df.sort_values('ts').reset_index(drop=True)
-        all_reward = eval_sorted['reward'].values
-        all_cap = eval_sorted['cap'].values
-        all_mdl = eval_sorted['mdl'].values
-        all_wait = eval_sorted['wait'].values
-        all_comp = eval_sorted['comp'].values
-        
+        # Determine travel/deadline column
+        travel_col = 'trav' if 'trav' in df.columns else ('dln' if 'dln' in df.columns else None)
+        required = ['rew', 'wait', 'comp']
+        if travel_col:
+            required.append(travel_col)
+        missing = [c for c in required if c not in df.columns]
+        if missing:
+            raise KeyError(f"Missing columns for component breakdown: {missing}")
+
+        all_reward = eval_sorted['rew'].values
+        all_wait   = eval_sorted['wait'].values
+        all_comp   = eval_sorted['comp'].values
+        all_travel = eval_sorted[travel_col].values if travel_col else np.zeros(len(all_reward))
+        travel_label = 'Travel' if travel_col == 'trav' else ('Deadline' if travel_col == 'dln' else 'N/A')
+
         if len(all_reward) > 0:
             fig = plt.figure(figsize=(14, 8), facecolor='#fafafa')
             gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.25)
-            
+
             eps = np.arange(len(all_reward))
-            
+
             # Total reward
             ax = fig.add_subplot(gs[0, 0])
             ax.set_facecolor('#fafafa')
@@ -380,32 +391,32 @@ def main():
             ax.grid(alpha=0.25)
             ax.spines['top'].set_visible(False)
             ax.spines['right'].set_visible(False)
-            
-            # Capacity
+
+            # Completion component
             ax = fig.add_subplot(gs[0, 1])
             ax.set_facecolor('#fafafa')
-            ax.plot(eps, all_cap, 'o-', alpha=0.7, color='#e74c3c', markersize=4)
-            ax.fill_between(eps, all_cap, alpha=0.3, color='#e74c3c')
+            ax.plot(eps, all_comp, 'o-', alpha=0.7, color='#27ae60', markersize=4)
+            ax.fill_between(eps, all_comp, alpha=0.3, color='#27ae60')
             ax.set_xlabel('Evaluation Index', fontsize=10, fontweight='bold')
-            ax.set_ylabel('Capacity Reward', fontsize=10, fontweight='bold')
-            ax.set_title('Capacity Utilization', fontsize=11, fontweight='bold')
+            ax.set_ylabel('Completion Reward', fontsize=10, fontweight='bold')
+            ax.set_title('Completion Component', fontsize=11, fontweight='bold')
             ax.grid(alpha=0.25)
             ax.spines['top'].set_visible(False)
             ax.spines['right'].set_visible(False)
-            
-            # Component breakdown
+
+            # Stacked component breakdown
             ax = fig.add_subplot(gs[1, :])
             ax.set_facecolor('#fafafa')
             baseline = np.zeros(len(eps))
-            ax.fill_between(eps, baseline, baseline + all_mdl,
-                            color='#e74c3c', alpha=0.4, label='Middleware')
-            ax.fill_between(eps, baseline + all_mdl, 
-                            baseline + all_mdl + all_wait,
+            ax.fill_between(eps, baseline, baseline + all_travel,
+                            color='#e74c3c', alpha=0.4, label=travel_label)
+            ax.fill_between(eps, baseline + all_travel,
+                            baseline + all_travel + all_wait,
                             color='#f39c12', alpha=0.4, label='Wait')
-            ax.fill_between(eps, baseline + all_mdl + all_wait,
-                            baseline + all_mdl + all_wait + all_comp,
+            ax.fill_between(eps, baseline + all_travel + all_wait,
+                            baseline + all_travel + all_wait + all_comp,
                             color='#27ae60', alpha=0.4, label='Completion')
-            
+
             ax.set_xlabel('Evaluation Index', fontsize=10, fontweight='bold')
             ax.set_ylabel('Reward', fontsize=10, fontweight='bold')
             ax.set_title('Reward Component Breakdown', fontsize=11, fontweight='bold')
@@ -422,12 +433,16 @@ def main():
     except Exception as e:
         print(f"[WARN] Could not generate component breakdown plot: {e}")
     
-    # --- Additional Plots: reward_mdl, reward_wait, reward_comp ---
+    # --- Additional Plots: trav/dln, wait, comp vs timesteps ---
     for reward_key, ylabel, fname, baseline_key, color in [
-        ("mdl", "Middleware Reward", "reward_mdl_vs_timesteps.png", "mdl", "#e74c3c"),
-        ("wait", "Wait Reward", "reward_wait_vs_timesteps.png", "wait", "#f39c12"),
-        ("comp", "Completion Reward", "reward_comp_vs_timesteps.png", "comp", "#27ae60"),
+        ("trav", "Travel Reward",   "reward_trav_vs_timesteps.png",  "trav", "#e74c3c"),
+        ("dln",  "Deadline Reward", "reward_dln_vs_timesteps.png",   "dln",  "#e74c3c"),
+        ("wait", "Wait Reward",     "reward_wait_vs_timesteps.png",  "wait", "#f39c12"),
+        ("comp", "Completion Reward","reward_comp_vs_timesteps.png", "comp", "#27ae60"),
     ]:
+        if reward_key not in df.columns:
+            print(f"[INFO] Column '{reward_key}' not present in log — skipping {fname}")
+            continue
         grouped = df.groupby('ts')[reward_key].agg(['mean', 'std', 'count']).reset_index()
         ts = grouped['ts'].values
         means = grouped['mean'].values

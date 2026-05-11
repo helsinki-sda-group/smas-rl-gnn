@@ -162,7 +162,7 @@ resolve_target() {
 find_metrics_log() {
   local run_dir="$1"
   find "$run_dir" -mindepth 2 -maxdepth 2 -name 'evaluation_metrics.log' 2>/dev/null \
-    | sort | tail -n1
+    | sort -u | tail -n1
 }
 
 # Find a baseline metrics_*.log for a given run name, trying exact match then
