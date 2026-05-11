@@ -18,6 +18,7 @@ import sys
 import argparse
 import glob
 import re
+import shutil
 from datetime import datetime
 import numpy as np
 import pandas as pd
@@ -288,6 +289,15 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
         
         env.close()
         rp_logger.close()
+
+        # Match training behavior: optionally prune per-episode directory after
+        # metrics have been extracted and appended to run-level logs.
+        if bool(config.get('prune_episode_dir_after_metrics', False)) and ep_dir and os.path.isdir(ep_dir):
+            try:
+                shutil.rmtree(ep_dir, ignore_errors=True)
+            except Exception as e:
+                print(f"Warning: Could not prune episode dir {ep_dir}: {e}")
+
         return {
             'reward': ep_reward,
             'episode_metrics': episode_metrics,
