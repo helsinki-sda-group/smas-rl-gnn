@@ -113,7 +113,7 @@ def parse_baseline_log(filepath):
         if line.startswith('pol') and 'rew±std' in line:
             summary_start = i
     if summary_start is not None:
-        metric_names = ['rew', 'cap', 'step', 'mdl', 'wait', 'comp', 'nsv']
+        metric_names = ['rew', 'cap', 'step', 'dln', 'wait', 'trav', 'comp', 'nsv']
         for line in lines[summary_start+1:]:
             if not line or line.startswith('#'):
                 break
