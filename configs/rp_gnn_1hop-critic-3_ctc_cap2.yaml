@@ -11,7 +11,7 @@ env:
   min_episode_steps: 100
   decision_dt: 60
   max_wait_delay_s: 240.0
-  max_travel_delay_s: 900.0
+  max_travel_delay_s: 240.0
   max_robot_capacity: 2
   conflict_resolution: closest_then_capacity
   sorted_candidates: false
@@ -22,9 +22,9 @@ env:
   reward_params:
     reward_type: wait_travel
     w_comp: 2.0
-    w_wait: 1.5
-    w_travel: 1.0
-    w_deadline: 10.0
+    w_wait: 0
+    w_travel: 0
+    w_deadline: 0
     wait_cap: 600.0
     travel_cap: 90.0
     deadline_cap: 600.0
