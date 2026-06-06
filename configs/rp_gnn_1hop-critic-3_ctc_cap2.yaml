@@ -1,5 +1,5 @@
 env:
-  sumo_cfg: /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/configs/small_net_cap2.sumocfg
+  sumo_cfg: /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/configs/small_net_cap2_wave.sumocfg
   use_gui: false
   R: 6
   K_max: 3
