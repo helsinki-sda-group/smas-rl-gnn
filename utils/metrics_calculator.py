@@ -53,6 +53,16 @@ class EpisodeMetrics:
     macro_reward_mean: float = 0.0
     macro_steps_done: int = 0
 
+    # new: deadline / valid-completion breakdown
+    dropoff_event_count: int = 0
+    dropoff_event_rate: float = 0.0
+    valid_completed_tasks: int = 0
+    valid_completion_rate: float = 0.0
+    invalid_dropoff_count: int = 0
+    invalid_dropoff_rate: float = 0.0
+    dropoff_deadline_violated: int = 0
+    dropoff_deadline_violation_rate: float = 0.0
+
 
 def compute_episode_metrics_from_logs(
     episode_dir: str,
@@ -168,6 +178,52 @@ def compute_episode_metrics_from_logs(
     picked_not_completed = (picked_up_mask & ~completed_mask).sum()
     metrics.picked_not_completed = int(picked_not_completed)
     metrics.picked_not_completed_rate = picked_not_completed / picked_up if picked_up > 0 else 0.0
+
+    # valid-completion and deadline breakdown
+    has_pdl = "pickup_deadline" in df_lifecycle.columns
+    has_ddl = "dropoff_deadline" in df_lifecycle.columns
+    if has_ddl:
+        df_lifecycle["dropoff_deadline"] = pd.to_numeric(df_lifecycle["dropoff_deadline"], errors="coerce")
+    if has_pdl:
+        pass  # already coerced above
+
+    dropoff_ev = int(completed_mask.sum())
+    metrics.dropoff_event_count = dropoff_ev
+    metrics.dropoff_event_rate = dropoff_ev / total_tasks if total_tasks > 0 else 0.0
+
+    if dropoff_ev > 0 and has_pdl and has_ddl:
+        dropped_df = df_lifecycle[completed_mask].copy()
+        pickup_ok = (
+            dropped_df["actual_pickup_time"].notna() &
+            dropped_df["pickup_deadline"].notna() &
+            (dropped_df["actual_pickup_time"] <= dropped_df["pickup_deadline"])
+        )
+        dropoff_ok = (
+            dropped_df["actual_dropoff_time"].notna() &
+            dropped_df["dropoff_deadline"].notna() &
+            (dropped_df["actual_dropoff_time"] <= dropped_df["dropoff_deadline"])
+        )
+        valid_mask = pickup_ok & dropoff_ok
+        valid_count = int(valid_mask.sum())
+        metrics.valid_completed_tasks = valid_count
+        metrics.valid_completion_rate = valid_count / total_tasks if total_tasks > 0 else 0.0
+        metrics.invalid_dropoff_count = dropoff_ev - valid_count
+        metrics.invalid_dropoff_rate = metrics.invalid_dropoff_count / total_tasks if total_tasks > 0 else 0.0
+
+        ddl_violated = int(
+            (dropped_df["actual_dropoff_time"].notna() &
+             dropped_df["dropoff_deadline"].notna() &
+             (dropped_df["actual_dropoff_time"] > dropped_df["dropoff_deadline"])).sum()
+        )
+        metrics.dropoff_deadline_violated = ddl_violated
+        metrics.dropoff_deadline_violation_rate = ddl_violated / total_tasks if total_tasks > 0 else 0.0
+    else:
+        metrics.valid_completed_tasks = 0
+        metrics.valid_completion_rate = 0.0
+        metrics.invalid_dropoff_count = 0
+        metrics.invalid_dropoff_rate = 0.0
+        metrics.dropoff_deadline_violated = 0
+        metrics.dropoff_deadline_violation_rate = 0.0
 
     debug_path = os.path.join(episode_dir, "debug.csv")
     noop_count = 0

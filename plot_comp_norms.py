@@ -59,12 +59,34 @@ def _plot_conflicts(conflicts_log: Path, out_dir: Path) -> None:
         ],
     )
 
-    if "p_win_given_ego_action" not in cdf.columns:
-        denom = cdf["conflicts_total"].replace(0, pd.NA)
-        cdf["p_win_given_ego_action"] = (cdf["winner_pickup"] / denom).fillna(0.0)
-    if "p_win_given_high_logit" not in cdf.columns:
-        denom = cdf["conflicts_total"].replace(0, pd.NA)
-        cdf["p_win_given_high_logit"] = (cdf["winner_margin"] / denom).fillna(0.0)
+    denom = cdf["conflicts_total"].replace(0, pd.NA)
+
+    if "p_resolver_matches_pickup" not in cdf.columns:
+        if "p_win_given_ego_action" in cdf.columns:
+            cdf["p_resolver_matches_pickup"] = pd.to_numeric(cdf["p_win_given_ego_action"], errors="coerce").fillna(0.0)
+        else:
+            cdf["p_resolver_matches_pickup"] = (cdf["winner_pickup"] / denom).fillna(0.0)
+    else:
+        cdf["p_resolver_matches_pickup"] = pd.to_numeric(cdf["p_resolver_matches_pickup"], errors="coerce").fillna(0.0)
+
+    if "p_resolver_matches_margin" not in cdf.columns:
+        if "p_win_given_high_logit" in cdf.columns:
+            cdf["p_resolver_matches_margin"] = pd.to_numeric(cdf["p_win_given_high_logit"], errors="coerce").fillna(0.0)
+        else:
+            cdf["p_resolver_matches_margin"] = (cdf["winner_margin"] / denom).fillna(0.0)
+    else:
+        cdf["p_resolver_matches_margin"] = pd.to_numeric(cdf["p_resolver_matches_margin"], errors="coerce").fillna(0.0)
+
+    for col in [
+        "p_resolver_matches_raw_logit",
+        "p_margin_matches_pickup",
+        "p_raw_logit_matches_pickup",
+        "p_policy_action_matches_resolver",
+    ]:
+        if col not in cdf.columns:
+            cdf[col] = 0.0
+        else:
+            cdf[col] = pd.to_numeric(cdf[col], errors="coerce").fillna(0.0)
 
     x = cdf["episode"]
 
@@ -110,8 +132,12 @@ def _plot_conflicts(conflicts_log: Path, out_dir: Path) -> None:
     _save_multi_plot(
         x,
         [
-            ("P(win|ego_action)", cdf["p_win_given_ego_action"]),
-            ("P(win|high_logit)", cdf["p_win_given_high_logit"]),
+            ("p_resolver_matches_pickup", cdf["p_resolver_matches_pickup"]),
+            ("p_resolver_matches_margin", cdf["p_resolver_matches_margin"]),
+            ("p_resolver_matches_raw_logit", cdf["p_resolver_matches_raw_logit"]),
+            ("p_margin_matches_pickup", cdf["p_margin_matches_pickup"]),
+            ("p_raw_logit_matches_pickup", cdf["p_raw_logit_matches_pickup"]),
+            ("p_policy_action_matches_resolver", cdf["p_policy_action_matches_resolver"]),
         ],
         "Conflict Win Probabilities",
         "probability",

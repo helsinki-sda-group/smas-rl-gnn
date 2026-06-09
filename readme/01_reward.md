@@ -21,6 +21,7 @@ This document describes how rewards are computed in the current codebase and how
 Under `env.reward_params`:
 
 - `reward_type`: `deadline` or `wait_travel`
+- `completion_mode`: `pickup`, `dropoff` (default), or `valid_dropoff`
 - `w_comp`, `w_wait`, `w_travel`, `w_deadline`
 - `wait_cap`, `travel_cap`, `deadline_cap`
 - `terminal_wait_share_unowned`
@@ -47,17 +48,42 @@ $$
 
 ### 1.1 Completion term
 
-If `completion_mode == "pickup"`:
+The `completion_mode` setting controls which events trigger the $w_{comp}$ reward.
+
+**`pickup`** — reward on pickup events:
 
 $$
 r^{comp}_i = w_{comp} \cdot |\text{new\_pickups}_i|
 $$
 
-Else (`dropoff`, current default):
+Dropoff events are still tracked for diagnostics but give no reward in this mode.
+
+**`dropoff`** (default) — reward on every dropoff:
 
 $$
 r^{comp}_i = w_{comp} \cdot |\text{new\_dropoffs}_i|
 $$
+
+All dropoffs are rewarded regardless of whether deadlines were met.
+
+**`valid_dropoff`** — reward only on deadline-compliant dropoffs:
+
+$$
+r^{comp}_i = w_{comp} \cdot |\{j \in \text{new\_dropoffs}_i \mid t^{pu}_j \le dl^{pu}_j \text{ AND } t^{do}_j \le dl^{do}_j\}|
+$$
+
+where $t^{pu}_j$ / $t^{do}_j$ are the actual pickup / dropoff times and $dl^{pu}_j$ / $dl^{do}_j$ are the corresponding deadlines stored in `_task_lifecycle`. A task that misses either deadline at dropoff time counts as an **invalid dropoff** and receives $r^{comp} = 0$.
+
+Validity check (see `_is_valid_completion` in `rl_controller_adapter.py`):
+
+```
+valid iff actual_pickup_time  <= pickup_deadline
+         AND actual_dropoff_time <= dropoff_deadline
+```
+
+If any of the four lifecycle timestamps is missing, the task is treated as invalid.
+
+In all three modes every observed dropoff is recorded in the accumulator under `dropoff_event_*` keys, and the per-task valid/invalid split is always tracked under `valid_dropoff_*` / `invalid_dropoff_*` for diagnostic logging (see `quality_episode_metrics.md`).
 
 ### 1.2 Wait term (event at pickup)
 

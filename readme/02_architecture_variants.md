@@ -26,7 +26,7 @@ In `configs/rp_gnn.yaml`:
 - `env.two_hop` (bool)
 - `env.two_hop_directed` (bool)
 - `env.two_hop_critic` (bool)
-- `env.two_hop_arch` in `{plain, comp_corr}` (also accepts alias `arch-3.2` → `comp_corr`)
+- `env.two_hop_arch` in `{plain, comp_corr, comp_corr_maxpool}` (also accepts alias `arch-3.2` → `comp_corr`)
 
 ### Feature/edge flags
 
@@ -67,7 +67,7 @@ So 2-hop introduces robot-competition context into each ego graph.
 
 In `train.py`:
 
-- `use_competitor_fusion = (two_hop && two_hop_arch == "comp_corr")`
+- `use_competitor_fusion = (two_hop && two_hop_arch in {"comp_corr", "comp_corr_maxpool"})`
 - `use_two_hop_actor = (two_hop && two_hop_arch == "plain")`
 - `use_two_hop_critic = (two_hop && two_hop_critic)`
 
@@ -126,7 +126,6 @@ Competitor context pipeline:
 
 1. collect competitor nodes $\mathcal{C}(t)$ for task $t$
 2. build pair features via
-
 $$
 u_{tc} = \phi_{comp}([h_t, x_c, a_{tc}])
 $$
@@ -155,6 +154,32 @@ $$
 $$
 \ell_t^{ind} = b_{comp}\cdot \mathbb{1}[|\mathcal{C}(t)|>0]
 $$
+
+### 3.4 Variant D: 2-hop competitor-corrected with max pooling (`comp_corr_maxpool`)
+
+Condition:
+
+- `two_hop=true`, `two_hop_arch=comp_corr_maxpool`
+
+Behavior:
+
+- actor task embeddings are still taken from the 1-hop path
+- competitor context is still built from the full 2-hop graph using the same pair encoder
+- competitor aggregation replaces attention with elementwise max pooling over encoded competitor features
+
+For competitor feature vectors $u_{tc}$, the context becomes:
+
+$$
+z_t[d] = \max_{c \in \mathcal{C}(t)} u_{tc}[d]
+$$
+
+The final candidate logit keeps the same correction form:
+
+$$
+\ell_t = \ell_t^{base} + \ell_t^{comp} + \ell_t^{ind}
+$$
+
+This preserves the public interface of the competitor-correction architecture while changing only the aggregation operator.
 
 ---
 

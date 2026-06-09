@@ -79,7 +79,9 @@ TWO_HOP_CRITIC = bool(getattr(opt.env, "two_hop_critic", False))
 TWO_HOP_ARCH = str(getattr(opt.env, "two_hop_arch", "comp_corr")).strip().lower()
 if TWO_HOP_ARCH == "arch-3.2":
     TWO_HOP_ARCH = "comp_corr"
-assert TWO_HOP_ARCH in {"plain", "comp_corr"}, "env.two_hop_arch must be one of: plain, comp_corr, arch-3.2"
+assert TWO_HOP_ARCH in {"plain", "comp_corr", "comp_corr_maxpool"}, (
+    "env.two_hop_arch must be one of: plain, comp_corr, comp_corr_maxpool, arch-3.2"
+)
 
 VICINITY_M = float(opt.env.vicinity_m)
 MAX_STEPS = int(opt.env.max_steps)
@@ -87,6 +89,7 @@ MAX_WAIT_DELAY_S = float(opt.env.max_wait_delay_s)
 MAX_TRAVEL_DELAY_S = float(opt.env.max_travel_delay_s)
 MAX_ROBOT_CAPACITY = int(opt.env.max_robot_capacity)
 CONFLICT_RESOLUTION = str(getattr(opt.env, "conflict_resolution", "closest_then_capacity"))
+COMPLETION_MODE = str(getattr(opt.env, "completion_mode", "dropoff"))
 reward_params = dict(getattr(opt.env, "reward_params", {}) or {})
 
 # Training seeds - different from evaluation seeds [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
@@ -142,6 +145,11 @@ rp_logger = RidepoolLogger(
         console_debug=True,
         log_conflict_metrics=bool(getattr(opt.logging, "log_conflict_metrics", False)),
         overwrite_conflicts_log_on_start=not continue_training,
+        prune_episode_dir_after_metrics=bool(getattr(opt.logging, "prune_episode_dir_after_metrics", False)),
+        extended_quality_metrics=bool(getattr(opt.logging, "extended_quality_metrics", False)),
+        extended_quality_plots=bool(getattr(opt.logging, "extended_quality_plots", False)),
+        extended_quality_include_task_level=bool(getattr(opt.logging, "extended_quality_include_task_level", False)),
+        extended_quality_include_decision_level=bool(getattr(opt.logging, "extended_quality_include_decision_level", False)),
     )
 )
 
@@ -151,7 +159,7 @@ controller = RLControllerAdapter(
     k_max=K_max,
     vicinity_m=VICINITY_M,      # vicinity in meters
     sorted_candidates=bool(opt.sorted),
-    completion_mode="dropoff", # task is marked as completed at dropoff
+    completion_mode=COMPLETION_MODE,
     max_steps=MAX_STEPS,
     min_episode_steps = 100,
     serve_to_empty=True,    # end only when nothing left to do
@@ -202,9 +210,10 @@ gnn_layers = int(getattr(opt.ppo.policy_kwargs, "gnn_layers", 2))
 gnn_layers_two_hop = int(getattr(opt.ppo.policy_kwargs, "gnn_layers_two_hop", gnn_layers))
 chosen_layers = gnn_layers_two_hop if TWO_HOP_ENABLED else gnn_layers
 
-use_competitor_fusion = bool(TWO_HOP_ENABLED and TWO_HOP_ARCH == "comp_corr")
+use_competitor_fusion = bool(TWO_HOP_ENABLED and TWO_HOP_ARCH in {"comp_corr", "comp_corr_maxpool"})
 use_two_hop_actor = bool(TWO_HOP_ENABLED and TWO_HOP_ARCH == "plain")
 use_two_hop_critic = bool(TWO_HOP_ENABLED and TWO_HOP_CRITIC)
+comp_fusion_mode = "maxpool" if TWO_HOP_ARCH == "comp_corr_maxpool" else "attn"
 
 policy_kwargs = dict(
     in_dim=F,
@@ -215,6 +224,7 @@ policy_kwargs = dict(
     freeze_noop_logit=bool(getattr(opt.ppo.policy_kwargs, "freeze_noop_logit", False)),
     edge_dim=edge_feat_dim,
     use_competitor_fusion=use_competitor_fusion,
+    comp_fusion_mode=comp_fusion_mode,
     use_two_hop_actor=use_two_hop_actor,
     use_two_hop_critic=use_two_hop_critic,
     eta_index=(edge_features.index("eta") if "eta" in edge_features else -1),
@@ -291,6 +301,7 @@ callback = RPLoggerCallback(
     reset_fn=reset_fn,  # Pass reset_fn to get current seed
     save_model_dir=model_save_dir,  # Enable model saving after each rollout
     continue_training=continue_training,
+    config_id=str(getattr(cfg, "prefix", "")),
 )
 
 if continue_training:

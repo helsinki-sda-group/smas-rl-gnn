@@ -197,6 +197,7 @@ class RidepoolRTEnv(gym.Env):
     def _selected_task_margins(self, action_vec: np.ndarray) -> Dict[str, float]:
         payload = pop_latest_policy_step()
         if payload is None:
+            self._cached_raw_logits: Dict[str, float] = {}
             return {}
 
         logits_k = np.asarray(payload.get("logits_k"), dtype=np.float32)
@@ -206,9 +207,11 @@ class RidepoolRTEnv(gym.Env):
         if mask_k.ndim == 3:
             mask_k = mask_k[0]
         if logits_k.ndim != 2 or mask_k.ndim != 2:
+            self._cached_raw_logits = {}
             return {}
 
         margins: Dict[str, float] = {}
+        raw_logits: Dict[str, float] = {}
         num_rows = min(self.R, logits_k.shape[0], mask_k.shape[0])
         for r in range(num_rows):
             rid = self._last_robot_ids[r] if r < len(self._last_robot_ids) else None
@@ -225,11 +228,19 @@ class RidepoolRTEnv(gym.Env):
                 continue
 
             chosen_logit = float(logits_k[r, chosen_slot])
+            raw_logits[str(rid)] = chosen_logit
             other_slots = valid_slots[valid_slots != chosen_slot]
             max_other = float(np.max(logits_k[r, other_slots])) if other_slots.size > 0 else 0.0
             margins[str(rid)] = chosen_logit - max_other
 
+        self._cached_raw_logits = raw_logits
         return margins
+
+    def _selected_task_raw_logits(self, action: np.ndarray) -> Dict[str, float]:
+        """Raw selected-task logits per robot, keyed by taxi id (string).
+        Populated as a side-effect of _selected_task_margins (which pops the
+        shared policy-step payload); always call margins first."""
+        return getattr(self, "_cached_raw_logits", {})
 
 
     def step(self, action):
@@ -261,10 +272,12 @@ class RidepoolRTEnv(gym.Env):
         # (1) apply chosen assignments now
         assignments = self._decode(action)
         selected_task_margins = self._selected_task_margins(action)
+        selected_task_raw_logits = self._selected_task_raw_logits(action)
         step_out = self.controller.apply_and_step(
             assignments,
             allow_redispatch=True,
             selection_margins=selected_task_margins,
+            selection_raw_logits=selected_task_raw_logits,
         )  # controller aligns with its robot order
          # Expect dict like {"per_robot": {...}, "sum_reward": float, "terms": {...}}
         total_reward += float(step_out.get("sum_reward", 0.0))

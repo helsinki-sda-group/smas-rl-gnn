@@ -60,6 +60,7 @@ class EgoActorCritic(nn.Module):
         critic_aggregation: Literal["per_robot", "joint_mean", "joint_attn"] = "joint_attn",
         edge_dim: int = 0,
         use_competitor_fusion: bool = True,
+        comp_fusion_mode: Literal["attn", "maxpool"] = "attn",
         use_two_hop_actor: bool = False,
         use_two_hop_critic: bool = False,
         lambda_init: float = 0.0,
@@ -72,6 +73,9 @@ class EgoActorCritic(nn.Module):
         self.edge_dim = int(edge_dim)
         self.critic_aggregation = critic_aggregation
         self.use_competitor_fusion = bool(use_competitor_fusion)
+        if comp_fusion_mode not in {"attn", "maxpool"}:
+            raise ValueError(f"Unknown comp_fusion_mode '{comp_fusion_mode}'")
+        self.comp_fusion_mode = comp_fusion_mode
         self.use_two_hop_actor = bool(use_two_hop_actor)
         self.use_two_hop_critic = bool(use_two_hop_critic)
         self.eta_index = int(eta_index)
@@ -98,7 +102,8 @@ class EgoActorCritic(nn.Module):
                 nn.ReLU(),
                 nn.Linear(hidden, hidden),
             )
-            self.score_comp = nn.Linear(hidden, 1, bias=False)
+            if self.comp_fusion_mode == "attn":
+                self.score_comp = nn.Linear(hidden, 1, bias=False)
             self.comp_head = nn.Linear(hidden, 1, bias=False)
             self.comp_bias = nn.Parameter(torch.tensor(0.0))
             nn.init.zeros_(self.comp_head.weight)
@@ -296,7 +301,7 @@ class EgoActorCritic(nn.Module):
         cand_full_i: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         """
-        Architecture 3.2: attention over competitors.
+        Competitor-correction context over 2-hop competitor nodes.
         Returns z_t_comp [k_i, H] and indicator [k_i] for whether competitors exist.
         """
         device = x_full_i.device
@@ -369,17 +374,27 @@ class EgoActorCritic(nn.Module):
                 a_tc = x_full_i.new_zeros((len(comps), 0), dtype=torch.float32)
 
             u_tc = self.phi_comp(torch.cat([h_t_i, x_c, a_tc], dim=-1))
-            s_tc = self.score_comp(u_tc).squeeze(-1)
-            alpha = torch.softmax(s_tc, dim=0)
-            z_t = (alpha.unsqueeze(-1) * u_tc).sum(dim=0)
+            if self.comp_fusion_mode == "attn":
+                s_tc = self.score_comp(u_tc).squeeze(-1)
+                alpha = torch.softmax(s_tc, dim=0)
+                z_t = (alpha.unsqueeze(-1) * u_tc).sum(dim=0)
+                ent = -(alpha * (alpha + 1e-12).log()).sum()
+                max_alpha = alpha.max()
+                mean_score = s_tc.mean()
+                std_score = s_tc.std(unbiased=False)
+            else:
+                z_t = u_tc.max(dim=0).values
+                ent = h_t.new_tensor(0.0)
+                max_alpha = h_t.new_tensor(0.0)
+                mean_score = h_t.new_tensor(0.0)
+                std_score = h_t.new_tensor(0.0)
             z_list.append(z_t)
             ind_list.append(h_t.new_tensor(1.0))
-            ent = -(alpha * (alpha + 1e-12).log()).sum()
             ent_list.append(ent)
-            max_list.append(alpha.max())
+            max_list.append(max_alpha)
             norm_u_list.append(u_tc.norm(dim=-1).mean())
-            mean_score_list.append(s_tc.mean())
-            std_score_list.append(s_tc.std(unbiased=False))
+            mean_score_list.append(mean_score)
+            std_score_list.append(std_score)
             num_comp_list.append(h_t.new_tensor(float(len(comps))))
 
         return (
@@ -454,7 +469,8 @@ class EgoActorCritic(nn.Module):
                             self._comp_log_sums[6] += float(self.actor_head.bias.detach()) * count
                             self._comp_log_sums[7] += self.actor_head.weight.detach().norm() * count
                             self._comp_log_sums[8] += self.comp_head.weight.detach().norm() * count
-                            self._comp_log_sums[9] += self.score_comp.weight.detach().norm() * count
+                            if self.comp_fusion_mode == "attn":
+                                self._comp_log_sums[9] += self.score_comp.weight.detach().norm() * count
                             self._comp_log_sums[10] += self.comp_bias.detach().abs() * count
 
                             comp_mask = (ind_det > 0)

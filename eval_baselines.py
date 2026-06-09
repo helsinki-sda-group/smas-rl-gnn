@@ -63,6 +63,7 @@ MAX_TRAVEL_DELAY_S = float(opt.env.max_travel_delay_s)
 MAX_ROBOT_CAPACITY = int(opt.env.max_robot_capacity)
 CONFLICT_RESOLUTION = str(getattr(opt.env, "conflict_resolution", "closest_then_capacity"))
 reward_params = dict(getattr(opt.env, "reward_params", {}) or {})
+COMPLETION_MODE = str(getattr(opt.env, "completion_mode", "dropoff"))
 
 NUM_SEEDS = int(opt.baselines.num_seeds)
 SEEDS = list(opt.seeds.eval)
@@ -79,6 +80,7 @@ metrics_log_path = (
 with open(metrics_log_path, "w", encoding="utf-8") as f:
     f.write(f"vicinity_m={VICINITY_M}, max_steps={MAX_STEPS}, max_wait_delay_s={MAX_WAIT_DELAY_S}, "
             f"max_travel_delay_s={MAX_TRAVEL_DELAY_S}, max_robot_capacity={MAX_ROBOT_CAPACITY}\n")
+    f.write(f"completion_mode={COMPLETION_MODE}, reward_type={reward_params.get('reward_type', 'deadline')}\n")
     f.write(get_metrics_header() + "\n")
 
 all_metrics_by_policy: Dict[str, List[EpisodeMetrics]] = {p: [] for p in POLICIES}
@@ -116,7 +118,7 @@ for seed in SEEDS[:NUM_SEEDS]:
             k_max=K_max,
             vicinity_m=VICINITY_M,
             sorted_candidates=True,
-            completion_mode="dropoff",
+            completion_mode=COMPLETION_MODE,
             max_steps=MAX_STEPS,
             min_episode_steps=100,
             serve_to_empty=True,
@@ -270,7 +272,7 @@ print(f"{'='*80}")
 summary_path = metrics_log_path
 with open(summary_path, "a", encoding="utf-8") as f:
     f.write("\n\n# SUMMARY STATISTICS\n")
-    f.write("pol           rew±std   |     cap±std       step±std     dln±std       wait±std      trav±std      comp±std       nsv±std   |     pkr±std       obsr±std      pkvr±std      mwt±std       cmr±std       anpr±std      pncr±std |  noop±std   overld±std   mcand±std  cne_fr±std cne_mn±std  dstep±std    macmr±std     msd±std\n")
+    f.write("pol           rew±std   |     cap±std       step±std     dln±std       wait±std      trav±std      comp±std       nsv±std   |     pkr±std       obsr±std      pkvr±std      mwt±std       cmr±std       anpr±std      pncr±std |  noop±std   overld±std   mcand±std  cne_fr±std cne_mn±std  dstep±std    macmr±std     msd±std  | drp_ev±std  vcmr±std    invdr±std   ddvr±std\n")
     
     for policy_name in POLICIES:
         metrics_list = all_metrics_by_policy[policy_name]
@@ -300,6 +302,10 @@ with open(summary_path, "a", encoding="utf-8") as f:
         decision_steps_list = [m.decision_steps for m in metrics_list]
         macro_rewards = [m.macro_reward_mean for m in metrics_list]
         macro_steps = [m.macro_steps_done for m in metrics_list]
+        dropoff_ev_rates = [m.dropoff_event_count / max(1, m.total_tasks) for m in metrics_list]
+        valid_completion_rates = [m.valid_completion_rate for m in metrics_list]
+        invalid_dropoff_rates = [m.invalid_dropoff_rate for m in metrics_list]
+        ddv_rates = [m.dropoff_deadline_violation_rate for m in metrics_list]
 
         summary_line = (
             f"{policy_name:<10}"
@@ -326,6 +332,10 @@ with open(summary_path, "a", encoding="utf-8") as f:
             f"  {np.mean(decision_steps_list):>6.1f}±{np.std(decision_steps_list):<5.1f}"
             f"  {np.mean(macro_rewards):>6.3f}±{np.std(macro_rewards):<5.3f}"
             f"  {np.mean(macro_steps):>6.1f}±{np.std(macro_steps):<5.1f}"
+            f" |  {np.mean(dropoff_ev_rates):>6.3f}±{np.std(dropoff_ev_rates):<5.3f}"
+            f"  {np.mean(valid_completion_rates):>6.3f}±{np.std(valid_completion_rates):<5.3f}"
+            f"  {np.mean(invalid_dropoff_rates):>6.3f}±{np.std(invalid_dropoff_rates):<5.3f}"
+            f"  {np.mean(ddv_rates):>6.3f}±{np.std(ddv_rates):<5.3f}"
         )
         
         f.write(summary_line + "\n")
@@ -346,6 +356,10 @@ with open(summary_path, "a", encoding="utf-8") as f:
         print(f"  Decision Steps: {np.mean(decision_steps_list):.1f} ± {np.std(decision_steps_list):.1f}")
         print(f"  Macro Reward Mean: {np.mean(macro_rewards):.3f} ± {np.std(macro_rewards):.3f}")
         print(f"  Macro Steps Done: {np.mean(macro_steps):.1f} ± {np.std(macro_steps):.1f}")
+        print(f"  Dropoff Event Rate: {np.mean(dropoff_ev_rates):.3f} ± {np.std(dropoff_ev_rates):.3f}")
+        print(f"  Valid Completion Rate: {np.mean(valid_completion_rates):.3f} ± {np.std(valid_completion_rates):.3f}")
+        print(f"  Invalid Dropoff Rate: {np.mean(invalid_dropoff_rates):.3f} ± {np.std(invalid_dropoff_rates):.3f}")
+        print(f"  Dropoff Deadline Violation Rate: {np.mean(ddv_rates):.3f} ± {np.std(ddv_rates):.3f}")
 
     f.write("\n# METRIC LEGEND\n")
     f.write("short\tfull\n")
@@ -382,6 +396,10 @@ with open(summary_path, "a", encoding="utf-8") as f:
         ("dstep", "decision_steps (steps with any nonempty candidates)"),
         ("macmr", "macro_reward_mean"),
         ("msd", "macro_steps_done"),
+        ("drp_ev", "dropoff_event_rate (all dropoffs / total tasks)"),
+        ("vcmr", "valid_completion_rate (pickup+dropoff before deadlines / total tasks)"),
+        ("invdr", "invalid_dropoff_rate (dropoffs failing validity / total tasks)"),
+        ("ddvr", "dropoff_deadline_violation_rate (dropped after dropoff_deadline / total tasks)"),
     ]
     for short, full in legend_rows:
         f.write(f"{short}\t{full}\n")

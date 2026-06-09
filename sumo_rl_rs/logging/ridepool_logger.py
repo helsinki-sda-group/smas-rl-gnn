@@ -20,6 +20,12 @@ class RidepoolLogConfig:
     csv_postfix: Optional[str] = None    # postfix for all CSV filenames (e.g., "random1"). If None, no postfix added
     log_conflict_metrics: bool = False    # write run-level conflicts.log with episode summaries
     overwrite_conflicts_log_on_start: bool = False  # if True: delete root conflicts.log at logger init
+    prune_episode_dir_after_metrics: bool = False  # if True: callback removes episode_* dir after appending run-level metrics
+    # Extended quality diagnostics (Section 3 of quality_episode_metrics spec)
+    extended_quality_metrics: bool = False           # compute and persist episode-level quality metrics
+    extended_quality_plots: bool = False             # generate quality metric plots (used by callback/plotter)
+    extended_quality_include_task_level: bool = False    # write per-task rows to task_quality_events.csv
+    extended_quality_include_decision_level: bool = False  # write per-decision rows to decision_quality_events.csv
 
 class RidepoolLogger:
     """
@@ -66,6 +72,7 @@ class RidepoolLogger:
                     os.remove(self._conflicts_log_path)
             except Exception:
                 pass
+        self._last_conflict_stats: Dict[str, float] = {}
         self._reset_conflict_episode_stats()
 
     def _reset_conflict_episode_stats(self) -> None:
@@ -74,6 +81,10 @@ class RidepoolLogger:
             "conflicts_total": 0.0,
             "winner_pickup": 0.0,
             "winner_margin": 0.0,
+            "winner_raw_logit": 0.0,
+            "margin_matches_pickup": 0.0,
+            "raw_logit_matches_pickup": 0.0,
+            "policy_action_matches_resolver": 0.0,
             "resolver_override": 0.0,
             "margin_win_sum": 0.0,
             "margin_win_count": 0.0,
@@ -90,6 +101,10 @@ class RidepoolLogger:
         conflicts_total = float(self._conflict_stats["conflicts_total"])
         winner_pickup = float(self._conflict_stats["winner_pickup"])
         winner_margin = float(self._conflict_stats["winner_margin"])
+        winner_raw_logit = float(self._conflict_stats["winner_raw_logit"])
+        margin_matches_pickup = float(self._conflict_stats["margin_matches_pickup"])
+        raw_logit_matches_pickup = float(self._conflict_stats["raw_logit_matches_pickup"])
+        policy_action_matches_resolver = float(self._conflict_stats["policy_action_matches_resolver"])
         resolver_override = float(self._conflict_stats["resolver_override"])
 
         margin_win_count = float(self._conflict_stats["margin_win_count"])
@@ -98,8 +113,12 @@ class RidepoolLogger:
 
         conflict_ratio = (conflicts_total / tasks_total) if tasks_total > 0 else 0.0
         resolver_override_rate = (resolver_override / conflicts_total) if conflicts_total > 0 else 0.0
-        p_win_given_ego_action = (winner_pickup / conflicts_total) if conflicts_total > 0 else 0.0
-        p_win_given_high_logit = (winner_margin / conflicts_total) if conflicts_total > 0 else 0.0
+        p_resolver_matches_pickup = (winner_pickup / conflicts_total) if conflicts_total > 0 else 0.0
+        p_resolver_matches_margin = (winner_margin / conflicts_total) if conflicts_total > 0 else 0.0
+        p_resolver_matches_raw_logit = (winner_raw_logit / conflicts_total) if conflicts_total > 0 else 0.0
+        p_margin_matches_pickup = (margin_matches_pickup / conflicts_total) if conflicts_total > 0 else 0.0
+        p_raw_logit_matches_pickup = (raw_logit_matches_pickup / conflicts_total) if conflicts_total > 0 else 0.0
+        p_policy_action_matches_resolver = (policy_action_matches_resolver / conflicts_total) if conflicts_total > 0 else 0.0
         avg_margin_win = (self._conflict_stats["margin_win_sum"] / margin_win_count) if margin_win_count > 0 else 0.0
         avg_margin_lose = (self._conflict_stats["margin_lose_sum"] / margin_lose_count) if margin_lose_count > 0 else 0.0
         avg_margin_gap = (self._conflict_stats["margin_gap_sum"] / margin_gap_count) if margin_gap_count > 0 else 0.0
@@ -115,8 +134,12 @@ class RidepoolLogger:
                     "conflict_ratio",
                     "winner_pickup",
                     "winner_margin",
-                    "p_win_given_ego_action",
-                    "p_win_given_high_logit",
+                    "p_resolver_matches_pickup",
+                    "p_resolver_matches_margin",
+                    "p_resolver_matches_raw_logit",
+                    "p_margin_matches_pickup",
+                    "p_raw_logit_matches_pickup",
+                    "p_policy_action_matches_resolver",
                     "resolver_override",
                     "resolver_override_rate",
                     "avg_margin_win",
@@ -130,8 +153,12 @@ class RidepoolLogger:
                 f"{conflict_ratio:.2f}",
                 f"{winner_pickup:.2f}",
                 f"{winner_margin:.2f}",
-                f"{p_win_given_ego_action:.4f}",
-                f"{p_win_given_high_logit:.4f}",
+                f"{p_resolver_matches_pickup:.4f}",
+                f"{p_resolver_matches_margin:.4f}",
+                f"{p_resolver_matches_raw_logit:.4f}",
+                f"{p_margin_matches_pickup:.4f}",
+                f"{p_raw_logit_matches_pickup:.4f}",
+                f"{p_policy_action_matches_resolver:.4f}",
                 f"{resolver_override:.2f}",
                 f"{resolver_override_rate:.2f}",
                 f"{avg_margin_win:.2f}",
@@ -203,6 +230,15 @@ class RidepoolLogger:
             "actual_waiting_time", "actual_travel_time"
         ])
         self._open_csv(self._get_csv_filename("taxi_events"), ["step", "taxi", "event_type", "task_id"])
+
+        # Extended quality diagnostics: open additional per-episode CSVs when enabled
+        if bool(getattr(self.cfg, "extended_quality_metrics", False)):
+            self._open_csv(self._get_csv_filename("robot_occupancy"), [
+                "time", "robot_id", "onboard_count", "customer_ids", "shadow_plan_length"
+            ])
+            self._open_csv(self._get_csv_filename("decisions"), [
+                "time", "robot_id", "selected_task_id", "num_candidates", "is_noop"
+            ])
         # reset timeseries
         for k in self._ts:
             self._ts[k].clear()
@@ -210,6 +246,7 @@ class RidepoolLogger:
 
     def end_episode(self, sum_reward: float, n_pickups: int, n_dropoffs: int, duration: float):
         self.last_ep_dir = self.ep_dir
+        self._last_conflict_stats = dict(self._conflict_stats)
         self._append_conflicts_summary(self.cfg.episode_index)
         self._write(self._get_csv_filename("episode_totals"), dict(
             episode=self.cfg.episode_index,
@@ -239,6 +276,8 @@ class RidepoolLogger:
         winner: str,
         pickup_winners: Sequence[str],
         margin_winners: Sequence[str],
+        raw_logit_winners: Sequence[str],
+        policy_action_robot: Optional[str],
         winner_margin: Optional[float],
         loser_margins: Sequence[float],
     ) -> None:
@@ -248,6 +287,8 @@ class RidepoolLogger:
         winner = str(winner)
         pickup_set = {str(x) for x in pickup_winners}
         margin_set = {str(x) for x in margin_winners}
+        raw_logit_set = {str(x) for x in raw_logit_winners}
+        policy_action_robot = str(policy_action_robot) if policy_action_robot is not None else None
 
         self._conflict_stats["conflicts_total"] += 1.0
 
@@ -255,6 +296,15 @@ class RidepoolLogger:
             self._conflict_stats["winner_pickup"] += 1.0
         if winner in margin_set:
             self._conflict_stats["winner_margin"] += 1.0
+        if winner in raw_logit_set:
+            self._conflict_stats["winner_raw_logit"] += 1.0
+
+        if pickup_set and margin_set and (pickup_set & margin_set):
+            self._conflict_stats["margin_matches_pickup"] += 1.0
+        if pickup_set and raw_logit_set and (pickup_set & raw_logit_set):
+            self._conflict_stats["raw_logit_matches_pickup"] += 1.0
+        if policy_action_robot is not None and winner == policy_action_robot:
+            self._conflict_stats["policy_action_matches_resolver"] += 1.0
 
         if pickup_set and margin_set:
             pickup_ref = sorted(pickup_set)[0]
@@ -544,6 +594,56 @@ class RidepoolLogger:
             event_type=str(event_type),
             task_id=str(task_id)
         ))
+
+    def log_robot_occupancy(
+        self,
+        t: float,
+        robot_id: str,
+        onboard_count: int,
+        customer_ids: str,
+        shadow_plan_length: int,
+    ) -> None:
+        """Log per-robot per-step occupancy. Written only when extended_quality_metrics=True."""
+        fname = self._get_csv_filename("robot_occupancy")
+        self._ensure_csv(fname, ["time", "robot_id", "onboard_count", "customer_ids", "shadow_plan_length"])
+        self._write(fname, dict(
+            time=float(t),
+            robot_id=str(robot_id),
+            onboard_count=int(onboard_count),
+            customer_ids=str(customer_ids),
+            shadow_plan_length=int(shadow_plan_length),
+        ))
+
+    def log_decision(
+        self,
+        t: float,
+        robot_id: str,
+        selected_task_id: str,
+        num_candidates: int,
+        is_noop: bool,
+    ) -> None:
+        """Log per-robot decision (before conflict resolution). Written only when extended_quality_metrics=True."""
+        fname = self._get_csv_filename("decisions")
+        self._ensure_csv(fname, ["time", "robot_id", "selected_task_id", "num_candidates", "is_noop"])
+        self._write(fname, dict(
+            time=float(t),
+            robot_id=str(robot_id),
+            selected_task_id=str(selected_task_id),
+            num_candidates=int(num_candidates),
+            is_noop=int(bool(is_noop)),
+        ))
+
+    def get_episode_conflict_stats(self) -> dict:
+        """Return a copy of the current episode's conflict stats.
+        Must be called BEFORE start_episode() resets them.
+        """
+        if self._last_conflict_stats:
+            return dict(self._last_conflict_stats)
+        return dict(self._conflict_stats)
+
+    def get_last_episode_conflict_stats(self) -> dict:
+        """Return the most recently closed episode's conflict stats."""
+        return self.get_episode_conflict_stats()
 
     # ---------- plotting ----------
     def _plot_ts(self, png_name: str, series: List[tuple], ylabel: str = ""):

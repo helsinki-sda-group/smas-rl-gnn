@@ -48,6 +48,10 @@ make install
 rsync -a /scratch/project_2012159/kbocheni/sumo-local/ /projappl/project_2012159/kbocheni_temp/sumo-local/
 rsync -a /scratch/project_2012159/kbocheni/xerces-local/ /projappl/project_2012159/kbocheni_temp/xerces-local/
 ~~~
+- Optionally: delete SUMO source files (250K files, can influence file quota)
+~~~bash
+rm -rf /scratch/project_2012159/kbocheni/sumo
+~~~
 - Setting environment variables
 ~~~bash
 export SUMO_HOME=/projappl/project_2012159/kbocheni_temp/sumo-local
@@ -105,6 +109,8 @@ logging:
   run_name: rp_gnn_debug
   out_dir: /scratch/project_2012159/kbocheni/smas-rl-gnn/runs
   model_save_dir: /scratch/project_2012159/kbocheni/smas-rl-gnn/runs/rp_gnn_debug/!saved_models
+  extended_quality_metrics: true
+  # Separate quality files are now written to JOBDIR (current working dir in sbatch)
 ~~~
 - Launch to get the results of a test run in scratch partition.
 ~~~bash
@@ -250,7 +256,11 @@ python "$REPO/train.py" --config "$REPO/$CFG" --sumoport "$PORT"
 │       ├── monitor.csv             # SB3 training monitor
 │       ├── conflicts.log
 │       ├── comp_norms.log
-│       └── training_metrics_*.log
+│       ├── training_metrics_*.log
+│       ├── quality_episode_metrics.csv      # one row per episode (rounded to 2 decimals)
+│       ├── task_quality_events.csv          # per-task quality rows
+│       ├── decision_quality_events.csv      # per-decision quality rows
+│       └── quality_episode_metrics_errors.log  # only if quality writer fails
 │
 └── runs/                           # created by train.py (from out_dir in yaml)
     └── [RUN_NAME]/               # run_name in yaml
@@ -266,10 +276,40 @@ python "$REPO/train.py" --config "$REPO/$CFG" --sumoport "$PORT"
 
 **Note**: it is recommended to submit the task with `job_name` the same as `run_name`. In this case, outputs in `slurm` and `jobs` folder will be named consistently.
 
+#### Batch submission of all 45 configs
+
+To submit all method variants at once (1hop, 1hop_rnd, 1hop_ctc, 1hop_1hop_critic, 1hop_1hop_critic_rnd, 1hop_1hop_critic_ctc, 2hop, 2hop_rnd, 2hop_ctc):
+
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+
+# Preview which configs will be submitted
+bash slurm/slurm_submit.sh 1hop 1hop_rnd 1hop_ctc 1hop_1hop_critic 1hop_1hop_critic_rnd 1hop_1hop_critic_ctc 2hop 2hop_rnd 2hop_ctc --dry-run
+
+# Submit all 45 jobs (5 base × 3 method families × 3 variants/base)
+bash slurm/slurm_submit.sh 1hop 1hop_rnd 1hop_ctc 1hop_1hop_critic 1hop_1hop_critic_rnd 1hop_1hop_critic_ctc 2hop 2hop_rnd 2hop_ctc
+
+# Monitor progress
+squeue -u kbocheni
+~~~
+
+The script automatically:
+- Maps method names to config files (e.g., `1hop_rnd` → all `rp_gnn_1hop-*_rnd.yaml`)
+- Extracts `run_name` from each config for consistent job naming
+- Submits via `sbatch` with appropriate `--job-name`
+
+See [slurm/README.md](../slurm/README.md) for more pattern examples.
+
 #### Train
 ~~~bash
 cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
 # fresh run
+sbatch --job-name=rp-train-1hop_critic-1_ctc slurm/run_train.sbatch configs/rp_gnn_1hop_1hop_critic-1_ctc.yaml
+sbatch --job-name=rp-train-1hop_critic-2_ctc slurm/run_train.sbatch configs/rp_gnn_1hop_1hop_critic-2_ctc.yaml
+sbatch --job-name=rp-train-1hop_critic-3_ctc slurm/run_train.sbatch configs/rp_gnn_1hop_1hop_critic-3_ctc.yaml
+sbatch --job-name=rp-train-2hop-maxpool-1_ctc slurm/run_train.sbatch configs/rp_gnn_2hop-maxpool-1_ctc.yaml
+sbatch --job-name=rp-train-2hop-maxpool-2_ctc slurm/run_train.sbatch configs/rp_gnn_2hop-maxpool-2_ctc.yaml
+sbatch --job-name=rp-train-2hop-maxpool-3_ctc slurm/run_train.sbatch configs/rp_gnn_2hop-maxpool-3_ctc.yaml
 sbatch --job-name=rp_gnn_debug slurm/run_train.sbatch configs/rp_gnn.yaml
 sbatch --job-name=rp_gnn_debug_1hop slurm/run_train.sbatch configs/rp_gnn_1hop.yaml
 sbatch --job-name=rp_gnn_debug_2hop slurm/run_train.sbatch configs/rp_gnn_2hop.yaml
@@ -285,7 +325,118 @@ Recommended workflow for continuation:
 3. Set `ppo.total_timesteps` to extra steps only.
 4. Reuse same `JOBDIR` if you want one combined local log set.
 
+Quick check after a run (inside the job directory):
+~~~bash
+cd /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_<RUN_NAME>_<SLURM_JOB_ID>
+ls -lh quality_episode_metrics.csv task_quality_events.csv decision_quality_events.csv
+head -n 3 quality_episode_metrics.csv
+tail -n 5 quality_episode_metrics_errors.log 2>/dev/null || true
+~~~
+
 #### Evaluation
+
+Run baseline evaluation with a config file parameter:
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+sbatch --job-name=rp-eval-1hop_critic-1_ctc slurm/run_eval_baselines.sbatch configs/rp_gnn_1hop_1hop_critic-1_ctc.yaml
+~~~
+
+
+What this does:
+- Runs `eval_baselines.py` (not `train.py`) with `--config <your_yaml>`
+- Creates an isolated job directory under:
+~~~bash
+/scratch/project_2012159/kbocheni/smas-rl-gnn/eval_jobs/job_eval_<RUN_NAME>_<SLURM_JOB_ID>
+~~~
+- Saves a timestamped config snapshot in `config_snapshots/`
+- Writes baseline metric logs to the eval job directory
+
+Quick checks after completion:
+~~~bash
+squeue -u kbocheni
+tail -n 100 /scratch/project_2012159/kbocheni/smas-rl-gnn/slurm/rp-eval-1hop-1-<SLURM_JOB_ID>.out
+~~~
+
+Note: `run_train.sbatch` is currently tied to `train.py`, so baseline evaluation should use `run_eval_baselines.sbatch` unless you refactor the training sbatch into a generic Python-entrypoint runner.
+
+#### Evaluation of saved models (eval_saved_models.py)
+
+Use this workflow to evaluate checkpoint folders `!saved_models` on Mahti.
+
+New scripts:
+- `slurm/run_eval_saved_models.sbatch`: runs one evaluation job for one training run.
+- `slurm/eval_saved_models_submit.sh`: expands model families to concrete run names and submits one job per run.
+
+Output location follows training run names:
+~~~bash
+/scratch/project_2012159/kbocheni/smas-rl-gnn/eval_saved_models_jobs/<run_name>/
+~~~
+
+Each run writes into that folder; `eval_saved_models.py` creates timestamped subfolders there (`evaluation_YYYYmmdd_HHMMSS`).
+
+1. First use (make scripts executable)
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+chmod +x slurm/run_eval_saved_models.sbatch slurm/eval_saved_models_submit.sh
+~~~
+
+2. Submit evaluation for a list of model families
+
+Example matching your case (`2hop-maxpool_ctc_cap2` and `1hop_critic_ctc`):
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+bash slurm/eval_saved_models_submit.sh \
+  2hop-maxpool_ctc_cap2 \
+  1hop_critic_ctc \
+  --seeds eval \
+  --eval-runs 1 \
+  --model-sample 0.5 \
+  --deterministic
+~~~
+
+How family matching works:
+- `2hop-maxpool_ctc_cap2` matches run directories like `2hop-maxpool-1_ctc_cap2`, `2hop-maxpool-3_ctc_cap2`, ...
+- `1hop_critic_ctc` matches run directories like `1hop_critic-1_ctc`, `1hop_critic-2_ctc`, ...
+- If you pass an exact run name (for example `2hop-maxpool-3_ctc_cap2`), only that run is submitted.
+- Matching is strict: family text must match exactly (no auto-normalization between `_` and `-`).
+
+3. Dry-run preview before submission
+~~~bash
+bash slurm/eval_saved_models_submit.sh \
+  2hop-maxpool_ctc_cap2 1hop_critic_ctc \
+  --seeds eval --eval-runs 1 --model-sample 0.5 --deterministic \
+  --dry-run
+~~~
+
+4. Single-run manual submission (without family expansion)
+~~~bash
+sbatch --job-name=rp-eval-2hop-maxpool-3_ctc_cap2 \
+  slurm/run_eval_saved_models.sbatch \
+  2hop-maxpool-3_ctc_cap2 \
+  configs/rp_gnn_2hop-maxpool-3_ctc_cap2.yaml \
+  --seeds eval --eval-runs 1 --model-sample 0.5 --deterministic
+~~~
+
+5. Monitoring and outputs
+~~~bash
+squeue -u kbocheni
+ls -lah /scratch/project_2012159/kbocheni/smas-rl-gnn/eval_saved_models_jobs/2hop-maxpool-3_ctc_cap2
+tail -n 100 /scratch/project_2012159/kbocheni/smas-rl-gnn/slurm/rp-eval-2hop-maxpool-3_ctc_cap2-<JOB_ID>.out
+~~~
+
+Notes:
+- Model input path is resolved automatically as:
+~~~bash
+/scratch/project_2012159/kbocheni/smas-rl-gnn/runs/<run_name>/!saved_models
+~~~
+- The submit script maps each `run_name` to a config by searching `configs/rp_gnn*.yaml` for matching `logging.run_name`.
+- In batch mode, SUMO ports are auto-assigned per submitted run: `port = --sumoport-base + index` (default base `8813`).
+- You can change the base with `--sumoport-base`, for example:
+~~~bash
+bash slurm/eval_saved_models_submit.sh 2hop-maxpool_ctc_cap2 --sumoport-base 9000
+~~~
+- `--sumoport` is intentionally blocked in batch submit mode so each run gets a unique port automatically.
+- All other extra options after model names are forwarded to `eval_saved_models.py` (`--seeds`, `--eval-runs`, `--model-sample`, `--deterministic`, etc.).
 
 
 #### Plotting
@@ -327,6 +478,11 @@ chmod +x /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablati
 ~~~bash
 /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh rp_gnn_debug_1hop rp_gnn_debug_2hop --labels "1 hop,2 hop"
 ~~~
+-  Optionally print mean and std for several training runs of the same configuration:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh rp_gnn_debug_1hop rp_gnn_debug_2hop --mean_runs
+~~~
+
 -  Optionally select explicit job IDs instead of latest jobs:
 ~~~bash
 /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh rp_gnn_debug_1hop rp_gnn_debug_2hop --job-ids 6574001,6574582
@@ -347,12 +503,188 @@ action_comparison/
 ~~~
 - Long example to keep:
 ~~~bash
-/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop-2 1hop-3 2hop-1 2hop-5 1hop_critic-1 1hop_critic-2 1hop_critic-3 1hop_critic-4 1hop_critic-5 --job-ids 6580443,6580444,6580449,6580457,6581536,6581537,6581538,6581539,6581540
 
-/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop-2 1hop-3 2hop-1 2hop-5
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop 1hop_critic 2hop
 
-/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop-1 1hop-2 1hop-3 1hop-4 1hop-5 2hop-1 2hop-2 2hop-3 2hop-4 2hop-5
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop_ctc 1hop_critic_ctc 2hop_ctc
+
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_ablation_runs.sh 1hop_rnd 1hop_critic_rnd 2hop_rnd
 ~~~
+
+3. Plot quality episode metrics (scratch -> projappl)
+-  Activate venv first:
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+source .venv/bin/activate
+~~~
+-  Plot one job with timestep smoothing (default window is 500):
+
+4. Plot evaluation results from `eval_saved_models.py`
+-  For the first use, make the helper script executable.
+~~~bash
+chmod +x /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_eval_results.sh
+~~~
+-  The plotting wrapper resolves evaluation logs from:
+~~~bash
+/scratch/project_2012159/kbocheni/smas-rl-gnn/eval_saved_models_jobs/<run_name>/evaluation_*/evaluation_metrics.log
+~~~
+-  It also resolves baseline logs from:
+~~~bash
+/scratch/project_2012159/kbocheni/smas-rl-gnn/eval_jobs/job_eval_<run_name>_<jobid>/metrics_*.log
+~~~
+
+-  Plot one exact evaluation run:
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+bash scripts/plot_eval_results.sh 1hop_critic-3_ctc_cap2
+~~~
+-  Output is written to:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/plots_evaluation/1hop_critic-3_ctc_cap2/
+~~~
+
+-  Plot a whole model family:
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+bash scripts/plot_eval_results.sh 1hop_critic_ctc_cap2
+~~~
+-  Family plotting creates:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/plots_evaluation/1hop_critic_ctc_cap2/
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/plots_evaluation/1hop_critic_ctc_cap2/<run_name>/
+~~~
+-  In family mode, the combined family folder contains one figure per metric with baseline lines plus separate lines for all matched evaluation runs.
+
+-  To plot baselines plus mean and std across evaluation runs instead of separate run lines:
+~~~bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+bash scripts/plot_eval_results.sh 1hop_critic_ctc_cap2 --mean-run
+~~~
+-  In `--mean-run` mode, per-run subfolders are still generated, but the combined family-level figures switch to mean across runs with shaded `± std`.
+
+-  Useful options:
+~~~bash
+bash scripts/plot_eval_results.sh 1hop_critic_ctc_cap2 --ma 20
+bash scripts/plot_eval_results.sh 1hop_critic_ctc_cap2 --baseline-std
+bash scripts/plot_eval_results.sh 1hop_critic_ctc_cap2 --baseline-log /path/to/metrics_v2000_ms2400_mwd240_mtd900_cap2.log
+bash scripts/plot_eval_results.sh 1hop_critic_ctc_cap2 --dry-run
+~~~
+-  Baseline lookup first tries an exact run-name match. If that is missing, it falls back to any baseline run from the same family, so a baseline log from `1hop_critic-1_ctc_cap2` can be reused for `1hop_critic-3_ctc_cap2`.
+~~~bash
+python3 plot_quality_episode_metrics.py \
+  --metrics /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_2hop-maxpool-3_ctc_cap2_6636655/quality_episode_metrics.csv \
+  --out "/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode_metrics_cap2" \
+  --smooth-window 500 \
+  --plot_std
+~~~
+-  Compare multiple jobs (max 5). In multi-job mode, metrics are not combined into one panel;
+  each metric is saved as a separate plot, and job lines are distinguished by color.
+~~~bash
+python3 plot_quality_episode_metrics.py \
+  --metrics \
+    /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_1hop_critic-2_ctc_cap2_6636651/quality_episode_metrics.csv \
+    /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_2hop-maxpool-3_ctc_cap2_6636655/quality_episode_metrics.csv \
+    
+  --out "/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode_metrics_cap2" \
+  --smooth-window 1000 \
+  --plot_std
+~~~
+-  Disable std ranges explicitly:
+~~~bash
+python3 plot_quality_episode_metrics.py \
+  --metrics /scratch/project_2012159/kbocheni/smas-rl-gnn/jobs/job_1hop_critic-1_ctc_6627936/quality_episode_metrics.csv \
+  --out "/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode_metrics" \
+  --smooth-window 500 \
+  --no-plot_std
+~~~
+-  If needed, create output directory first:
+~~~bash
+mkdir -p "/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode_metrics"
+~~~
+-  Plot outputs are written under a generated run-name subfolder in `--out`, for example:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/episode_metrics/1hop_critic_ctc__2hop-maxpool_ctc/
+~~~
+
+4. Plot evaluation results from eval_saved_models.py (`scripts/plot_eval_results.sh`)
+
+The script finds the latest `evaluation_metrics.log` for a run (or all instances of a model family),
+auto-discovers the matching baseline log from `eval_jobs/`, checks the config snapshot for
+`completion_mode` and reward weights, and calls `plot_eval_results.py`.
+
+- For the first use, make the helper script executable:
+~~~bash
+chmod +x /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_eval_results.sh
+~~~
+
+- Plot a single evaluated run (exact run name):
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_eval_results.sh \
+  1hop_critic-1_ctc_cap2 \
+  --ma 10 --baseline-std
+~~~
+Plots are saved to:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/plots_evaluation/1hop_critic-1_ctc_cap2/
+~~~
+
+- Plot all instances of a model family at once:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_eval_results.sh \
+  1hop_critic_ctc_cap2 \
+  --ma 10 --baseline-std
+~~~
+Family `1hop_critic_ctc_cap2` expands to `1hop_critic-1_ctc_cap2`, `1hop_critic-2_ctc_cap2`, …
+Plots are saved under:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/plots_evaluation/1hop_critic_ctc_cap2/<run_name>/
+~~~
+
+- Multiple families or individual runs in one call:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_eval_results.sh \
+  1hop_critic_ctc_cap2 2hop-maxpool_ctc_cap2 \
+  --ma 10 --baseline-std
+~~~
+
+- Dry-run (preview commands without executing):
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_eval_results.sh \
+  1hop_critic_ctc_cap2 --dry-run
+~~~
+
+- Override the baseline log manually:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_eval_results.sh \
+  1hop_critic-1_ctc_cap2 \
+  --baseline-log /scratch/project_2012159/kbocheni/smas-rl-gnn/eval_jobs/job_eval_1hop_critic-1_ctc_cap2_6651232/metrics_v2000_ms2400_mwd240_mtd900_cap3.log \
+  --baseline-std
+~~~
+
+- Backward-compatible usage (direct file path, same as local):
+~~~bash
+python plot_eval_results.py \
+  /scratch/.../eval_saved_models_jobs/1hop_critic-1_ctc_cap2/evaluation_20260217_162721/evaluation_metrics.log \
+  --baseline-log .../metrics_v2000_ms2400_mwd240_mtd900_cap3.log \
+  --baseline-std --ma 10
+~~~
+Or via the shell script:
+~~~bash
+/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/scripts/plot_eval_results.sh \
+  /scratch/.../evaluation_metrics.log --ma 10 --baseline-std
+~~~
+
+**Baseline auto-discovery:** the script scans
+`/scratch/project_2012159/kbocheni/smas-rl-gnn/eval_jobs/` for folders named
+`job_eval_<run_name>_<jobid>` (or the model-family variant).  It picks the
+`metrics_*.log` file inside.  If nothing is found, a warning is printed and
+plots are generated without a baseline.
+
+**Config check:** the script reads the most recent YAML snapshot from
+`eval_saved_models_jobs/<run>/config_snapshots/` and prints
+`completion_mode` (including a note for `valid_dropoff`) and reward weights
+(`w_comp`, `w_wait`, `w_travel`) so you can verify the plotted metrics
+correspond to the intended training configuration.
 
 ## Github notes
 
