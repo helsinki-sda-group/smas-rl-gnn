@@ -5,12 +5,7 @@ This repository implements a framework for robot-task (RT) allocation in dynamic
 The main application here is **ride-pooling / taxi task allocation** on SUMO, but the GNN+RL components are reusable for other robot–task scenarios.
 
 **Development note.**  
-The ride-pooling environment included here is an early-stage prototype.  
-It reflects the structure of the RT-GNN-RL framework, but numerical behavior
-(e.g., task deadlines, capacities, SUMO travel-time estimates, reward components)
-has not been fully verified.  
-The implementation is currently under refinement and should be considered
-non-final.
+Research prototype under active development.
 
 ## Repository structure
 
