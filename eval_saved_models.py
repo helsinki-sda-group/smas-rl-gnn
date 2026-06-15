@@ -154,6 +154,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             vicinity_m=config['vicinity_m'],
             sorted_candidates=config.get('sorted_candidates', False),
             completion_mode=config.get('completion_mode', 'dropoff'),
+            reassignment_mode=str(config.get('reassignment_mode', 'locked_until_pickup')),
             max_steps=config['max_steps'],
             min_episode_steps=config['min_episode_steps'],
             serve_to_empty=True,

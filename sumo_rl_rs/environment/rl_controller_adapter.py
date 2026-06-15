@@ -60,6 +60,7 @@ class RLControllerAdapter:
         max_robot_capacity: int = 5,
         logger: Optional["RidepoolLogger"]=None,
         conflict_resolution: str = "closest_then_capacity", # "capacity" | "closest" | "closest_then_capacity" | "logit_diff" | "random"
+        reassignment_mode: str = "locked_until_pickup",
         reward_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
@@ -81,6 +82,9 @@ class RLControllerAdapter:
             max_robot_capacity:
             logger: RidepoolLogger instance.
             conflict_resolution: how the assignment conflicts are resolved ("capacity" | "closest" | "closest_then_capacity" | "logit_diff" | "random")
+            reassignment_mode: ownership policy for assigned-but-not-picked reservations.
+                "locked_until_pickup" keeps a reservation bound to its current taxi until pickup.
+                "free" preserves the legacy behavior where assigned reservations may be re-bid.
             reward_params: reward configuration (reward_type, weights, caps)
         """
         self.sumo = sumo
@@ -92,6 +96,8 @@ class RLControllerAdapter:
         assert self.completion_mode in {"pickup", "dropoff", "valid_dropoff"}, "completion_mode must be 'pickup', 'dropoff', or 'valid_dropoff'"
         self.conflict_resolution = str(conflict_resolution).lower().strip()
         assert self.conflict_resolution in {"capacity", "closest", "closest_then_capacity", "logit_diff", "random"}, "conflict resolution must be 'capacity', 'closest', 'closest_then_capacity', 'logit_diff', or 'random'"
+        self.reassignment_mode = str(reassignment_mode).lower().strip()
+        assert self.reassignment_mode in {"locked_until_pickup", "free"}, "reassignment_mode must be 'locked_until_pickup' or 'free'"
         self._warned_missing_logit_diff = False
 
         self.reset_fn = reset_fn
@@ -246,6 +252,7 @@ class RLControllerAdapter:
             "rew_accum": dict(self._rew_accum),
             "reward_type": self.reward_type,
             "completion_mode": self.completion_mode,
+            "reassignment_mode": self.reassignment_mode,
             "wait_cap": self.reward_caps.get("wait", 600.0),
             "travel_cap": self.reward_caps.get("travel", 90.0),
             "deadline_cap": self.reward_caps.get("deadline", 600.0),
@@ -305,7 +312,8 @@ class RLControllerAdapter:
     def _current_reservation_ids_onboard(self, rid: str, p2r: dict[str, str]) -> list[str]:
         """
         Read device.taxi.currentCustomers (person ids) and map them to reservation ids via p2r.
-        device.taxi.currentCustomers: space-separated list of persons that are to be picked up or already on board
+        SUMO's currentCustomers may include both future pickups and already-onboard passengers,
+        so callers must not treat this as "picked/onboard only" without additional filtering.
         """
         try:
             s = self.sumo.vehicle.getParameter(rid, "device.taxi.currentCustomers") or ""
@@ -326,6 +334,43 @@ class RLControllerAdapter:
                 out.append(res_id)
                 seen.add(res_id)
         return out
+
+    def _current_picked_reservation_ids(
+        self,
+        rid: str,
+        p2r: dict[str, str],
+        res_index: dict[str, object],
+    ) -> list[str]:
+        """Return reservations that are both in currentCustomers and already picked up."""
+        out: list[str] = []
+        for res_id in self._current_reservation_ids_onboard(rid, p2r):
+            res_obj = res_index.get(res_id)
+            if res_obj is not None and self._is_picked(res_obj):
+                out.append(res_id)
+        return out
+
+    def _locked_owner_for_reservation(self, res_id: str, task: Optional[Task] = None) -> Optional[str]:
+        """Return the taxi that currently owns an assigned-but-not-picked reservation."""
+        if self.reassignment_mode != "locked_until_pickup":
+            return None
+
+        info = self._task_lifecycle.get(str(res_id), {})
+        if not info:
+            return None
+        if info.get("was_obsolete", False):
+            return None
+        if info.get("actual_pickup_time") is not None:
+            return None
+        if info.get("actual_dropoff_time") is not None:
+            return None
+
+        owner = info.get("assigned_taxi")
+        if not owner:
+            return None
+
+        if task is not None and not task.is_assigned:
+            return None
+        return str(owner)
     
     def _is_picked(self, res_obj: object) -> bool:
         st = int(getattr(res_obj, "state", 0))
@@ -669,6 +714,10 @@ class RLControllerAdapter:
         K = self.k_max if K is None else int(K)
         tasks_all = self.get_tasks()
         tasks_viable = [t for t in tasks_all if not t.is_obsolete ] # and not t.is_assigned]  # <- keep only viable tasks
+        locked_owner_by_task = {
+            t.id: self._locked_owner_for_reservation(t.id, task=t)
+            for t in tasks_viable
+        }
 
 
         # robot "position" proxy: first edge of current route
@@ -696,6 +745,9 @@ class RLControllerAdapter:
 
             dist_idx: List[Tuple[float, int]] = []
             for j, t in enumerate(tasks_viable):
+                locked_owner = locked_owner_by_task.get(t.id)
+                if locked_owner is not None and locked_owner != rid:
+                    continue
                 if not t.fromEdge:
                     continue
                 d = self._road_distance(r_edge, t.fromEdge)
@@ -1007,6 +1059,15 @@ class RLControllerAdapter:
                 else:
                     chosen.append(str(a))
 
+            task_by_id = {str(t.id): t for t in tasks}
+            for ridx, rid in enumerate(robots):
+                res_id = chosen[ridx] if ridx < len(chosen) else None
+                if res_id is None:
+                    continue
+                locked_owner = self._locked_owner_for_reservation(str(res_id), task=task_by_id.get(str(res_id)))
+                if locked_owner is not None and locked_owner != rid:
+                    chosen[ridx] = None
+
             
             if self.logger:
                 self.logger.log_debug(self._now(), "apply-mapped", {
@@ -1060,7 +1121,7 @@ class RLControllerAdapter:
             # --- Build exclusive owners map: onboard > winner(this tick) > sticky(previous plan) ---
             onboard_by_res: Dict[str, str] = {}
             for rid0 in robots:
-                for res_id in self._current_reservation_ids_onboard(rid0, p2r):
+                for res_id in self._current_picked_reservation_ids(rid0, p2r, res_index):
                     onboard_by_res[res_id] = rid0
 
             sticky_by_res: Dict[str, str] = {}
@@ -1070,9 +1131,17 @@ class RLControllerAdapter:
                     if r not in onboard_by_res and r not in sticky_by_res:
                         sticky_by_res[r] = rid0
 
+            locked_by_res: Dict[str, str] = {}
+            if self.reassignment_mode == "locked_until_pickup":
+                for task in tasks:
+                    locked_owner = self._locked_owner_for_reservation(task.id, task=task)
+                    if locked_owner is not None:
+                        locked_by_res[task.id] = locked_owner
+
             owners: Dict[str, str] = dict(sticky_by_res)
+            owners.update(locked_by_res)
             for r, rid_win in winners.items():
-                if r not in onboard_by_res:        # never override onboard
+                if r not in onboard_by_res and r not in locked_by_res:        # never override onboard/locked
                     owners[r] = rid_win
             owners.update(onboard_by_res)           # onboard has highest precedence
 
@@ -1097,16 +1166,22 @@ class RLControllerAdapter:
             for rid, res_id in zip(robots, chosen):
                 prev_seq = list(self._shadow_plan_by_robot.get(rid, []))
                 prev_ids = list(dict.fromkeys(prev_seq))
-                onboard_ids = self._current_reservation_ids_onboard(rid, p2r)
+                current_customer_ids = self._current_reservation_ids_onboard(rid, p2r)
 
-                # base set: prev uniques ∪ onboard ∪ {new}
-                base_ids = list(dict.fromkeys(prev_ids + onboard_ids))
+                # base set: prev uniques ∪ current SUMO customers ∪ {new}
+                # SUMO requires redispatch to mention all current customers, including
+                # assigned-but-not-yet-picked reservations already attached to this taxi.
+                base_ids = list(dict.fromkeys(prev_ids + current_customer_ids))
                 if res_id and res_id not in base_ids:
                     base_ids.append(res_id)
 
                         
-                # keep only reservations whose effective owner is this taxi
-                base_ids = [r for r in base_ids if owners.get(r) == rid]
+                # keep only reservations whose effective owner is this taxi,
+                # OR that SUMO physically has as a current customer of this taxi.
+                # SUMO requires every current customer to be mentioned in redispatch;
+                # filtering them out causes "failed to mention pX" crashes.
+                current_customer_set = set(current_customer_ids)
+                base_ids = [r for r in base_ids if owners.get(r) == rid or r in current_customer_set]
 
                 # Keep only currently alive reservations (prevents dispatching finished/unknown IDs)
                 alive_res_ids = set(res_index.keys())
@@ -1434,20 +1509,23 @@ class RLControllerAdapter:
             return None
         
         for res_id in new_pickups:
-            rid = owner_from_shadow(res_id)
-            if rid:
-                if rid not in picked_up_ids_by_robot:
-                    picked_up_ids_by_robot[rid] = set()
+            lc = self._task_lifecycle.get(res_id) or {}
+            rid = (owner_from_shadow(res_id)
+                   or self._res_owner_by_res.get(res_id)
+                   or lc.get("assigned_taxi"))
+            if rid and rid in picked_up_ids_by_robot:
                 picked_up_ids_by_robot[rid].add(res_id)
-                # record owner for future onboard counting
+                # record owner for future dropoff attribution
                 self._res_owner_by_res[res_id] = rid
 
 
         for res_id in new_dropoffs:
-            rid = self._res_owner_by_res.get(res_id) or owner_from_shadow(res_id)
-            if rid:
-                if rid not in dropped_off_ids_by_robot:
-                    dropped_off_ids_by_robot[rid] = set()
+            lc = self._task_lifecycle.get(res_id) or {}
+            rid = (self._res_owner_by_res.get(res_id)
+                   or owner_from_shadow(res_id)
+                   or lc.get("pickup_taxi")
+                   or lc.get("assigned_taxi"))
+            if rid and rid in dropped_off_ids_by_robot:
                 dropped_off_ids_by_robot[rid].add(res_id)
 
         # # abandoned tasks: removed from this taxi's plan, and were not picked up or dropped off by anyone

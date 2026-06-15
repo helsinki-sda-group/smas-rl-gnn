@@ -160,6 +160,7 @@ controller = RLControllerAdapter(
     vicinity_m=VICINITY_M,      # vicinity in meters
     sorted_candidates=bool(opt.sorted),
     completion_mode=COMPLETION_MODE,
+    reassignment_mode=str(getattr(opt.env, "reassignment_mode", "locked_until_pickup")),
     max_steps=MAX_STEPS,
     min_episode_steps = 100,
     serve_to_empty=True,    # end only when nothing left to do
