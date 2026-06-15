@@ -1434,20 +1434,23 @@ class RLControllerAdapter:
             return None
         
         for res_id in new_pickups:
-            rid = owner_from_shadow(res_id)
-            if rid:
-                if rid not in picked_up_ids_by_robot:
-                    picked_up_ids_by_robot[rid] = set()
+            lc = self._task_lifecycle.get(res_id) or {}
+            rid = (owner_from_shadow(res_id)
+                   or self._res_owner_by_res.get(res_id)
+                   or lc.get("assigned_taxi"))
+            if rid and rid in picked_up_ids_by_robot:
                 picked_up_ids_by_robot[rid].add(res_id)
-                # record owner for future onboard counting
+                # record owner for future dropoff attribution
                 self._res_owner_by_res[res_id] = rid
 
 
         for res_id in new_dropoffs:
-            rid = self._res_owner_by_res.get(res_id) or owner_from_shadow(res_id)
-            if rid:
-                if rid not in dropped_off_ids_by_robot:
-                    dropped_off_ids_by_robot[rid] = set()
+            lc = self._task_lifecycle.get(res_id) or {}
+            rid = (self._res_owner_by_res.get(res_id)
+                   or owner_from_shadow(res_id)
+                   or lc.get("pickup_taxi")
+                   or lc.get("assigned_taxi"))
+            if rid and rid in dropped_off_ids_by_robot:
                 dropped_off_ids_by_robot[rid].add(res_id)
 
         # # abandoned tasks: removed from this taxi's plan, and were not picked up or dropped off by anyone
