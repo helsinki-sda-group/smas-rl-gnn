@@ -80,7 +80,10 @@ metrics_log_path = (
 with open(metrics_log_path, "w", encoding="utf-8") as f:
     f.write(f"vicinity_m={VICINITY_M}, max_steps={MAX_STEPS}, max_wait_delay_s={MAX_WAIT_DELAY_S}, "
             f"max_travel_delay_s={MAX_TRAVEL_DELAY_S}, max_robot_capacity={MAX_ROBOT_CAPACITY}\n")
-    f.write(f"completion_mode={COMPLETION_MODE}, reward_type={reward_params.get('reward_type', 'deadline')}\n")
+    f.write(
+        f"completion_mode={COMPLETION_MODE}, reward_type={reward_params.get('reward_type', 'deadline')}, "
+        f"reassignment_mode={str(getattr(opt.env, 'reassignment_mode', 'locked_until_pickup'))}\n"
+    )
     f.write(get_metrics_header() + "\n")
 
 all_metrics_by_policy: Dict[str, List[EpisodeMetrics]] = {p: [] for p in POLICIES}
@@ -119,6 +122,7 @@ for seed in SEEDS[:NUM_SEEDS]:
             vicinity_m=VICINITY_M,
             sorted_candidates=True,
             completion_mode=COMPLETION_MODE,
+            reassignment_mode=str(getattr(opt.env, "reassignment_mode", "locked_until_pickup")),
             max_steps=MAX_STEPS,
             min_episode_steps=100,
             serve_to_empty=True,
