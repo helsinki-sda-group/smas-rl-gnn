@@ -17,7 +17,7 @@ class Task:
     reservationTime: float
     estTravelTime: float = 0.0           # sec, pickup→dropoff
     pickupDeadline: float = 0.0          # sec, release + max_wait_delay_s
-    dropoffDeadline: float = 0.0         # sec, release + estTravelTime + max_travel_delay_s
+    dropoffDeadline: float = 0.0         # sec, release + max_wait_delay_s + estTravelTime + max_travel_delay_s
     is_obsolete: bool = False            # missed pickup deadline
     is_assigned: bool = False            # reservation currently assigned to some taxi
 
@@ -622,7 +622,7 @@ class RLControllerAdapter:
 
             # deadlines
             pickup_deadline = t0 + self.max_wait_delay_s
-            dropoff_deadline = t0 + est_tt + self.max_travel_delay_s
+            dropoff_deadline = t0 + self.max_wait_delay_s + est_tt + self.max_travel_delay_s
 
             # flags
             waiting_time = max(0.0, now - t0)

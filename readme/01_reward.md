@@ -29,7 +29,7 @@ Under `env.reward_params`:
 Also relevant:
 
 - `env.max_wait_delay_s`: pickup deadline horizon for task creation
-- `env.max_travel_delay_s`: dropoff deadline horizon for task creation
+- `env.max_travel_delay_s`: dropoff deadline slack added after `max_wait_delay_s + estimated_travel_time` (`dropoff_deadline = reservationTime + max_wait_delay_s + estimated_travel_time + max_travel_delay_s`, where `estimated_travel_time` is in a single mode).
 - `env.decision_dt`: macro action spacing (rewards are still computed at each internal sim-step)
 
 ---
