@@ -360,27 +360,31 @@ def _ma(data: np.ndarray, window: int) -> np.ndarray:
     data = np.array(data, dtype=float)
     if data.size == 0:
         return data
+    if window <= 1:
+        return data
     window = int(min(window, len(data)))
-    result = np.convolve(data, np.ones(window) / window, mode="same")
-    half_window = window // 2
-    for i in range(half_window):
-        result[i] = np.mean(data[: i + 1])
-        result[-(i + 1)] = np.mean(data[-(i + 1) :])
-    return result
+    return (
+        pd.Series(data)
+        .rolling(window=window, center=True, min_periods=1)
+        .mean()
+        .to_numpy(dtype=float)
+    )
 
 
 def _ma_std(data: np.ndarray, window: int) -> np.ndarray:
     data = np.array(data, dtype=float)
     if data.size == 0:
         return data
+    if window <= 1:
+        return np.zeros_like(data, dtype=float)
     window = int(min(window, len(data)))
-    half = window // 2
-    out = np.zeros_like(data, dtype=float)
-    for i in range(len(data)):
-        left = max(0, i - half)
-        right = min(len(data), i + half + 1)
-        out[i] = float(np.std(data[left:right], ddof=0))
-    return out
+    return (
+        pd.Series(data)
+        .rolling(window=window, center=True, min_periods=1)
+        .std(ddof=0)
+        .fillna(0.0)
+        .to_numpy(dtype=float)
+    )
 
 
 def _map_ts_to_available(ts_ref: List[int], ts_available: List[int]) -> List[int]:
@@ -596,7 +600,7 @@ def _plot_eval_comparison(
                 grouped.setdefault(key, []).append(pd.Series(srow["means"], index=srow["ts"]))
 
             for (method, eval_mode), series_list in grouped.items():
-                wide = pd.concat(series_list, axis=1)
+                wide = pd.concat(series_list, axis=1).sort_index()
                 mean_s = wide.mean(axis=1, skipna=True)
                 std_s = wide.std(axis=1, ddof=0, skipna=True).fillna(0.0)
                 label = f"{method}:{eval_mode}"
@@ -614,6 +618,13 @@ def _plot_eval_comparison(
                 plotted_series.append((label, srow["ts"], srow["means"], srow["std"]))
 
         for label, ts, means, std_vals in plotted_series:
+            if len(ts) > 1:
+                order = np.argsort(ts)
+                ts = ts[order]
+                means = means[order]
+                if std_vals is not None:
+                    std_vals = std_vals[order]
+
             if plot_raw_eval:
                 if plot_raw_eval_std and std_vals is not None:
                     ax.errorbar(
