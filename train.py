@@ -221,6 +221,7 @@ policy_kwargs = dict(
     hidden=int(opt.ppo.policy_kwargs.hidden),
     k_max=int(opt.ppo.policy_kwargs.k_max),
     logit_temperature=float(opt.ppo.policy_kwargs.logit_temperature),
+    noop_mode=str(getattr(opt.ppo.policy_kwargs, "noop_mode", "scalar")),
     noop_init=float(opt.ppo.policy_kwargs.noop_init),
     freeze_noop_logit=bool(getattr(opt.ppo.policy_kwargs, "freeze_noop_logit", False)),
     edge_dim=edge_feat_dim,

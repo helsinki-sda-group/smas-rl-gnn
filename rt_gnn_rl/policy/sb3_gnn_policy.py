@@ -1,4 +1,4 @@
-import torch as th
+﻿import torch as th
 import torch.nn as nn
 from typing import Any, Dict, Optional, List, Literal, cast
 from gymnasium import spaces
@@ -36,7 +36,7 @@ class RTGNNPolicy(ActorCriticPolicy):
       - Env action_space is MultiDiscrete with nvec = [K_max+1] * R
         (last slot is explicit NO-OP per robot).
       - EgoActorCritic keeps producing logits of shape [R, K_max] (no change).
-      - Single learnable NO-OP logit (one scalar parameter) is added as the (K_max)-th column.
+            - NO-OP logit can be scalar/shared or state-dependent per robot.
       - A corresponding mask entry is appended to ensure the NO-OP option is always valid.
     """
     def __init__(
@@ -46,6 +46,7 @@ class RTGNNPolicy(ActorCriticPolicy):
         hidden: int,
         k_max: int,
         logit_temperature: float = 5.0,
+        noop_mode: str = "scalar",
         noop_init: float = -1.0,
         freeze_noop_logit: bool = False,
         edge_dim: int = 0,
@@ -84,6 +85,9 @@ class RTGNNPolicy(ActorCriticPolicy):
             raise ValueError(f"Invalid backbone='{backbone}'. Allowed: {_bb_allowed}")
         if critic_aggregation not in _agg_allowed:
             raise ValueError(f"Invalid critic_aggregation='{critic_aggregation}'. Allowed: {_agg_allowed}")
+        if noop_mode not in ("scalar", "state_dependent"):
+            raise ValueError("Invalid noop_mode. Allowed: ('scalar', 'state_dependent')")
+        self.noop_mode = noop_mode
 
         bb_lit = cast(Literal["dummy", "sage"], backbone)
         agg_lit = cast(Literal["per_robot", "joint_mean", "joint_attn"], critic_aggregation)
@@ -99,6 +103,9 @@ class RTGNNPolicy(ActorCriticPolicy):
             comp_fusion_mode=comp_fusion_mode,
             use_two_hop_actor=bool(use_two_hop_actor),
             use_two_hop_critic=bool(use_two_hop_critic),
+            noop_mode=cast(Literal["scalar", "state_dependent"], noop_mode),
+            noop_init=float(noop_init),
+            freeze_noop_logit=bool(freeze_noop_logit),
             eta_index=int(eta_index),
             lambda_init=float(lambda_init),
             **gnn_kwargs,
@@ -116,7 +123,7 @@ class RTGNNPolicy(ActorCriticPolicy):
         # using the base policy parameters. We must explicitly add the new
         # GNN parameters and the NOOP logit to the optimizer param groups.
         extra_params = list(self.gnn_ac.parameters())
-        if not freeze_noop_logit:
+        if self.noop_mode == "scalar" and not freeze_noop_logit:
             extra_params.append(self.noop_logit)
         # Avoid adding empty groups in case of weird configs
         if len(extra_params) > 0:
@@ -124,7 +131,10 @@ class RTGNNPolicy(ActorCriticPolicy):
 
     # --- helpers -------------------------------------------------------------
 
-    def _build_batch_outputs(self, obs_b: Dict[str, th.Tensor]) -> tuple[th.Tensor, th.Tensor]:
+    def _build_batch_outputs(
+        self,
+        obs_b: Dict[str, th.Tensor],
+    ) -> tuple[th.Tensor, Optional[th.Tensor], th.Tensor]:
         """
         Run EgoActorCritic per batch element (SB3 supplies a batch dimension B).
         Returns:
@@ -134,12 +144,19 @@ class RTGNNPolicy(ActorCriticPolicy):
         # Batch size B inferred from any tensor
         B = next(iter(obs_b.values())).shape[0]
         logits_list: List[th.Tensor] = []
+        noop_logits_list: List[th.Tensor] = []
         values_list: List[th.Tensor] = []
 
         # Process each env sample independently (keeps EgoActorCritic simple)
         for b in range(B):
             obs_one = {k: v[b] for k, v in obs_b.items()}   # strip batch dim
-            logits_b, value_b = self.gnn_ac(obs_one)        # logits: [R,K], value: scalar or [R]
+            if self.noop_mode == "state_dependent":
+                logits_b, noop_b, value_b = self.gnn_ac(obs_one, return_noop=True)
+                if noop_b is None:
+                    raise RuntimeError("State-dependent NOOP mode requires per-robot NOOP logits")
+                noop_logits_list.append(noop_b)
+            else:
+                logits_b, value_b = self.gnn_ac(obs_one)    # logits: [R,K], value: scalar or [R]
 
             logits_list.append(logits_b)
 
@@ -153,21 +170,36 @@ class RTGNNPolicy(ActorCriticPolicy):
             values_list.append(v_b)
 
         logits = th.stack(logits_list, dim=0)               # [B, R, K_max]
+        noop_logits = (
+            th.stack(noop_logits_list, dim=0)
+            if self.noop_mode == "state_dependent"
+            else None
+        )
 
         logits = logits / self.logit_temperature
 
         values = th.stack(values_list, dim=0).unsqueeze(-1) # [B, 1]
-        return logits, values
+        return logits, noop_logits, values
 
-    def _append_noop(self, logits: th.Tensor, mask_k: th.Tensor) -> tuple[th.Tensor, th.Tensor]:
+    def _append_noop(
+        self,
+        logits: th.Tensor,
+        mask_k: th.Tensor,
+        noop_logits: Optional[th.Tensor] = None,
+    ) -> tuple[th.Tensor, th.Tensor]:
         """
         Append NO-OP column to logits and mask.
         logits: [B,R,K_max], mask_k: [B,R,K_max] (bool or 0/1)
         returns: logits_full: [B,R,K_max+1], mask_full: [B,R,K_max+1] (bool)
         """
         B, R, _K = logits.shape
-        # NO-OP logit is a shared scalar parameter used for all robots and all batch elements
-        noop_col = self.noop_logit.expand(B, R, 1)
+        if self.noop_mode == "scalar":
+            # NO-OP logit is a shared scalar parameter used for all robots and all batch elements
+            noop_col = self.noop_logit.expand(B, R, 1)
+        else:
+            if noop_logits is None:
+                raise RuntimeError("State-dependent NOOP mode requires per-robot NOOP logits")
+            noop_col = noop_logits.unsqueeze(-1)
         logits_full = th.cat([logits, noop_col], dim=-1)  # [B,R,K_max+1]
 
         # Construct the mask by appending an always-valid entry for the NO-OP slot
@@ -230,10 +262,10 @@ class RTGNNPolicy(ActorCriticPolicy):
         obs_dict_b = cast(Dict[str, th.Tensor], self.features_extractor.last_obs)
         assert obs_dict_b is not None, "Features extractor did not capture obs dict"
 
-        logits_k, values = self._build_batch_outputs(obs_dict_b)           # [B,R,K_max], [B,1]
+        logits_k, noop_logits, values = self._build_batch_outputs(obs_dict_b)           # [B,R,K_max], [B,1]
         mask_k = obs_dict_b["cand_mask"]                                   # [B,R,K_max]
         set_latest_policy_step(logits_k, mask_k)
-        logits, mask = self._append_noop(logits_k, mask_k)                 # [B,R,K_max+1] each
+        logits, mask = self._append_noop(logits_k, mask_k, noop_logits)                 # [B,R,K_max+1] each
         logits = logits.masked_fill(~mask, -1e9)
 
         dist = self._dist_from_logits(logits, mask)
@@ -255,9 +287,9 @@ class RTGNNPolicy(ActorCriticPolicy):
         obs_dict_b = cast(Dict[str, th.Tensor], self.features_extractor.last_obs)
         assert obs_dict_b is not None
 
-        logits_k, values = self._build_batch_outputs(obs_dict_b)           # [B,R,K_max], [B,1]
+        logits_k, noop_logits, values = self._build_batch_outputs(obs_dict_b)           # [B,R,K_max], [B,1]
         mask_k = obs_dict_b["cand_mask"]                                   # [B,R,K_max]
-        logits, mask = self._append_noop(logits_k, mask_k)                 # [B,R,K_max+1]
+        logits, mask = self._append_noop(logits_k, mask_k, noop_logits)                 # [B,R,K_max+1]
         logits = logits.masked_fill(~mask, -1e9)
 
         # dist = self._dist_from_logits(logits, mask)
@@ -272,7 +304,7 @@ class RTGNNPolicy(ActorCriticPolicy):
         _ = self.extract_features(obs, features_extractor=self.features_extractor)
         obs_dict_b = cast(Dict[str, th.Tensor], self.features_extractor.last_obs)
         assert obs_dict_b is not None
-        _, values = self._build_batch_outputs(obs_dict_b)                  # [B,1]
+        _, _, values = self._build_batch_outputs(obs_dict_b)                  # [B,1]
         return values
 
     def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:

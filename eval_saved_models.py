@@ -221,9 +221,9 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
                     obs_tensor, _ = model.policy.obs_to_tensor(obs)
                     _ = model.policy.extract_features(obs_tensor, features_extractor=model.policy.features_extractor)
                     obs_dict_b = model.policy.features_extractor.last_obs
-                    logits_k, _ = model.policy._build_batch_outputs(obs_dict_b)
+                    logits_k, noop_logits, _ = model.policy._build_batch_outputs(obs_dict_b)
                     mask_k = obs_dict_b["cand_mask"]
-                    logits, mask = model.policy._append_noop(logits_k, mask_k)
+                    logits, mask = model.policy._append_noop(logits_k, mask_k, noop_logits)
                     
                     # Extract logits and mask as numpy arrays
                     logits_np = logits.squeeze(0).detach().cpu().numpy()  # [R, K_max+1]
@@ -619,6 +619,7 @@ def main():
         'deterministic': bool(getattr(args, "deterministic", False)),
         'sorted_candidates': bool(getattr(args, "sorted", False)) or bool(opt.env.sorted_candidates),
         'completion_mode': completion_mode,
+        'noop_mode': str(getattr(opt.ppo.policy_kwargs, 'noop_mode', 'scalar')),
         'log_conflict_metrics': bool(getattr(opt.logging, 'log_conflict_metrics', False)),
         'prune_episode_dir_after_metrics': bool(getattr(opt.logging, 'prune_episode_dir_after_metrics', False)),
         'extended_quality_metrics': bool(getattr(opt.logging, 'extended_quality_metrics', False)),

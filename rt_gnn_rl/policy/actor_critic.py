@@ -63,6 +63,9 @@ class EgoActorCritic(nn.Module):
         comp_fusion_mode: Literal["attn", "maxpool"] = "attn",
         use_two_hop_actor: bool = False,
         use_two_hop_critic: bool = False,
+        noop_mode: Literal["scalar", "state_dependent"] = "scalar",
+        noop_init: float = -1.0,
+        freeze_noop_logit: bool = False,
         lambda_init: float = 0.0,
         eta_index: int = -1,
         **gnn_kwargs,
@@ -78,6 +81,9 @@ class EgoActorCritic(nn.Module):
         self.comp_fusion_mode = comp_fusion_mode
         self.use_two_hop_actor = bool(use_two_hop_actor)
         self.use_two_hop_critic = bool(use_two_hop_critic)
+        if noop_mode not in ("scalar", "state_dependent"):
+            raise ValueError(f"Unknown noop_mode '{noop_mode}'")
+        self.noop_mode = noop_mode
         self.eta_index = int(eta_index)
         self._comp_log_sums: Optional[torch.Tensor] = None
         self._comp_log_count: int = 0
@@ -96,6 +102,15 @@ class EgoActorCritic(nn.Module):
 
         self.actor_norm = nn.LayerNorm(hidden)
         self.actor_head = nn.Linear(hidden, 1)
+        if self.noop_mode == "state_dependent":
+            self.noop_head = nn.Linear(hidden, 1)
+            nn.init.zeros_(self.noop_head.weight)
+            nn.init.constant_(self.noop_head.bias, noop_init)
+            if freeze_noop_logit:
+                for param in self.noop_head.parameters():
+                    param.requires_grad = False
+        else:
+            self.noop_head = None
         if self.use_competitor_fusion:
             self.phi_comp = nn.Sequential(
                 nn.Linear(hidden + in_dim + edge_dim, hidden),
@@ -410,7 +425,7 @@ class EgoActorCritic(nn.Module):
             },
         )
 
-    def forward(self, obs):
+    def forward(self, obs, return_noop: bool = False):
         (
             x_list, ei_list, edge_attr_list, cand_loc_idx,
             x_list_full, ei_list_full, edge_attr_list_full, cand_loc_idx_full,
@@ -429,10 +444,18 @@ class EgoActorCritic(nn.Module):
         h_a = self.actor_norm(h_a)
 
         logits_list: List[torch.Tensor] = []
+        noop_logits_list: List[torch.Tensor] = []
         for i in range(R):
             mask_i = (batch_a.batch == i)
             h_i = h_a[mask_i]                          # [n_i, H]
             cand_i = actor_cand_idx[i]                # [k_i]
+
+            if self.noop_mode == "state_dependent":
+                if h_i.size(0) == 0:
+                    raise RuntimeError("Missing ego embedding for state-dependent NOOP")
+                h_ego_i = h_i[0]
+                noop_logit_i = self.noop_head(h_ego_i).squeeze(-1)
+                noop_logits_list.append(noop_logit_i)
 
             if cand_i.numel() > 0 and h_i.numel() > 0:
                 h_t = h_i[cand_i]                     # [k_i, H]
@@ -520,6 +543,11 @@ class EgoActorCritic(nn.Module):
                 )
             logits_list.append(li)
         logits = torch.stack(logits_list, dim=0)      # [R, K_max]
+        noop_logits = (
+            torch.stack(noop_logits_list, dim=0)
+            if self.noop_mode == "state_dependent"
+            else None
+        )
 
         critic_x_list = x_list_full if self.use_two_hop_critic else x_list
         critic_ei_list = ei_list_full if self.use_two_hop_critic else ei_list
@@ -541,13 +569,11 @@ class EgoActorCritic(nn.Module):
         if self.critic_aggregation == "per_robot":
             # Value per robot: [R]
             v = self.critic_head(E).squeeze(-1)  # [R,1] -> [R]
-            return logits, v
 
         elif self.critic_aggregation == "joint_mean":
             # Simple permutation-invariant pooling: mean over robots -> scalar
             g = E.mean(dim=0, keepdim=True)      # [1, H]
             v = self.critic_head(g).squeeze()    # scalar (0-dim tensor)
-            return logits, v
 
         elif self.critic_aggregation == "joint_attn":
             # Learned attention over robots (still permutation-invariant)
@@ -556,7 +582,10 @@ class EgoActorCritic(nn.Module):
             w = torch.softmax(a.squeeze(-1), dim=0).unsqueeze(-1)  # [R,1]
             g = (w * E).sum(dim=0, keepdim=True)          # weighted sum -> [1, H]
             v = self.critic_head(g).squeeze()             # scalar
-            return logits, v
 
         else:
             raise ValueError(f"Unknown critic_aggregation '{self.critic_aggregation}'")
+
+        if return_noop:
+            return logits, noop_logits, v
+        return logits, v

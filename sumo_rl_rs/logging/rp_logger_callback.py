@@ -151,9 +151,9 @@ class RPLoggerCallback(BaseCallback):
                             features_extractor=self.model.policy.features_extractor,
                         )
                         obs_dict_b = self.model.policy.features_extractor.last_obs
-                        logits_k, _ = self.model.policy._build_batch_outputs(obs_dict_b)
+                        logits_k, noop_logits, _ = self.model.policy._build_batch_outputs(obs_dict_b)
                         mask_k = obs_dict_b["cand_mask"]
-                        logits, mask = self.model.policy._append_noop(logits_k, mask_k)
+                        logits, mask = self.model.policy._append_noop(logits_k, mask_k, noop_logits)
 
                         logits_np = logits.squeeze(0).detach().cpu().numpy()
                         mask_np = mask.squeeze(0).detach().cpu().numpy()
