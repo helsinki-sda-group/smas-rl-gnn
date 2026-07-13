@@ -591,7 +591,7 @@ def _plot_eval_comparison(
                 "std": agg[std_col].astype(float).values if std_col in agg.columns else None,
             })
 
-        plotted_series: List[Tuple[str, np.ndarray, np.ndarray, Optional[np.ndarray]]] = []
+        plotted_series: List[Dict[str, object]] = []
         if mean_runs:
             grouped: Dict[Tuple[str, str], List[pd.Series]] = {}
             for srow in series_rows:
@@ -600,37 +600,64 @@ def _plot_eval_comparison(
                 grouped.setdefault(key, []).append(pd.Series(srow["means"], index=srow["ts"]))
 
             for (method, eval_mode), series_list in grouped.items():
-                wide = pd.concat(series_list, axis=1).sort_index()
-                mean_s = wide.mean(axis=1, skipna=True)
-                std_s = wide.std(axis=1, ddof=0, skipna=True).fillna(0.0)
-                label = f"{method}:{eval_mode}"
-                plotted_series.append(
-                    (
-                        label,
-                        mean_s.index.to_numpy(dtype=float),
-                        mean_s.to_numpy(dtype=float),
-                        std_s.to_numpy(dtype=float),
+                wide_raw = pd.concat([s.sort_index() for s in series_list], axis=1).sort_index()
+                mean_raw = wide_raw.mean(axis=1, skipna=True)
+                std_raw = wide_raw.std(axis=1, ddof=0, skipna=True).fillna(0.0)
+
+                if ma_window > 1:
+                    wide_ma = wide_raw.apply(
+                        lambda s: s.rolling(window=ma_window, center=True, min_periods=1).mean(),
+                        axis=0,
                     )
-                )
+                else:
+                    wide_ma = wide_raw
+                mean_ma = wide_ma.mean(axis=1, skipna=True)
+                std_ma = wide_ma.std(axis=1, ddof=0, skipna=True).fillna(0.0)
+
+                label = f"{method}:{eval_mode}"
+                plotted_series.append({
+                    "label": label,
+                    "ts_raw": mean_raw.index.to_numpy(dtype=float),
+                    "means_raw": mean_raw.to_numpy(dtype=float),
+                    "std_raw": std_raw.to_numpy(dtype=float),
+                    "ts_ma": mean_ma.index.to_numpy(dtype=float),
+                    "means_ma": mean_ma.to_numpy(dtype=float),
+                    "std_ma": std_ma.to_numpy(dtype=float),
+                })
         else:
             for srow in series_rows:
                 label = f"{srow['model_id']}:{srow['eval_mode']}"
-                plotted_series.append((label, srow["ts"], srow["means"], srow["std"]))
+                plotted_series.append({
+                    "label": label,
+                    "ts_raw": np.array(srow["ts"], dtype=float),
+                    "means_raw": np.array(srow["means"], dtype=float),
+                    "std_raw": np.array(srow["std"], dtype=float) if srow["std"] is not None else None,
+                    "ts_ma": None,
+                    "means_ma": None,
+                    "std_ma": None,
+                })
 
-        for label, ts, means, std_vals in plotted_series:
-            if len(ts) > 1:
-                order = np.argsort(ts)
-                ts = ts[order]
-                means = means[order]
-                if std_vals is not None:
-                    std_vals = std_vals[order]
+        for entry in plotted_series:
+            label = str(entry["label"])
+            ts_raw = np.array(entry["ts_raw"], dtype=float)
+            means_raw = np.array(entry["means_raw"], dtype=float)
+            std_raw = entry["std_raw"]
+            if std_raw is not None:
+                std_raw = np.array(std_raw, dtype=float)
+
+            if len(ts_raw) > 1:
+                order = np.argsort(ts_raw)
+                ts_raw = ts_raw[order]
+                means_raw = means_raw[order]
+                if std_raw is not None:
+                    std_raw = std_raw[order]
 
             if plot_raw_eval:
-                if plot_raw_eval_std and std_vals is not None:
+                if plot_raw_eval_std and std_raw is not None:
                     ax.errorbar(
-                        ts,
-                        means,
-                        yerr=std_vals,
+                        ts_raw,
+                        means_raw,
+                        yerr=std_raw,
                         fmt="o-",
                         alpha=0.6,
                         capsize=5,
@@ -638,17 +665,31 @@ def _plot_eval_comparison(
                         label=label,
                     )
                 else:
-                    ax.plot(ts, means, linewidth=1.8, linestyle=_linestyle_for_label(label), label=label)
+                    ax.plot(ts_raw, means_raw, linewidth=1.8, linestyle=_linestyle_for_label(label), label=label)
 
-            if len(means) > 1 and ma_window > 1:
-                ma_vals = _ma(means, ma_window)
-                ax.plot(ts, ma_vals, lw=2.5, alpha=0.7, linestyle=_linestyle_for_label(label), label=f"MA(w={ma_window}) {label}")
-                if plot_ma_std:
-                    if std_vals is not None:
-                        ma_std = _ma(std_vals, ma_window)
-                    else:
-                        ma_std = _ma_std(means, ma_window)
-                    ax.fill_between(ts, ma_vals - ma_std, ma_vals + ma_std, alpha=0.15)
+            if len(means_raw) > 1 and ma_window > 1:
+                if mean_runs and entry["ts_ma"] is not None and entry["means_ma"] is not None:
+                    ts_ma = np.array(entry["ts_ma"], dtype=float)
+                    means_ma = np.array(entry["means_ma"], dtype=float)
+                    std_ma = np.array(entry["std_ma"], dtype=float) if entry["std_ma"] is not None else None
+                    if len(ts_ma) > 1:
+                        order_ma = np.argsort(ts_ma)
+                        ts_ma = ts_ma[order_ma]
+                        means_ma = means_ma[order_ma]
+                        if std_ma is not None:
+                            std_ma = std_ma[order_ma]
+                    ax.plot(ts_ma, means_ma, lw=2.5, alpha=0.7, linestyle=_linestyle_for_label(label), label=f"MA(w={ma_window}) {label}")
+                    if plot_ma_std and std_ma is not None:
+                        ax.fill_between(ts_ma, means_ma - std_ma, means_ma + std_ma, alpha=0.15)
+                else:
+                    ma_vals = _ma(means_raw, ma_window)
+                    ax.plot(ts_raw, ma_vals, lw=2.5, alpha=0.7, linestyle=_linestyle_for_label(label), label=f"MA(w={ma_window}) {label}")
+                    if plot_ma_std:
+                        if std_raw is not None:
+                            ma_std = _ma(std_raw, ma_window)
+                        else:
+                            ma_std = _ma_std(means_raw, ma_window)
+                        ax.fill_between(ts_raw, ma_vals - ma_std, ma_vals + ma_std, alpha=0.15)
 
         ax.set_xlabel("Training Steps", fontsize=11, fontweight="bold")
         ax.set_ylabel(metric, fontsize=11, fontweight="bold")
