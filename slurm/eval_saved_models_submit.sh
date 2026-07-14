@@ -139,7 +139,13 @@ find_matching_runs_for_target() {
 
 find_config_for_run_name() {
   local run_name="$1"
-  grep -R -l --include='rp_gnn*.yaml' -E "^[[:space:]]*run_name:[[:space:]]*${run_name}[[:space:]]*$" "$CONFIG_DIR" | head -n1 || true
+  local cfg
+  while IFS= read -r cfg; do
+    if grep -q -E "^[[:space:]]*run_name:[[:space:]]*${run_name}[[:space:]]*$" "$cfg"; then
+      printf '%s\n' "$cfg"
+      return
+    fi
+  done < <(find "$CONFIG_DIR" -maxdepth 1 -type f -name 'rp_gnn*.yaml' | sort)
 }
 
 ALL_RUNS=()
