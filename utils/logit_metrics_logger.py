@@ -46,14 +46,15 @@ class LogitEpisodeMetrics:
     step_metrics: List[LogitStepMetrics] = field(default_factory=list)
 
 
-def compute_logit_step_metrics(logits: np.ndarray, mask: np.ndarray, noop_logit_value: float) -> LogitStepMetrics:
+def compute_logit_step_metrics(logits: np.ndarray, mask: np.ndarray, noop_logit_value: Optional[float] = None) -> LogitStepMetrics:
     """
     Compute logit metrics for a single decision step.
     
     Args:
         logits: Logits for all robots and candidates [R, K_max+1], where last column is noop
         mask: Boolean mask [R, K_max+1] indicating valid candidates
-        noop_logit_value: The scalar noop logit value used
+        noop_logit_value: Optional scalar noop logit value override. If None,
+            uses the noop column from logits (last column).
         
     Returns:
         LogitStepMetrics for this step
@@ -81,7 +82,18 @@ def compute_logit_step_metrics(logits: np.ndarray, mask: np.ndarray, noop_logit_
         metrics.num_valid_candidates = 0
         metrics.top1_top2_margin = 0.0
     
-    metrics.noop_logit = noop_logit_value
+    if noop_logit_value is None:
+        # In state-dependent mode, noop is per-robot. Reduce to a scalar for
+        # step-level logging by averaging valid noop logits across robots.
+        noop_logits = logits[:, -1]
+        noop_mask = mask[:, -1]
+        valid_noop_logits = noop_logits[noop_mask]
+        if len(valid_noop_logits) > 0:
+            metrics.noop_logit = float(np.mean(valid_noop_logits))
+        else:
+            metrics.noop_logit = float(np.mean(noop_logits)) if len(noop_logits) > 0 else 0.0
+    else:
+        metrics.noop_logit = float(noop_logit_value)
     metrics.margin = metrics.best_cand_logit - metrics.noop_logit
     
     return metrics

@@ -228,10 +228,9 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
                     # Extract logits and mask as numpy arrays
                     logits_np = logits.squeeze(0).detach().cpu().numpy()  # [R, K_max+1]
                     mask_np = mask.squeeze(0).detach().cpu().numpy()  # [R, K_max+1]
-                    noop_logit_value = float(model.policy.noop_logit.item())
                     
                     # Compute step logit metrics
-                    step_metrics = compute_logit_step_metrics(logits_np, mask_np, noop_logit_value)
+                    step_metrics = compute_logit_step_metrics(logits_np, mask_np)
                     step_metrics.step = step_idx
                     logit_step_metrics.append(step_metrics)
                     

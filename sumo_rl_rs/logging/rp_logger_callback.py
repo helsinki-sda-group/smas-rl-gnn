@@ -157,9 +157,8 @@ class RPLoggerCallback(BaseCallback):
 
                         logits_np = logits.squeeze(0).detach().cpu().numpy()
                         mask_np = mask.squeeze(0).detach().cpu().numpy()
-                        noop_logit_value = float(self.model.policy.noop_logit.item())
 
-                        step_metrics = compute_logit_step_metrics(logits_np, mask_np, noop_logit_value)
+                        step_metrics = compute_logit_step_metrics(logits_np, mask_np)
                         step_metrics.step = self.steps_in_ep - 1
                         self.logit_step_metrics.append(step_metrics)
                 except Exception as e:
