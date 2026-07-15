@@ -12,6 +12,30 @@ import matplotlib.gridspec as gridspec
 import re
 
 
+COORDINATION_METRICS = {
+    "ecr": {
+        "label": "Empty Candidate Rate",
+        "filename": "empty_candidate_rate_vs_timesteps.png",
+    },
+    "unop": {
+        "label": "Unforced NOOP Rate",
+        "filename": "unforced_noop_rate_vs_timesteps.png",
+    },
+    "ncpr": {
+        "label": "Nonconflicting Proposal Rate",
+        "filename": "nonconflicting_proposal_rate_vs_timesteps.png",
+    },
+    "psur": {
+        "label": "Proposal Survival Rate",
+        "filename": "proposal_survival_rate_vs_timesteps.png",
+    },
+    "offpr": {
+        "label": "Off-Proposal Assignment Rate",
+        "filename": "off_proposal_assignment_rate_vs_timesteps.png",
+    },
+}
+
+
 def parse_metrics_log(filepath):
     """Parse the evaluation metrics log file."""
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -181,7 +205,19 @@ def add_baseline_lines(ax, baselines, reward_key, baseline_std):
             ax.axhline(mean_val - std_val, color=color, linestyle=':', linewidth=1.5, alpha=0.7)
 
 
-def plot_aggregate_metric(run_frames, reward_key, ylabel, fname, output_dir, baselines, baseline_std, mean_run):
+def plot_aggregate_metric(
+    run_frames,
+    reward_key,
+    ylabel,
+    fname,
+    output_dir,
+    baselines,
+    baseline_std,
+    mean_run,
+    y_limits=None,
+    use_baselines=True,
+    subdirectory=None,
+):
     """Plot one metric across multiple evaluation runs."""
     available = []
     for label, df in run_frames:
@@ -197,6 +233,9 @@ def plot_aggregate_metric(run_frames, reward_key, ylabel, fname, output_dir, bas
 
     merged = pd.concat(available, axis=1, sort=True).sort_index()
     ts = merged.index.to_numpy()
+
+    save_dir = os.path.join(output_dir, subdirectory) if subdirectory else output_dir
+    os.makedirs(save_dir, exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(12, 6), facecolor='#fafafa')
     ax.set_facecolor('#fafafa')
@@ -220,7 +259,11 @@ def plot_aggregate_metric(run_frames, reward_key, ylabel, fname, output_dir, bas
                     color=cmap(idx % 10), label=col)
         export_df = merged.reset_index()
 
-    add_baseline_lines(ax, baselines, reward_key, baseline_std)
+    if use_baselines:
+        add_baseline_lines(ax, baselines, reward_key, baseline_std)
+
+    if y_limits is not None:
+        ax.set_ylim(*y_limits)
 
     ax.set_xlabel('Training Steps', fontsize=11, fontweight='bold')
     ax.set_ylabel(ylabel, fontsize=11, fontweight='bold')
@@ -232,15 +275,171 @@ def plot_aggregate_metric(run_frames, reward_key, ylabel, fname, output_dir, bas
     ax.spines['right'].set_visible(False)
 
     plt.tight_layout()
-    output_file = os.path.join(output_dir, fname)
+    output_file = os.path.join(save_dir, fname)
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
     print(f"[OK] Saved {output_file}")
     plt.close()
 
     csv_name = os.path.splitext(fname)[0] + '_data.csv'
-    export_path = os.path.join(output_dir, csv_name)
+    export_path = os.path.join(save_dir, csv_name)
     export_df.to_csv(export_path, index=False)
     print(f"[OK] Saved {export_path}")
+
+
+def _plot_single_coordination_metric(df, metric_key, spec, ma_window, coord_dir):
+    if metric_key not in df.columns:
+        print(f"[INFO] Column '{metric_key}' not present — skipping {spec['label']} plot")
+        return False
+
+    grouped = group_metric_by_ts(df, metric_key)
+    if grouped.empty:
+        print(f"[INFO] Column '{metric_key}' has no grouped rows — skipping {spec['label']} plot")
+        return False
+
+    ts = grouped['ts'].values
+    means = grouped['mean'].values
+    sems = grouped['std'].values / np.sqrt(np.maximum(grouped['count'].values, 1))
+
+    fig, ax = plt.subplots(figsize=(12, 6), facecolor='#fafafa')
+    ax.set_facecolor('#fafafa')
+    ax.errorbar(
+        ts,
+        means,
+        yerr=sems,
+        fmt='o-',
+        alpha=0.6,
+        color='#2980b9',
+        capsize=5,
+        markersize=6,
+        label=f"Mean {spec['label']}",
+    )
+    if len(means) > 1:
+        ma_vals = ma(means, ma_window)
+        ax.plot(ts, ma_vals, 'r-', lw=2.5, alpha=0.7, label=f'Moving Average (w={ma_window})')
+
+    ax.set_xlabel('Training Steps', fontsize=11, fontweight='bold')
+    ax.set_ylabel(spec['label'], fontsize=11, fontweight='bold')
+    ax.set_title(f"{spec['label']} vs Training Steps", fontsize=12, fontweight='bold')
+    ax.set_ylim(-0.02, 1.02)
+    ax.legend(fontsize=9, loc='best')
+    ax.grid(alpha=0.25)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    plt.tight_layout()
+    out_png = os.path.join(coord_dir, spec['filename'])
+    plt.savefig(out_png, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"[OK] Saved {out_png}")
+
+    out_csv = os.path.join(coord_dir, f"{os.path.splitext(spec['filename'])[0]}_data.csv")
+    grouped[['ts', 'mean', 'std', 'count']].to_csv(out_csv, index=False)
+    print(f"[OK] Saved {out_csv}")
+    return True
+
+
+def _plot_single_coordination_overview(df, ma_window, coord_dir):
+    available = [k for k in COORDINATION_METRICS if k in df.columns]
+    if not available:
+        print("[INFO] No coordination columns present — skipping coordination overview")
+        return
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8), facecolor='#fafafa')
+    axes_arr = axes.ravel()
+
+    for idx, key in enumerate(available):
+        spec = COORDINATION_METRICS[key]
+        grouped = group_metric_by_ts(df, key)
+        ts = grouped['ts'].values
+        means = grouped['mean'].values
+        sems = grouped['std'].values / np.sqrt(np.maximum(grouped['count'].values, 1))
+
+        ax = axes_arr[idx]
+        ax.set_facecolor('#fafafa')
+        ax.errorbar(ts, means, yerr=sems, fmt='o-', alpha=0.6, color='#2980b9', capsize=4, markersize=4)
+        if len(means) > 1:
+            ma_vals = ma(means, ma_window)
+            ax.plot(ts, ma_vals, 'r-', lw=2.0, alpha=0.7)
+        ax.set_title(spec['label'], fontsize=10, fontweight='bold')
+        ax.set_xlabel('Training Steps', fontsize=9)
+        ax.set_ylabel(spec['label'], fontsize=9)
+        ax.set_ylim(-0.02, 1.02)
+        ax.grid(alpha=0.25)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+    for idx in range(len(available), len(axes_arr)):
+        fig.delaxes(axes_arr[idx])
+
+    fig.tight_layout()
+    out_png = os.path.join(coord_dir, 'coordination_metrics_vs_timesteps.png')
+    fig.savefig(out_png, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"[OK] Saved {out_png}")
+
+
+def _plot_compare_coordination_overview(run_frames, output_dir, mean_run):
+    available = []
+    for key in COORDINATION_METRICS:
+        if any(key in df.columns for _, df in run_frames):
+            available.append(key)
+    if not available:
+        print("[INFO] No coordination columns present in compare logs — skipping coordination overview")
+        return
+
+    coord_dir = os.path.join(output_dir, 'coordination_metrics')
+    os.makedirs(coord_dir, exist_ok=True)
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8), facecolor='#fafafa')
+    axes_arr = axes.ravel()
+
+    for idx, key in enumerate(available):
+        spec = COORDINATION_METRICS[key]
+        ax = axes_arr[idx]
+        ax.set_facecolor('#fafafa')
+
+        plotted_any = False
+        available_series = []
+        for label, df in run_frames:
+            if key not in df.columns:
+                continue
+            grouped = group_metric_by_ts(df, key)
+            series = grouped[['ts', 'mean']].rename(columns={'mean': label}).set_index('ts')
+            available_series.append(series)
+
+        if available_series:
+            merged = pd.concat(available_series, axis=1, sort=True).sort_index()
+            ts = merged.index.to_numpy(dtype=float)
+            if mean_run:
+                run_mean = merged.mean(axis=1, skipna=True)
+                run_std = merged.std(axis=1, skipna=True).fillna(0.0)
+                ax.plot(ts, run_mean.values, color='#3498db', linewidth=2.2, alpha=0.95, label='Mean Across Runs')
+                ax.fill_between(ts, (run_mean - run_std).values, (run_mean + run_std).values, color='#3498db', alpha=0.2)
+            else:
+                cmap = plt.get_cmap('tab10')
+                for j, col in enumerate(merged.columns):
+                    ax.plot(ts, merged[col].values, linewidth=1.8, alpha=0.9, color=cmap(j % 10), label=str(col))
+            plotted_any = True
+
+        if not plotted_any:
+            ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+
+        ax.set_title(spec['label'], fontsize=10, fontweight='bold')
+        ax.set_xlabel('Training Steps', fontsize=9)
+        ax.set_ylabel(spec['label'], fontsize=9)
+        ax.set_ylim(-0.02, 1.02)
+        ax.grid(alpha=0.25)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.legend(fontsize=7, loc='best')
+
+    for idx in range(len(available), len(axes_arr)):
+        fig.delaxes(axes_arr[idx])
+
+    fig.tight_layout()
+    out_png = os.path.join(coord_dir, 'coordination_metrics_vs_timesteps.png')
+    fig.savefig(out_png, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"[OK] Saved {out_png}")
 
 
 def plot_aggregate_runs(compare_logs, output_dir, baselines, baseline_std, mean_run):
@@ -258,8 +457,16 @@ def plot_aggregate_runs(compare_logs, output_dir, baselines, baseline_std, mean_
     if not run_frames:
         raise ValueError('No valid compare logs were provided.')
 
-    plot_aggregate_metric(run_frames, 'rew', 'Mean Evaluation Reward', 'reward_vs_timesteps.png',
-                          output_dir, baselines, baseline_std, mean_run)
+    plot_aggregate_metric(
+        run_frames,
+        'rew',
+        'Mean Evaluation Reward',
+        'reward_vs_timesteps.png',
+        output_dir,
+        baselines,
+        baseline_std,
+        mean_run,
+    )
 
     for reward_key, ylabel, fname in [
         ('trav', 'Travel Reward', 'reward_trav_vs_timesteps.png'),
@@ -267,8 +474,33 @@ def plot_aggregate_runs(compare_logs, output_dir, baselines, baseline_std, mean_
         ('wait', 'Wait Reward', 'reward_wait_vs_timesteps.png'),
         ('comp', 'Completion Reward', 'reward_comp_vs_timesteps.png'),
     ]:
-        plot_aggregate_metric(run_frames, reward_key, ylabel, fname,
-                              output_dir, baselines, baseline_std, mean_run)
+        plot_aggregate_metric(
+            run_frames,
+            reward_key,
+            ylabel,
+            fname,
+            output_dir,
+            baselines,
+            baseline_std,
+            mean_run,
+        )
+
+    for metric_key, spec in COORDINATION_METRICS.items():
+        plot_aggregate_metric(
+            run_frames,
+            metric_key,
+            spec['label'],
+            spec['filename'],
+            output_dir,
+            baselines,
+            baseline_std,
+            mean_run,
+            y_limits=(-0.02, 1.02),
+            use_baselines=False,
+            subdirectory='coordination_metrics',
+        )
+
+    _plot_compare_coordination_overview(run_frames, output_dir, mean_run)
 
 
 def main():
@@ -637,6 +869,21 @@ def main():
         plt.savefig(output_file, dpi=150, bbox_inches='tight')
         print(f"[OK] Saved {output_file}")
         plt.close()
+
+    coord_dir = os.path.join(output_dir, 'coordination_metrics')
+    os.makedirs(coord_dir, exist_ok=True)
+    any_coord = False
+    for metric_key, spec in COORDINATION_METRICS.items():
+        any_coord = _plot_single_coordination_metric(df, metric_key, spec, ma_window, coord_dir) or any_coord
+
+    if any_coord:
+        _plot_single_coordination_overview(df, ma_window, coord_dir)
+    else:
+        try:
+            os.rmdir(coord_dir)
+        except Exception:
+            pass
+
     print(f"\n[OK] All plots saved to {output_dir}")
 
 

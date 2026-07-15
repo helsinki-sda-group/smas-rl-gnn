@@ -29,6 +29,7 @@ Options:
                               Default: /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/plots_ablation
   --action-window <n>         Override action smoothing window from YAML template.
   --conflicts-window <n>      Override conflict smoothing window from YAML template.
+  --coordination-window <n>   Override coordination smoothing window from YAML template.
   --mean_runs                 Enable mean-runs aggregation (sets mean_runs=true in generated config).
                               Default when omitted: false.
   -h, --help                  Show this help.
@@ -51,6 +52,7 @@ SCRATCH_ROOT="/scratch/project_2012159/kbocheni/smas-rl-gnn"
 OUT_ROOT="/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/plots_ablation"
 ACTION_WINDOW_OVERRIDE=""
 CONFLICTS_WINDOW_OVERRIDE=""
+COORDINATION_WINDOW_OVERRIDE=""
 JOB_IDS_CSV=""
 LABELS_CSV=""
 MEAN_RUNS_OVERRIDE="0"
@@ -88,6 +90,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --conflicts-window)
       CONFLICTS_WINDOW_OVERRIDE="$2"
+      shift 2
+      ;;
+    --coordination-window)
+      COORDINATION_WINDOW_OVERRIDE="$2"
       shift 2
       ;;
     --mean_runs)
@@ -292,11 +298,11 @@ for i in "${!SELECTED_JOBDIRS[@]}"; do
   printf '%s\t%s\t%s\n' "$base_name" "${SELECTED_LABELS[$i]}" "${SELECTED_JOBDIRS[$i]}" >> "$MAPPING_FILE"
 done
 
-ACTION_PARAMS="$($PYTHON_BIN - "$TEMPLATE_CONFIG" "$GENERATED_CONF" "$MAPPING_FILE" "$OUTDIR" "${ACTION_WINDOW_OVERRIDE:-}" "${CONFLICTS_WINDOW_OVERRIDE:-}" "$MEAN_RUNS_OVERRIDE" <<'PY'
+ACTION_PARAMS="$($PYTHON_BIN - "$TEMPLATE_CONFIG" "$GENERATED_CONF" "$MAPPING_FILE" "$OUTDIR" "${ACTION_WINDOW_OVERRIDE:-}" "${CONFLICTS_WINDOW_OVERRIDE:-}" "${COORDINATION_WINDOW_OVERRIDE:-}" "$MEAN_RUNS_OVERRIDE" <<'PY'
 import sys
 from omegaconf import OmegaConf
 
-template_path, generated_path, mapping_path, outdir, action_override, conflicts_override, mean_runs_override = sys.argv[1:8]
+template_path, generated_path, mapping_path, outdir, action_override, conflicts_override, coordination_override, mean_runs_override = sys.argv[1:9]
 cfg = OmegaConf.load(template_path)
 
 model_dirs = []
@@ -315,28 +321,41 @@ cfg.experiment_names = experiment_names
 cfg.output_dir = f"{outdir}/ablation_results"
 cfg.mean_runs = bool(int(mean_runs_override))
 
-OmegaConf.save(cfg, generated_path)
-
 script_cfg = cfg.get("script") or {}
 default_window = int(cfg.get("k_eval", 10))
 action_window = int(action_override) if action_override else int(script_cfg.get("action_window", default_window))
 action_out_dirname = str(script_cfg.get("action_out_dirname", "action_comparison"))
 conflicts_window = int(conflicts_override) if conflicts_override else int(script_cfg.get("conflicts_window", default_window))
 conflicts_out_dirname = str(script_cfg.get("conflicts_out_dirname", "conflicts_comparison"))
+coordination_window = int(coordination_override) if coordination_override else int(script_cfg.get("coordination_window", default_window))
+coordination_out_dirname = str(script_cfg.get("coordination_out_dirname", "coordination_comparison"))
+coordination_plot_std = int(bool(cfg.get("coordination_plot_std", script_cfg.get("coordination_plot_std", True))))
 action_grouped_only = int(bool(cfg.get("action_grouped_only", True)))
 action_plot_std = int(bool(cfg.get("action_plot_std", True)))
 conflicts_plot_std = int(bool(cfg.get("conflicts_plot_std", True)))
 mean_runs = int(bool(cfg.get("mean_runs", False)))
-print(f"{action_window}\t{action_out_dirname}\t{conflicts_window}\t{conflicts_out_dirname}\t{action_grouped_only}\t{action_plot_std}\t{conflicts_plot_std}\t{mean_runs}")
+
+cfg.coordination_output_dir = f"{outdir}/{coordination_out_dirname}"
+cfg.coordination_plot_ma = int(coordination_window)
+cfg.coordination_plot_std = bool(coordination_plot_std)
+
+OmegaConf.save(cfg, generated_path)
+
+print(
+  f"{action_window}\t{action_out_dirname}\t{conflicts_window}\t{conflicts_out_dirname}\t"
+  f"{coordination_window}\t{coordination_out_dirname}\t{coordination_plot_std}\t"
+  f"{action_grouped_only}\t{action_plot_std}\t{conflicts_plot_std}\t{mean_runs}"
+)
 PY
 )"
 
-IFS=$'\t' read -r ACTION_WINDOW ACTION_OUT_DIRNAME CONFLICTS_WINDOW CONFLICTS_OUT_DIRNAME ACTION_GROUPED_ONLY ACTION_PLOT_STD CONFLICTS_PLOT_STD MEAN_RUNS <<< "$ACTION_PARAMS"
+IFS=$'\t' read -r ACTION_WINDOW ACTION_OUT_DIRNAME CONFLICTS_WINDOW CONFLICTS_OUT_DIRNAME COORDINATION_WINDOW COORDINATION_OUT_DIRNAME COORDINATION_PLOT_STD ACTION_GROUPED_ONLY ACTION_PLOT_STD CONFLICTS_PLOT_STD MEAN_RUNS <<< "$ACTION_PARAMS"
 
 echo "[INFO] Generated config: $GENERATED_CONF"
 echo "[INFO] Comparison output dir: $OUTDIR"
 echo "[INFO] Action window: $ACTION_WINDOW"
 echo "[INFO] Conflicts window: $CONFLICTS_WINDOW"
+echo "[INFO] Coordination window: $COORDINATION_WINDOW"
 
 "$PYTHON_BIN" "$REPO/aggregate_ablation_results.py" --config "$GENERATED_CONF"
 

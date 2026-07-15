@@ -40,6 +40,29 @@ TRAIN_OUTPUT_METRICS = [
     "explained_variance",
     "value_loss",
 ]
+COORDINATION_METRIC_KEYS = ["ecr", "unop", "ncpr", "psur", "offpr"]
+COORDINATION_METRICS = {
+    "ecr": {
+        "label": "Empty Candidate Rate",
+        "filename": "empty_candidate_rate_vs_timesteps.png",
+    },
+    "unop": {
+        "label": "Unforced NOOP Rate",
+        "filename": "unforced_noop_rate_vs_timesteps.png",
+    },
+    "ncpr": {
+        "label": "Nonconflicting Proposal Rate",
+        "filename": "nonconflicting_proposal_rate_vs_timesteps.png",
+    },
+    "psur": {
+        "label": "Proposal Survival Rate",
+        "filename": "proposal_survival_rate_vs_timesteps.png",
+    },
+    "offpr": {
+        "label": "Off-Proposal Assignment Rate",
+        "filename": "off_proposal_assignment_rate_vs_timesteps.png",
+    },
+}
 
 
 def _normalize_reward_type(reward_type: Optional[str]) -> str:
@@ -82,6 +105,7 @@ def _metrics_for_df(df: pd.DataFrame, reward_type: str) -> List[str]:
     if component is not None:
         out.append(component)
     out.extend([m for m in COMMON_REWARD_METRICS if m != "rew"])
+    out.extend([m for m in COORDINATION_METRIC_KEYS if m in df.columns])
     return [m for m in out if m in df.columns]
 
 
@@ -548,6 +572,9 @@ def _plot_eval_comparison(
     plot_ma_std: bool,
     include_training_logs: bool,
     mean_runs: bool,
+    coordination_output_dir: Optional[Path] = None,
+    coordination_ma_window: Optional[int] = None,
+    coordination_plot_std: bool = True,
 ) -> None:
     modes = {"deterministic", "stochastic"}
     if include_training_logs:
@@ -564,39 +591,46 @@ def _plot_eval_comparison(
         for col in agg.columns:
             if col.endswith("_mean"):
                 available_metrics.add(col[:-5])
-    metrics = [m for m in ["rew", "wait", "comp", "dln", "trav", "mdl"] if m in available_metrics]
-    if not metrics:
-        return
+
+    reward_metrics = [m for m in ["rew", "wait", "comp", "dln", "trav", "mdl"] if m in available_metrics]
+    coordination_metrics = [m for m in COORDINATION_METRIC_KEYS if m in available_metrics]
 
     plot_dir = output_dir / "eval_comp_plots"
     plot_dir.mkdir(parents=True, exist_ok=True)
+    coord_dir = coordination_output_dir or (output_dir / "coordination_comparison")
+    coord_dir.mkdir(parents=True, exist_ok=True)
+    coord_window = int(coordination_ma_window) if coordination_ma_window is not None else int(ma_window)
 
-    for metric in metrics:
-        fig, ax = plt.subplots(figsize=(12, 6), facecolor="#fafafa")
-        ax.set_facecolor("#fafafa")
-        series_rows: List[Dict[str, object]] = []
+    def _collect_series_rows(metric: str) -> List[Dict[str, object]]:
+        out_rows: List[Dict[str, object]] = []
         for row in eval_rows:
             agg = row.get("eval_plot")
             if agg is None or agg.empty:
                 continue
             mean_col = f"{metric}_mean"
             std_col = f"{metric}_std"
+            count_col = f"{metric}_count"
             if mean_col not in agg.columns:
                 continue
-            series_rows.append({
-                "model_id": str(row["model_id"]),
-                "eval_mode": str(row["eval_mode"]),
-                "ts": agg["ts"].astype(float).values,
-                "means": agg[mean_col].astype(float).values,
-                "std": agg[std_col].astype(float).values if std_col in agg.columns else None,
-            })
+            out_rows.append(
+                {
+                    "model_id": str(row["model_id"]),
+                    "eval_mode": str(row["eval_mode"]),
+                    "ts": agg["ts"].astype(float).values,
+                    "means": agg[mean_col].astype(float).values,
+                    "std": agg[std_col].astype(float).values if std_col in agg.columns else None,
+                    "count": agg[count_col].astype(float).values if count_col in agg.columns else None,
+                }
+            )
+        return out_rows
 
+    def _build_plotted_series(series_rows: List[Dict[str, object]], window: int) -> List[Dict[str, object]]:
         plotted_series: List[Dict[str, object]] = []
         if mean_runs:
             grouped: Dict[Tuple[str, str], List[pd.Series]] = {}
             for srow in series_rows:
-                method = _method_from_label(srow["model_id"])
-                key = (method, srow["eval_mode"])
+                method = _method_from_label(str(srow["model_id"]))
+                key = (method, str(srow["eval_mode"]))
                 grouped.setdefault(key, []).append(pd.Series(srow["means"], index=srow["ts"]))
 
             for (method, eval_mode), series_list in grouped.items():
@@ -604,9 +638,9 @@ def _plot_eval_comparison(
                 mean_raw = wide_raw.mean(axis=1, skipna=True)
                 std_raw = wide_raw.std(axis=1, ddof=0, skipna=True).fillna(0.0)
 
-                if ma_window > 1:
+                if window > 1:
                     wide_ma = wide_raw.apply(
-                        lambda s: s.rolling(window=ma_window, center=True, min_periods=1).mean(),
+                        lambda s: s.rolling(window=window, center=True, min_periods=1).mean(),
                         axis=0,
                     )
                 else:
@@ -614,28 +648,78 @@ def _plot_eval_comparison(
                 mean_ma = wide_ma.mean(axis=1, skipna=True)
                 std_ma = wide_ma.std(axis=1, ddof=0, skipna=True).fillna(0.0)
 
-                label = f"{method}:{eval_mode}"
-                plotted_series.append({
-                    "label": label,
-                    "ts_raw": mean_raw.index.to_numpy(dtype=float),
-                    "means_raw": mean_raw.to_numpy(dtype=float),
-                    "std_raw": std_raw.to_numpy(dtype=float),
-                    "ts_ma": mean_ma.index.to_numpy(dtype=float),
-                    "means_ma": mean_ma.to_numpy(dtype=float),
-                    "std_ma": std_ma.to_numpy(dtype=float),
-                })
+                plotted_series.append(
+                    {
+                        "label": f"{method}:{eval_mode}",
+                        "ts_raw": mean_raw.index.to_numpy(dtype=float),
+                        "means_raw": mean_raw.to_numpy(dtype=float),
+                        "std_raw": std_raw.to_numpy(dtype=float),
+                        "count_raw": wide_raw.notna().sum(axis=1).to_numpy(dtype=float),
+                        "ts_ma": mean_ma.index.to_numpy(dtype=float),
+                        "means_ma": mean_ma.to_numpy(dtype=float),
+                        "std_ma": std_ma.to_numpy(dtype=float),
+                    }
+                )
         else:
             for srow in series_rows:
-                label = f"{srow['model_id']}:{srow['eval_mode']}"
-                plotted_series.append({
-                    "label": label,
-                    "ts_raw": np.array(srow["ts"], dtype=float),
-                    "means_raw": np.array(srow["means"], dtype=float),
-                    "std_raw": np.array(srow["std"], dtype=float) if srow["std"] is not None else None,
-                    "ts_ma": None,
-                    "means_ma": None,
-                    "std_ma": None,
-                })
+                plotted_series.append(
+                    {
+                        "label": f"{srow['model_id']}:{srow['eval_mode']}",
+                        "ts_raw": np.array(srow["ts"], dtype=float),
+                        "means_raw": np.array(srow["means"], dtype=float),
+                        "std_raw": np.array(srow["std"], dtype=float) if srow["std"] is not None else None,
+                        "count_raw": np.array(srow["count"], dtype=float) if srow["count"] is not None else None,
+                        "ts_ma": None,
+                        "means_ma": None,
+                        "std_ma": None,
+                    }
+                )
+        return plotted_series
+
+    def _export_metric_csv(metric: str, plotted_series: List[Dict[str, object]], out_csv: Path) -> None:
+        if mean_runs:
+            rows_export = []
+            for entry in plotted_series:
+                label = str(entry["label"])
+                ts = np.array(entry["ts_raw"], dtype=float)
+                means = np.array(entry["means_raw"], dtype=float)
+                stds = np.array(entry["std_raw"], dtype=float)
+                counts = np.array(entry["count_raw"], dtype=float)
+                for t, m, s, c in zip(ts, means, stds, counts):
+                    rows_export.append({"label": label, "ts": t, "mean": m, "std": s, "count": c})
+            export_df = pd.DataFrame(rows_export)
+            export_df.to_csv(out_csv, index=False)
+            return
+
+        series_frames = []
+        for entry in plotted_series:
+            label = str(entry["label"])
+            ts = np.array(entry["ts_raw"], dtype=float)
+            vals = np.array(entry["means_raw"], dtype=float)
+            series_frames.append(pd.DataFrame({"ts": ts, label: vals}).set_index("ts"))
+        if not series_frames:
+            return
+        merged = pd.concat(series_frames, axis=1, sort=True).sort_index().reset_index()
+        merged.to_csv(out_csv, index=False)
+
+    def _plot_metric(
+        metric: str,
+        ylabel: str,
+        out_png: Path,
+        out_csv: Path,
+        window: int,
+        y_limits: Optional[Tuple[float, float]],
+        std_enabled: bool,
+    ) -> List[Dict[str, object]]:
+        series_rows = _collect_series_rows(metric)
+        if not series_rows:
+            print(f"[INFO] Column '{metric}' not present — skipping {ylabel} plot")
+            return []
+
+        plotted_series = _build_plotted_series(series_rows, window)
+
+        fig, ax = plt.subplots(figsize=(12, 6), facecolor="#fafafa")
+        ax.set_facecolor("#fafafa")
 
         for entry in plotted_series:
             label = str(entry["label"])
@@ -653,21 +737,12 @@ def _plot_eval_comparison(
                     std_raw = std_raw[order]
 
             if plot_raw_eval:
-                if plot_raw_eval_std and std_raw is not None:
-                    ax.errorbar(
-                        ts_raw,
-                        means_raw,
-                        yerr=std_raw,
-                        fmt="o-",
-                        alpha=0.6,
-                        capsize=5,
-                        markersize=5,
-                        label=label,
-                    )
+                if plot_raw_eval_std and std_enabled and std_raw is not None:
+                    ax.errorbar(ts_raw, means_raw, yerr=std_raw, fmt="o-", alpha=0.6, capsize=5, markersize=5, label=label)
                 else:
                     ax.plot(ts_raw, means_raw, linewidth=1.8, linestyle=_linestyle_for_label(label), label=label)
 
-            if len(means_raw) > 1 and ma_window > 1:
+            if len(means_raw) > 1 and window > 1:
                 if mean_runs and entry["ts_ma"] is not None and entry["means_ma"] is not None:
                     ts_ma = np.array(entry["ts_ma"], dtype=float)
                     means_ma = np.array(entry["means_ma"], dtype=float)
@@ -678,30 +753,93 @@ def _plot_eval_comparison(
                         means_ma = means_ma[order_ma]
                         if std_ma is not None:
                             std_ma = std_ma[order_ma]
-                    ax.plot(ts_ma, means_ma, lw=2.5, alpha=0.7, linestyle=_linestyle_for_label(label), label=f"MA(w={ma_window}) {label}")
-                    if plot_ma_std and std_ma is not None:
+                    ax.plot(ts_ma, means_ma, lw=2.5, alpha=0.7, linestyle=_linestyle_for_label(label), label=f"MA(w={window}) {label}")
+                    if plot_ma_std and std_enabled and std_ma is not None:
                         ax.fill_between(ts_ma, means_ma - std_ma, means_ma + std_ma, alpha=0.15)
                 else:
-                    ma_vals = _ma(means_raw, ma_window)
-                    ax.plot(ts_raw, ma_vals, lw=2.5, alpha=0.7, linestyle=_linestyle_for_label(label), label=f"MA(w={ma_window}) {label}")
-                    if plot_ma_std:
-                        if std_raw is not None:
-                            ma_std = _ma(std_raw, ma_window)
-                        else:
-                            ma_std = _ma_std(means_raw, ma_window)
+                    ma_vals = _ma(means_raw, window)
+                    ax.plot(ts_raw, ma_vals, lw=2.5, alpha=0.7, linestyle=_linestyle_for_label(label), label=f"MA(w={window}) {label}")
+                    if plot_ma_std and std_enabled:
+                        ma_std = _ma(std_raw, window) if std_raw is not None else _ma_std(means_raw, window)
                         ax.fill_between(ts_raw, ma_vals - ma_std, ma_vals + ma_std, alpha=0.15)
 
         ax.set_xlabel("Training Steps", fontsize=11, fontweight="bold")
-        ax.set_ylabel(metric, fontsize=11, fontweight="bold")
-        ax.set_title(f"{metric} vs Training Steps", fontsize=12, fontweight="bold")
+        ax.set_ylabel(ylabel, fontsize=11, fontweight="bold")
+        ax.set_title(f"{ylabel} vs Training Steps", fontsize=12, fontweight="bold")
+        if y_limits is not None:
+            ax.set_ylim(*y_limits)
         ax.legend(fontsize=8, loc="best")
         ax.grid(alpha=0.25)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
         plt.tight_layout()
-        plt.savefig(plot_dir / f"{metric}_vs_timesteps.png", dpi=150, bbox_inches="tight")
+        plt.savefig(out_png, dpi=150, bbox_inches="tight")
         plt.close()
+        print(f"[OK] Saved {out_png}")
+
+        _export_metric_csv(metric, plotted_series, out_csv)
+        print(f"[OK] Saved {out_csv}")
+        return plotted_series
+
+    for metric in reward_metrics:
+        _plot_metric(
+            metric,
+            metric,
+            plot_dir / f"{metric}_vs_timesteps.png",
+            plot_dir / f"{metric}_vs_timesteps_data.csv",
+            ma_window,
+            None,
+            std_enabled=True,
+        )
+
+    coord_plotted: Dict[str, List[Dict[str, object]]] = {}
+    for metric in coordination_metrics:
+        spec = COORDINATION_METRICS[metric]
+        series = _plot_metric(
+            metric,
+            spec["label"],
+            coord_dir / spec["filename"],
+            coord_dir / f"{Path(spec['filename']).stem}_data.csv",
+            coord_window,
+            (-0.02, 1.02),
+            std_enabled=bool(coordination_plot_std),
+        )
+        if series:
+            coord_plotted[metric] = series
+
+    if coord_plotted:
+        keys = [k for k in COORDINATION_METRIC_KEYS if k in coord_plotted]
+        fig, axes = plt.subplots(2, 3, figsize=(15, 8), facecolor="#fafafa")
+        axes_arr = axes.ravel()
+        for idx, metric in enumerate(keys):
+            ax = axes_arr[idx]
+            spec = COORDINATION_METRICS[metric]
+            ax.set_facecolor("#fafafa")
+            for entry in coord_plotted[metric]:
+                label = str(entry["label"])
+                ts = np.array(entry["ts_raw"], dtype=float)
+                vals = np.array(entry["means_raw"], dtype=float)
+                ax.plot(ts, vals, linewidth=1.8, linestyle=_linestyle_for_label(label), label=label)
+                if len(vals) > 1 and coord_window > 1:
+                    ax.plot(ts, _ma(vals, coord_window), lw=2.3, alpha=0.7, linestyle=_linestyle_for_label(label))
+            ax.set_title(spec["label"], fontsize=10, fontweight="bold")
+            ax.set_xlabel("Training Steps", fontsize=9)
+            ax.set_ylabel(spec["label"], fontsize=9)
+            ax.set_ylim(-0.02, 1.02)
+            ax.grid(alpha=0.25)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.legend(fontsize=7, loc="best")
+
+        for idx in range(len(keys), len(axes_arr)):
+            fig.delaxes(axes_arr[idx])
+
+        fig.tight_layout()
+        out_overview = coord_dir / "coordination_metrics_vs_timesteps.png"
+        fig.savefig(out_overview, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"[OK] Saved {out_overview}")
 
 
 def main() -> None:
@@ -821,6 +959,9 @@ def main() -> None:
         plot_raw_eval_std = bool(conf.get("plot_raw_eval_std", True))
         plot_ma_std = bool(conf.get("plot_ma_std", False))
         mean_runs = bool(conf.get("mean_runs", True))
+        coordination_output_dir = Path(str(conf.get("coordination_output_dir", output_dir / "coordination_comparison")))
+        coordination_ma = int(conf.get("coordination_plot_ma", ma_window))
+        coordination_plot_std = bool(conf.get("coordination_plot_std", True))
         _plot_eval_comparison(
             rows,
             output_dir,
@@ -830,6 +971,9 @@ def main() -> None:
             plot_ma_std,
             include_training_logs=True,
             mean_runs=mean_runs,
+            coordination_output_dir=coordination_output_dir,
+            coordination_ma_window=coordination_ma,
+            coordination_plot_std=coordination_plot_std,
         )
 
     csv_rows = []
