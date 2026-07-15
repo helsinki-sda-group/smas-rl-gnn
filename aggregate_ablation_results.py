@@ -44,23 +44,23 @@ COORDINATION_METRIC_KEYS = ["ecr", "unop", "ncpr", "psur", "offpr"]
 COORDINATION_METRICS = {
     "ecr": {
         "label": "Empty Candidate Rate",
-        "filename": "empty_candidate_rate_vs_timesteps.png",
+        "filename": "empty_cand_rate_vs_ts.png",
     },
     "unop": {
         "label": "Unforced NOOP Rate",
-        "filename": "unforced_noop_rate_vs_timesteps.png",
+        "filename": "unforced_noop_rate_vs_ts.png",
     },
     "ncpr": {
         "label": "Nonconflicting Proposal Rate",
-        "filename": "nonconflicting_proposal_rate_vs_timesteps.png",
+        "filename": "nonconf_prop_rate_vs_ts.png",
     },
     "psur": {
         "label": "Proposal Survival Rate",
-        "filename": "proposal_survival_rate_vs_timesteps.png",
+        "filename": "prop_survival_rate_vs_ts.png",
     },
     "offpr": {
         "label": "Off-Proposal Assignment Rate",
-        "filename": "off_proposal_assignment_rate_vs_timesteps.png",
+        "filename": "offprop_assign_rate_vs_ts.png",
     },
 }
 
@@ -597,7 +597,7 @@ def _plot_eval_comparison(
 
     plot_dir = output_dir / "eval_comp_plots"
     plot_dir.mkdir(parents=True, exist_ok=True)
-    coord_dir = coordination_output_dir or (output_dir / "coordination_comparison")
+    coord_dir = coordination_output_dir or (output_dir / "coord_cmp")
     coord_dir.mkdir(parents=True, exist_ok=True)
     coord_window = int(coordination_ma_window) if coordination_ma_window is not None else int(ma_window)
 
@@ -836,7 +836,7 @@ def _plot_eval_comparison(
             fig.delaxes(axes_arr[idx])
 
         fig.tight_layout()
-        out_overview = coord_dir / "coordination_metrics_vs_timesteps.png"
+        out_overview = coord_dir / "coord_metrics_vs_ts.png"
         fig.savefig(out_overview, dpi=150, bbox_inches="tight")
         plt.close(fig)
         print(f"[OK] Saved {out_overview}")
@@ -959,7 +959,7 @@ def main() -> None:
         plot_raw_eval_std = bool(conf.get("plot_raw_eval_std", True))
         plot_ma_std = bool(conf.get("plot_ma_std", False))
         mean_runs = bool(conf.get("mean_runs", True))
-        coordination_output_dir = Path(str(conf.get("coordination_output_dir", output_dir / "coordination_comparison")))
+        coordination_output_dir = Path(str(conf.get("coordination_output_dir", output_dir / "coord_cmp")))
         coordination_ma = int(conf.get("coordination_plot_ma", ma_window))
         coordination_plot_std = bool(conf.get("coordination_plot_std", True))
         _plot_eval_comparison(

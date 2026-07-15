@@ -44,4 +44,4 @@ script:
   conflicts_window: 100
   conflicts_out_dirname: conflicts_comparison
   coordination_window: 100
-  coordination_out_dirname: coordination_comparison
+  coordination_out_dirname: coord_cmp

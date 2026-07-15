@@ -15,23 +15,23 @@ import re
 COORDINATION_METRICS = {
     "ecr": {
         "label": "Empty Candidate Rate",
-        "filename": "empty_candidate_rate_vs_timesteps.png",
+        "filename": "empty_cand_rate_vs_ts.png",
     },
     "unop": {
         "label": "Unforced NOOP Rate",
-        "filename": "unforced_noop_rate_vs_timesteps.png",
+        "filename": "unforced_noop_rate_vs_ts.png",
     },
     "ncpr": {
         "label": "Nonconflicting Proposal Rate",
-        "filename": "nonconflicting_proposal_rate_vs_timesteps.png",
+        "filename": "nonconf_prop_rate_vs_ts.png",
     },
     "psur": {
         "label": "Proposal Survival Rate",
-        "filename": "proposal_survival_rate_vs_timesteps.png",
+        "filename": "prop_survival_rate_vs_ts.png",
     },
     "offpr": {
         "label": "Off-Proposal Assignment Rate",
-        "filename": "off_proposal_assignment_rate_vs_timesteps.png",
+        "filename": "offprop_assign_rate_vs_ts.png",
     },
 }
 
@@ -128,6 +128,39 @@ def ma(data, window):
 
 def parse_baseline_log(filepath):
     """Parse baseline log file to extract mean and std for each policy."""
+    # Preferred path: parse per-row metrics and compute mean/std by policy.
+    # This supports newly added metrics such as ecr/unop/ncpr/psur/offpr.
+    try:
+        df = parse_metrics_log(filepath)
+        if not df.empty and 'pol' in df.columns:
+            metric_names = ['rew', 'cap', 'step', 'dln', 'wait', 'trav', 'comp', 'nsv', 'ecr', 'unop', 'ncpr', 'psur', 'offpr']
+            available_metrics = [m for m in metric_names if m in df.columns]
+            out = {}
+            if available_metrics:
+                for pol in sorted(str(p) for p in df['pol'].dropna().unique()):
+                    if pol.upper() in {'MEAN', 'STD'}:
+                        continue
+                    sub = df[df['pol'].astype(str) == pol]
+                    if sub.empty:
+                        continue
+                    stats = {}
+                    for m in available_metrics:
+                        vals = pd.to_numeric(sub[m], errors='coerce').dropna()
+                        if len(vals) == 0:
+                            continue
+                        stats[f'{m}_mean'] = float(vals.mean())
+                        stats[f'{m}_std'] = float(vals.std(ddof=0)) if len(vals) > 1 else 0.0
+                    if 'rew_mean' in stats and 'rew_std' in stats:
+                        stats['mean'] = stats['rew_mean']
+                        stats['std'] = stats['rew_std']
+                    if stats:
+                        out[pol] = stats
+            if out:
+                return out
+    except Exception:
+        pass
+
+    # Fallback path: parse legacy summary rows that use ± formatting.
     baselines = {}
     import re
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -138,7 +171,7 @@ def parse_baseline_log(filepath):
         if line.startswith('pol') and 'rew±std' in line:
             summary_start = i
     if summary_start is not None:
-        metric_names = ['rew', 'cap', 'step', 'dln', 'wait', 'trav', 'comp', 'nsv']
+        metric_names = ['rew', 'cap', 'step', 'dln', 'wait', 'trav', 'comp', 'nsv', 'ecr', 'unop', 'ncpr', 'psur', 'offpr']
         for line in lines[summary_start+1:]:
             if not line or line.startswith('#'):
                 break
@@ -286,7 +319,7 @@ def plot_aggregate_metric(
     print(f"[OK] Saved {export_path}")
 
 
-def _plot_single_coordination_metric(df, metric_key, spec, ma_window, coord_dir):
+def _plot_single_coordination_metric(df, metric_key, spec, ma_window, coord_dir, baselines, baseline_std):
     if metric_key not in df.columns:
         print(f"[INFO] Column '{metric_key}' not present — skipping {spec['label']} plot")
         return False
@@ -316,6 +349,9 @@ def _plot_single_coordination_metric(df, metric_key, spec, ma_window, coord_dir)
     if len(means) > 1:
         ma_vals = ma(means, ma_window)
         ax.plot(ts, ma_vals, 'r-', lw=2.5, alpha=0.7, label=f'Moving Average (w={ma_window})')
+
+    # Baselines for coordination metrics are shown when available in baseline log.
+    add_baseline_lines(ax, baselines, metric_key, baseline_std)
 
     ax.set_xlabel('Training Steps', fontsize=11, fontweight='bold')
     ax.set_ylabel(spec['label'], fontsize=11, fontweight='bold')
@@ -372,7 +408,7 @@ def _plot_single_coordination_overview(df, ma_window, coord_dir):
         fig.delaxes(axes_arr[idx])
 
     fig.tight_layout()
-    out_png = os.path.join(coord_dir, 'coordination_metrics_vs_timesteps.png')
+    out_png = os.path.join(coord_dir, 'coord_metrics_vs_ts.png')
     fig.savefig(out_png, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"[OK] Saved {out_png}")
@@ -387,7 +423,7 @@ def _plot_compare_coordination_overview(run_frames, output_dir, mean_run):
         print("[INFO] No coordination columns present in compare logs — skipping coordination overview")
         return
 
-    coord_dir = os.path.join(output_dir, 'coordination_metrics')
+    coord_dir = os.path.join(output_dir, 'coord')
     os.makedirs(coord_dir, exist_ok=True)
     fig, axes = plt.subplots(2, 3, figsize=(15, 8), facecolor='#fafafa')
     axes_arr = axes.ravel()
@@ -436,7 +472,7 @@ def _plot_compare_coordination_overview(run_frames, output_dir, mean_run):
         fig.delaxes(axes_arr[idx])
 
     fig.tight_layout()
-    out_png = os.path.join(coord_dir, 'coordination_metrics_vs_timesteps.png')
+    out_png = os.path.join(coord_dir, 'coord_metrics_vs_ts.png')
     fig.savefig(out_png, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"[OK] Saved {out_png}")
@@ -496,8 +532,8 @@ def plot_aggregate_runs(compare_logs, output_dir, baselines, baseline_std, mean_
             baseline_std,
             mean_run,
             y_limits=(-0.02, 1.02),
-            use_baselines=False,
-            subdirectory='coordination_metrics',
+            use_baselines=True,
+            subdirectory='coord',
         )
 
     _plot_compare_coordination_overview(run_frames, output_dir, mean_run)
@@ -870,11 +906,11 @@ def main():
         print(f"[OK] Saved {output_file}")
         plt.close()
 
-    coord_dir = os.path.join(output_dir, 'coordination_metrics')
+    coord_dir = os.path.join(output_dir, 'coord')
     os.makedirs(coord_dir, exist_ok=True)
     any_coord = False
     for metric_key, spec in COORDINATION_METRICS.items():
-        any_coord = _plot_single_coordination_metric(df, metric_key, spec, ma_window, coord_dir) or any_coord
+        any_coord = _plot_single_coordination_metric(df, metric_key, spec, ma_window, coord_dir, baselines, baseline_std) or any_coord
 
     if any_coord:
         _plot_single_coordination_overview(df, ma_window, coord_dir)

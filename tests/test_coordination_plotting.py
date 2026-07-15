@@ -88,19 +88,19 @@ class CoordinationPlottingTests(unittest.TestCase):
             code, out = self._run(["plot_eval_results.py", str(log_path), "--output-dir", str(out_dir), "--ma", "2"])
             self.assertEqual(code, 0, msg=out)
 
-            coord_dir = out_dir / "coordination_metrics"
+            coord_dir = out_dir / "coord"
             expected_pngs = [
-                "empty_candidate_rate_vs_timesteps.png",
-                "unforced_noop_rate_vs_timesteps.png",
-                "nonconflicting_proposal_rate_vs_timesteps.png",
-                "proposal_survival_rate_vs_timesteps.png",
-                "off_proposal_assignment_rate_vs_timesteps.png",
-                "coordination_metrics_vs_timesteps.png",
+                "empty_cand_rate_vs_ts.png",
+                "unforced_noop_rate_vs_ts.png",
+                "nonconf_prop_rate_vs_ts.png",
+                "prop_survival_rate_vs_ts.png",
+                "offprop_assign_rate_vs_ts.png",
+                "coord_metrics_vs_ts.png",
             ]
             for name in expected_pngs:
                 self.assertTrue((coord_dir / name).exists(), f"Missing {name}")
 
-            expected_csv = coord_dir / "empty_candidate_rate_vs_timesteps_data.csv"
+            expected_csv = coord_dir / "empty_cand_rate_vs_ts_data.csv"
             self.assertTrue(expected_csv.exists())
             df = pd.read_csv(expected_csv)
             row100 = df[df["ts"] == 100].iloc[0]
@@ -122,12 +122,12 @@ class CoordinationPlottingTests(unittest.TestCase):
             code, out = self._run(["plot_eval_results.py", str(log_path), "--output-dir", str(out_dir)])
             self.assertEqual(code, 0, msg=out)
 
-            coord_dir = out_dir / "coordination_metrics"
-            self.assertTrue((coord_dir / "empty_candidate_rate_vs_timesteps.png").exists())
-            self.assertTrue((coord_dir / "unforced_noop_rate_vs_timesteps.png").exists())
-            self.assertTrue((coord_dir / "proposal_survival_rate_vs_timesteps.png").exists())
-            self.assertFalse((coord_dir / "nonconflicting_proposal_rate_vs_timesteps.png").exists())
-            self.assertFalse((coord_dir / "off_proposal_assignment_rate_vs_timesteps.png").exists())
+            coord_dir = out_dir / "coord"
+            self.assertTrue((coord_dir / "empty_cand_rate_vs_ts.png").exists())
+            self.assertTrue((coord_dir / "unforced_noop_rate_vs_ts.png").exists())
+            self.assertTrue((coord_dir / "prop_survival_rate_vs_ts.png").exists())
+            self.assertFalse((coord_dir / "nonconf_prop_rate_vs_ts.png").exists())
+            self.assertFalse((coord_dir / "offprop_assign_rate_vs_ts.png").exists())
 
     def test_3_old_log_without_coordination_columns(self):
         with tempfile.TemporaryDirectory() as td:
@@ -176,10 +176,10 @@ class CoordinationPlottingTests(unittest.TestCase):
             )
             self.assertEqual(code, 0, msg=out)
 
-            coord_dir = out_dir / "coordination_metrics"
-            self.assertTrue((coord_dir / "empty_candidate_rate_vs_timesteps.png").exists())
-            self.assertTrue((coord_dir / "empty_candidate_rate_vs_timesteps_data.csv").exists())
-            self.assertTrue((coord_dir / "coordination_metrics_vs_timesteps.png").exists())
+            coord_dir = out_dir / "coord"
+            self.assertTrue((coord_dir / "empty_cand_rate_vs_ts.png").exists())
+            self.assertTrue((coord_dir / "empty_cand_rate_vs_ts_data.csv").exists())
+            self.assertTrue((coord_dir / "coord_metrics_vs_ts.png").exists())
 
     def test_5_ablation_workflow_coordination_outputs(self):
         with tempfile.TemporaryDirectory() as td:
@@ -226,7 +226,7 @@ k_eval: 2
 output_dir: {out_root / 'ablation_results'}
 output_file: ablation_aggregated.log
 output_csv: ablation_aggregated.csv
-coordination_output_dir: {out_root / 'coordination_comparison'}
+coordination_output_dir: {out_root / 'coord_cmp'}
 """
             conf_path.write_text(conf_text, encoding="utf-8")
 
@@ -235,7 +235,7 @@ coordination_output_dir: {out_root / 'coordination_comparison'}
 
             agg_csv = out_root / "ablation_results" / "ablation_aggregated.csv"
             agg_log = out_root / "ablation_results" / "ablation_aggregated.log"
-            coord_dir = out_root / "coordination_comparison"
+            coord_dir = out_root / "coord_cmp"
 
             self.assertTrue(agg_csv.exists())
             self.assertTrue(agg_log.exists())
@@ -255,13 +255,13 @@ coordination_output_dir: {out_root / 'coordination_comparison'}
             self.assertIn("psur:", log_text)
             self.assertIn("offpr:", log_text)
 
-            self.assertTrue((coord_dir / "empty_candidate_rate_vs_timesteps.png").exists())
-            self.assertTrue((coord_dir / "empty_candidate_rate_vs_timesteps_data.csv").exists())
-            self.assertTrue((coord_dir / "unforced_noop_rate_vs_timesteps.png").exists())
-            self.assertTrue((coord_dir / "nonconflicting_proposal_rate_vs_timesteps.png").exists())
-            self.assertTrue((coord_dir / "proposal_survival_rate_vs_timesteps.png").exists())
-            self.assertTrue((coord_dir / "off_proposal_assignment_rate_vs_timesteps.png").exists())
-            self.assertTrue((coord_dir / "coordination_metrics_vs_timesteps.png").exists())
+            self.assertTrue((coord_dir / "empty_cand_rate_vs_ts.png").exists())
+            self.assertTrue((coord_dir / "empty_cand_rate_vs_ts_data.csv").exists())
+            self.assertTrue((coord_dir / "unforced_noop_rate_vs_ts.png").exists())
+            self.assertTrue((coord_dir / "nonconf_prop_rate_vs_ts.png").exists())
+            self.assertTrue((coord_dir / "prop_survival_rate_vs_ts.png").exists())
+            self.assertTrue((coord_dir / "offprop_assign_rate_vs_ts.png").exists())
+            self.assertTrue((coord_dir / "coord_metrics_vs_ts.png").exists())
 
 
 if __name__ == "__main__":
