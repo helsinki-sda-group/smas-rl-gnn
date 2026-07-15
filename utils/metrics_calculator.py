@@ -7,6 +7,17 @@ import json
 import pandas as pd
 
 
+def _sum_int_column(df: pd.DataFrame, col: str) -> int:
+    if col not in df.columns:
+        return 0
+    vals = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    return int(vals.sum())
+
+
+def _warn_metrics_validation(episode_dir: str, message: str, counters: Dict[str, int]) -> None:
+    print(f"Warning: [coordination] {message} in {episode_dir} counters={counters}")
+
+
 @dataclass
 class EpisodeMetrics:
     ts: int = 0  # timesteps (from model filename)
@@ -52,6 +63,28 @@ class EpisodeMetrics:
     decision_steps: int = 0
     macro_reward_mean: float = 0.0
     macro_steps_done: int = 0
+
+    # robot-level proposal/coordination counters (summed from coordination.csv)
+    robot_decisions: int = 0
+    empty_candidate_decisions: int = 0
+    nonempty_candidate_decisions: int = 0
+    unforced_noops: int = 0
+    real_proposals: int = 0
+    unique_proposals: int = 0
+    conflicting_proposals: int = 0
+    distinct_proposed_tasks: int = 0
+    conflict_buckets: int = 0
+    survived_proposals: int = 0
+    rejected_proposals: int = 0
+    final_assignments: int = 0
+    off_proposal_assignments: int = 0
+
+    # robot-level proposal/coordination rates
+    empty_candidate_rate: float = 0.0
+    unforced_noop_rate: float = 0.0
+    nonconflicting_proposal_rate: float = 0.0
+    proposal_survival_rate: float = 0.0
+    off_proposal_assignment_rate: float = 0.0
 
     # new: deadline / valid-completion breakdown
     dropoff_event_count: int = 0
@@ -105,6 +138,102 @@ def compute_episode_metrics_from_logs(
             print(f"Warning: Could not read rewards_macro.csv: {e}")
     else:
         metrics.reward_sum = episode_info.get("episode_reward", 0.0)
+
+    coordination_path = os.path.join(episode_dir, "coordination.csv")
+    if os.path.exists(coordination_path):
+        try:
+            df_coord = pd.read_csv(coordination_path)
+            if not df_coord.empty:
+                metrics.robot_decisions = _sum_int_column(df_coord, "robot_decisions")
+                metrics.empty_candidate_decisions = _sum_int_column(df_coord, "empty_candidate_decisions")
+                metrics.nonempty_candidate_decisions = _sum_int_column(df_coord, "nonempty_candidate_decisions")
+                metrics.unforced_noops = _sum_int_column(df_coord, "unforced_noops")
+                metrics.real_proposals = _sum_int_column(df_coord, "real_proposals")
+                metrics.unique_proposals = _sum_int_column(df_coord, "unique_proposals")
+                metrics.conflicting_proposals = _sum_int_column(df_coord, "conflicting_proposals")
+                metrics.distinct_proposed_tasks = _sum_int_column(df_coord, "distinct_proposed_tasks")
+                metrics.conflict_buckets = _sum_int_column(df_coord, "conflict_buckets")
+                metrics.survived_proposals = _sum_int_column(df_coord, "survived_proposals")
+                metrics.rejected_proposals = _sum_int_column(df_coord, "rejected_proposals")
+                metrics.final_assignments = _sum_int_column(df_coord, "final_assignments")
+                metrics.off_proposal_assignments = _sum_int_column(df_coord, "off_proposal_assignments")
+
+                n = metrics.robot_decisions
+                e = metrics.empty_candidate_decisions
+                c = metrics.nonempty_candidate_decisions
+                u = metrics.unforced_noops
+                p = metrics.real_proposals
+                q1 = metrics.unique_proposals
+                s = metrics.survived_proposals
+                f = metrics.final_assignments
+                o = metrics.off_proposal_assignments
+
+                metrics.empty_candidate_rate = (e / n) if n > 0 else 0.0
+                metrics.unforced_noop_rate = (u / c) if c > 0 else 0.0
+                metrics.nonconflicting_proposal_rate = (q1 / p) if p > 0 else 0.0
+                metrics.proposal_survival_rate = (s / p) if p > 0 else 0.0
+                metrics.off_proposal_assignment_rate = (o / f) if f > 0 else 0.0
+
+                counters = {
+                    "robot_decisions": int(metrics.robot_decisions),
+                    "empty_candidate_decisions": int(metrics.empty_candidate_decisions),
+                    "nonempty_candidate_decisions": int(metrics.nonempty_candidate_decisions),
+                    "unforced_noops": int(metrics.unforced_noops),
+                    "real_proposals": int(metrics.real_proposals),
+                    "unique_proposals": int(metrics.unique_proposals),
+                    "conflicting_proposals": int(metrics.conflicting_proposals),
+                    "distinct_proposed_tasks": int(metrics.distinct_proposed_tasks),
+                    "conflict_buckets": int(metrics.conflict_buckets),
+                    "survived_proposals": int(metrics.survived_proposals),
+                    "rejected_proposals": int(metrics.rejected_proposals),
+                    "final_assignments": int(metrics.final_assignments),
+                    "off_proposal_assignments": int(metrics.off_proposal_assignments),
+                }
+
+                if (metrics.empty_candidate_decisions + metrics.nonempty_candidate_decisions) != metrics.robot_decisions:
+                    _warn_metrics_validation(
+                        episode_dir,
+                        "empty_candidate_decisions + nonempty_candidate_decisions != robot_decisions",
+                        counters,
+                    )
+                if metrics.unforced_noops > metrics.nonempty_candidate_decisions:
+                    _warn_metrics_validation(episode_dir, "unforced_noops > nonempty_candidate_decisions", counters)
+                if (metrics.real_proposals + metrics.unforced_noops) != metrics.nonempty_candidate_decisions:
+                    _warn_metrics_validation(
+                        episode_dir,
+                        "real_proposals + unforced_noops != nonempty_candidate_decisions",
+                        counters,
+                    )
+                if (metrics.unique_proposals + metrics.conflicting_proposals) != metrics.real_proposals:
+                    _warn_metrics_validation(
+                        episode_dir,
+                        "unique_proposals + conflicting_proposals != real_proposals",
+                        counters,
+                    )
+                if metrics.survived_proposals > metrics.real_proposals:
+                    _warn_metrics_validation(episode_dir, "survived_proposals > real_proposals", counters)
+                if metrics.rejected_proposals != (metrics.real_proposals - metrics.survived_proposals):
+                    _warn_metrics_validation(
+                        episode_dir,
+                        "rejected_proposals != real_proposals - survived_proposals",
+                        counters,
+                    )
+                if metrics.robot_decisions > 0 and (
+                    metrics.survived_proposals != (metrics.unique_proposals + metrics.conflict_buckets)
+                ):
+                    _warn_metrics_validation(
+                        episode_dir,
+                        "survived_proposals != unique_proposals + conflict_buckets",
+                        counters,
+                    )
+                if metrics.off_proposal_assignments > 0:
+                    _warn_metrics_validation(
+                        episode_dir,
+                        "off_proposal_assignments is nonzero (diagnostic invariant)",
+                        counters,
+                    )
+        except Exception as e:
+            print(f"Warning: Could not read coordination.csv: {e}")
 
     task_lifecycle_path = os.path.join(episode_dir, "task_lifecycle.csv")
     if not os.path.exists(task_lifecycle_path):
@@ -337,11 +466,13 @@ def compute_episode_metrics_from_logs(
 
 
 def metrics_to_string(metrics: EpisodeMetrics) -> str:
-    return (
-        f"{metrics.policy:<10} {metrics.seed:>4} {metrics.ts:>8} | "
+    identity_block = f"{metrics.policy:<10} {metrics.seed:>4} {metrics.ts:>8}"
+    reward_block = (
         f" {metrics.reward_sum:>8.2f} {metrics.capacity_sum:>8.2f} {metrics.step_sum:>8.2f}"
         f" {metrics.deadline_sum:>8.2f} {metrics.wait_sum:>8.2f} {metrics.travel_sum:>8.2f}"
-        f" {metrics.completion_sum:>8.2f} {metrics.nonserved_sum:>8.2f} | "
+        f" {metrics.completion_sum:>8.2f} {metrics.nonserved_sum:>8.2f}"
+    )
+    ridepool_block = (
         f"{metrics.picked_up_tasks:>2}/{metrics.total_tasks:<2} {metrics.pickup_rate:>6.2f}"
         f" {metrics.obsolete_tasks:>2} {metrics.obsolete_rate:>6.2f}"
         f" {metrics.pickup_violated:>2}/{metrics.picked_up_tasks:<2} {metrics.pickup_violated_rate:>6.2f}"
@@ -349,19 +480,32 @@ def metrics_to_string(metrics: EpisodeMetrics) -> str:
         f" {metrics.completed_tasks:>2}/{metrics.total_tasks:<2} {metrics.completion_rate:>6.2f}"
         f" {metrics.assigned_never_picked:>2}/{metrics.total_tasks:<2} {metrics.assigned_never_picked_rate:>6.2f}"
         f" {metrics.mean_travel_time_completed:>7.2f}"
-        f" {metrics.picked_not_completed:>2}/{metrics.picked_up_tasks:<2} {metrics.picked_not_completed_rate:>6.2f} | "
+        f" {metrics.picked_not_completed:>2}/{metrics.picked_up_tasks:<2} {metrics.picked_not_completed_rate:>6.2f}"
+    )
+    candidate_block = (
         f" {metrics.noop_fraction:>6.3f} {metrics.overload_assignment_fraction:>6.3f}"
         f" {metrics.mean_candidates_per_taxi:>6.2f} {metrics.cand_nonempty_frac:>6.3f}"
         f" {metrics.cand_mean_nonempty:>6.2f} {metrics.decision_steps:>6}"
         f" {metrics.macro_reward_mean:>8.3f} {metrics.macro_steps_done:>6}"
         f" {metrics.overlap_rate:>8.3f} {metrics.mean_shared_tasks_per_step:>8.3f}"
     )
+    coordination_block = (
+        f" {metrics.empty_candidate_rate:>6.3f} {metrics.unforced_noop_rate:>6.3f}"
+        f" {metrics.nonconflicting_proposal_rate:>6.3f} {metrics.proposal_survival_rate:>6.3f}"
+        f" {metrics.off_proposal_assignment_rate:>6.3f}"
+    )
+    return (
+        f"{identity_block} |{reward_block} | {ridepool_block} |{candidate_block} |{coordination_block}"
+    )
 
 
 def get_metrics_header() -> str:
-    return (
-        "pol        seed      ts |      rew      cap     step      dln     wait     trav     comp      nsv |   pku    pkr obs  obsr   pkv   pkvr    mwt   cmp    cmr   anp   anpr     mtt   pnc    pncr |   noop  overld  mcand  cne_fr cne_mn   dstep    macmr    msd   ovrlap   shared"
-    )
+    identity_header = "pol        seed      ts"
+    reward_header = "      rew      cap     step      dln     wait     trav     comp      nsv"
+    ridepool_header = "  pku    pkr obs  obsr   pkv   pkvr    mwt   cmp    cmr   anp   anpr     mtt   pnc    pncr"
+    candidate_header = "  noop  overld  mcand  cne_fr cne_mn   dstep    macmr    msd   ovrlap   shared"
+    coordination_header = "   ecr   unop   ncpr   psur  offpr"
+    return f"{identity_header} |{reward_header} |{ridepool_header} |{candidate_header} |{coordination_header}"
 
 
 def ensure_metrics_log(path: str, overwrite: bool = False) -> None:

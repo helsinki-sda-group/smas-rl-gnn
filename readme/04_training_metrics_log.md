@@ -14,6 +14,7 @@ Data sources used in `compute_episode_metrics_from_logs(...)`:
 - `task_lifecycle.csv` (pickup/dropoff/obsolete lifecycle stats)
 - `debug.csv` (NO-OP and overload/conflict stats)
 - `candidates.csv` (candidate-list and overlap stats)
+- `coordination.csv` (robot-level proposal and resolver-outcome counters)
 
 If a denominator is zero (for example no picked tasks), the code writes `0.0` for that rate.
 
@@ -25,6 +26,7 @@ The printed header is grouped as:
 - reward sums: `rew cap step dln wait trav comp nsv`
 - task lifecycle block: `pku pkr obs obsr pkv pkvr mwt cmp cmr anp anpr mtt pnc pncr`
 - action/candidate block: `noop overld mcand cne_fr cne_mn dstep macmr msd ovrlap shared`
+- coordination block: `ecr unop ncpr psur offpr`
 
 ## Column-by-column definition
 
@@ -93,6 +95,45 @@ Definitions:
 | `msd` | `macro_steps_done` | Number of rows in `rewards_macro.csv` (macro steps logged). |
 | `ovrlap` | `overlap_rate` | Fraction of candidate time-steps where at least one task appears in candidate lists of $\ge 2$ taxis. |
 | `shared` | `mean_shared_tasks_per_step` | Mean count of tasks per time-step that are shared by $\ge 2$ taxis. |
+
+### Coordination columns (`coordination.csv`)
+
+`coordination.csv` contains one row per macro decision step. Episode-level rates are computed from **summed counts**, not from averaging per-step ratios.
+
+Let:
+- $N = \sum \text{robot\_decisions}$
+- $E = \sum \text{empty\_candidate\_decisions}$
+- $C = \sum \text{nonempty\_candidate\_decisions}$
+- $U = \sum \text{unforced\_noops}$
+- $P = \sum \text{real\_proposals}$
+- $Q_1 = \sum \text{unique\_proposals}$
+- $S = \sum \text{survived\_proposals}$
+- $F = \sum \text{final\_assignments}$
+- $O = \sum \text{off\_proposal\_assignments}$
+
+Definitions used at decision-step level:
+- `empty_candidate_decision`: robot had no valid candidate in final actor mask.
+- `unforced_noop`: robot had candidates but selected explicit NOOP.
+- `real_proposal`: robot had candidates, selected non-NOOP, and mapped to a valid task id.
+- `unique_proposal`: real proposal in a bucket of size 1 by proposed task id.
+- `conflicting_proposal`: real proposal in a bucket of size $\ge 2$ by proposed task id.
+- `survived_proposal`: resolver output for that robot equals its original proposed task.
+
+| Column | Field | Formula / meaning |
+|---|---|---|
+| `ecr` | `empty_candidate_rate` | $E/N$ if $N>0$, else $0.0$. |
+| `unop` | `unforced_noop_rate` | $U/C$ if $C>0$, else $0.0$. |
+| `ncpr` | `nonconflicting_proposal_rate` | $Q_1/P$ if $P>0$, else $0.0$. |
+| `psur` | `proposal_survival_rate` | $S/P$ if $P>0$, else $0.0$. |
+| `offpr` | `off_proposal_assignment_rate` | $O/F$ if $F>0$, else $0.0$. |
+
+### Overlap vs conflict-ratio vs NCPR
+
+- `ovrlap` and `shared` are candidate-set overlap diagnostics (who *could* compete).
+- existing `conflict_ratio` in `conflicts.log` is a task-bucket conflict frequency (`conflicts_total / tasks_total`) and remains unchanged.
+- `ncpr` is proposal/robot based (`unique_proposals / real_proposals`) and measures how many submitted proposals were nonconflicting.
+
+These quantities are related but not interchangeable.
 
 ## Practical interpretation
 

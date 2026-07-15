@@ -221,6 +221,22 @@ class RidepoolLogger:
         self._open_csv(self._get_csv_filename("fleet_counts"), ["time","idle","en_route","occupied","pickup_occupied"])
         self._open_csv(self._get_csv_filename("episode_totals"), ["episode","sum_reward","n_pickups","n_dropoffs","duration"])
         self._open_csv(self._get_csv_filename("rewards_macro"), ["macro_steps","reward","capacity_avg","step_avg","deadline_avg", "wait_avg", "travel_avg", "completion_avg", "nonserved_avg"])
+        self._open_csv(self._get_csv_filename("coordination"), [
+            "time",
+            "robot_decisions",
+            "empty_candidate_decisions",
+            "nonempty_candidate_decisions",
+            "unforced_noops",
+            "real_proposals",
+            "unique_proposals",
+            "conflicting_proposals",
+            "distinct_proposed_tasks",
+            "conflict_buckets",
+            "survived_proposals",
+            "rejected_proposals",
+            "final_assignments",
+            "off_proposal_assignments",
+        ])
 
         self._open_csv(self._get_csv_filename("task_lifecycle"), [
             "task_id", "reservation_time", "pickup_deadline", "estimated_travel_time",
@@ -505,6 +521,31 @@ class RidepoolLogger:
                 completion_avg = info["macro_completion"],
                 nonserved_avg = info["macro_nonserved"],
         ))
+
+    def log_coordination(self, t: float, counters: Dict[str, int]) -> None:
+        """Log per-decision coordination counters."""
+        fname = self._get_csv_filename("coordination")
+        header = [
+            "time",
+            "robot_decisions",
+            "empty_candidate_decisions",
+            "nonempty_candidate_decisions",
+            "unforced_noops",
+            "real_proposals",
+            "unique_proposals",
+            "conflicting_proposals",
+            "distinct_proposed_tasks",
+            "conflict_buckets",
+            "survived_proposals",
+            "rejected_proposals",
+            "final_assignments",
+            "off_proposal_assignments",
+        ]
+        self._ensure_csv(fname, header)
+        row = {"time": float(t)}
+        for key in header[1:]:
+            row[key] = int(counters.get(key, 0))
+        self._write(fname, row)
 
     def log_fleet_counts(self, t: float, idle: int, en_route: int, occupied: int, pickup_occupied: int):
         fname = self._get_csv_filename("fleet_counts")

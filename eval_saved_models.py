@@ -25,6 +25,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import torch as th
+from dataclasses import asdict, is_dataclass
 
 from stable_baselines3 import PPO
 from sumo_rl_rs.environment.ridepool_rt_env import RidepoolRTEnv
@@ -308,9 +309,12 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             except Exception as e:
                 print(f"Warning: Could not prune eval run dir {run_dir}: {e}")
 
+        metrics_dict = asdict(episode_metrics) if is_dataclass(episode_metrics) else dict(getattr(episode_metrics, "__dict__", {}))
+
         return {
             'reward': ep_reward,
             'episode_metrics': episode_metrics,
+            'metrics_dict': metrics_dict,
             'logit_metrics': logit_episode_metrics
         }
     
@@ -721,6 +725,7 @@ def main():
                         'attempt': attempt,
                         'reward': result['reward'],
                         'episode_metrics': result['episode_metrics'],
+                        'metrics_dict': result.get('metrics_dict', {}),
                         'logit_metrics': result.get('logit_metrics', None),
                     })
                     from utils.metrics_calculator import append_metrics_log

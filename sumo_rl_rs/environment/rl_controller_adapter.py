@@ -22,6 +22,114 @@ class Task:
     is_assigned: bool = False            # reservation currently assigned to some taxi
 
 
+def compute_coordination_step_counters(
+    *,
+    robots: Sequence[str],
+    has_candidate: Sequence[bool],
+    selected_noop: Sequence[bool],
+    proposed_tasks: Sequence[Optional[str]],
+    final_assignments: Sequence[Optional[str]],
+    assume_single_winner_per_bucket: bool = True,
+) -> tuple[Dict[str, int], List[Dict[str, str]], List[str]]:
+    """Compute raw per-step robot-level proposal/coordination counters.
+
+    Returns (counters, off_proposal_details, validation_messages).
+    """
+    n = min(len(robots), len(has_candidate), len(selected_noop), len(proposed_tasks), len(final_assignments))
+
+    has_candidate = [bool(has_candidate[i]) for i in range(n)]
+    selected_noop = [bool(selected_noop[i]) for i in range(n)]
+    proposals: List[Optional[str]] = []
+    finals: List[Optional[str]] = []
+    for i in range(n):
+        p = proposed_tasks[i]
+        f = final_assignments[i]
+        proposals.append(None if p is None or str(p) == "" else str(p))
+        finals.append(None if f is None or str(f) == "" else str(f))
+
+    robot_decisions = n
+    empty_candidate_decisions = int(sum(1 for x in has_candidate if not x))
+    nonempty_candidate_decisions = robot_decisions - empty_candidate_decisions
+    unforced_noops = int(sum(1 for i in range(n) if has_candidate[i] and selected_noop[i]))
+
+    real_proposal_idx: List[int] = []
+    for i in range(n):
+        if has_candidate[i] and (not selected_noop[i]) and (proposals[i] is not None):
+            real_proposal_idx.append(i)
+
+    buckets: Dict[str, List[int]] = defaultdict(list)
+    for i in real_proposal_idx:
+        buckets[proposals[i]].append(i)  # type: ignore[index]
+
+    unique_proposals = int(sum(len(ixs) for ixs in buckets.values() if len(ixs) == 1))
+    conflicting_proposals = int(sum(len(ixs) for ixs in buckets.values() if len(ixs) >= 2))
+    distinct_proposed_tasks = int(len(buckets))
+    conflict_buckets = int(sum(1 for ixs in buckets.values() if len(ixs) >= 2))
+    real_proposals = int(len(real_proposal_idx))
+
+    survived_proposals = int(
+        sum(1 for i in real_proposal_idx if finals[i] is not None and finals[i] == proposals[i])
+    )
+    rejected_proposals = int(real_proposals - survived_proposals)
+    final_assignments_count = int(sum(1 for f in finals if f is not None))
+
+    off_proposal_details: List[Dict[str, str]] = []
+    for i in range(n):
+        f = finals[i]
+        if f is None:
+            continue
+        p = proposals[i]
+        if p != f:
+            off_proposal_details.append(
+                {
+                    "robot": str(robots[i]),
+                    "original_proposal": "NOOP" if p is None else str(p),
+                    "final_assignment": str(f),
+                }
+            )
+    off_proposal_assignments = int(len(off_proposal_details))
+
+    counters = {
+        "robot_decisions": int(robot_decisions),
+        "empty_candidate_decisions": int(empty_candidate_decisions),
+        "nonempty_candidate_decisions": int(nonempty_candidate_decisions),
+        "unforced_noops": int(unforced_noops),
+        "real_proposals": int(real_proposals),
+        "unique_proposals": int(unique_proposals),
+        "conflicting_proposals": int(conflicting_proposals),
+        "distinct_proposed_tasks": int(distinct_proposed_tasks),
+        "conflict_buckets": int(conflict_buckets),
+        "survived_proposals": int(survived_proposals),
+        "rejected_proposals": int(rejected_proposals),
+        "final_assignments": int(final_assignments_count),
+        "off_proposal_assignments": int(off_proposal_assignments),
+    }
+
+    validation_messages: List[str] = []
+    if (empty_candidate_decisions + nonempty_candidate_decisions) != robot_decisions:
+        validation_messages.append(
+            "empty_candidate_decisions + nonempty_candidate_decisions != robot_decisions"
+        )
+    if unforced_noops > nonempty_candidate_decisions:
+        validation_messages.append("unforced_noops > nonempty_candidate_decisions")
+    if (real_proposals + unforced_noops) != nonempty_candidate_decisions:
+        validation_messages.append("real_proposals + unforced_noops != nonempty_candidate_decisions")
+    if (unique_proposals + conflicting_proposals) != real_proposals:
+        validation_messages.append("unique_proposals + conflicting_proposals != real_proposals")
+    if survived_proposals > real_proposals:
+        validation_messages.append("survived_proposals > real_proposals")
+    if rejected_proposals != (real_proposals - survived_proposals):
+        validation_messages.append("rejected_proposals != real_proposals - survived_proposals")
+    if assume_single_winner_per_bucket and (
+        survived_proposals != (unique_proposals + conflict_buckets)
+    ):
+        validation_messages.append(
+            "survived_proposals != unique_proposals + conflict_buckets"
+        )
+
+    return counters, off_proposal_details, validation_messages
+
+
 
 class RLControllerAdapter:
     """
@@ -1007,6 +1115,10 @@ class RLControllerAdapter:
                        allow_redispatch: bool = True,
                        selection_margins: Optional[Dict[str, float]] = None,
                        selection_raw_logits: Optional[Dict[str, float]] = None,
+                       action_slots: Optional[Sequence[Union[int, np.integer]]] = None,
+                       noop_index: Optional[int] = None,
+                       final_action_mask: Optional[np.ndarray] = None,
+                       policy_robot_ids: Optional[Sequence[Optional[str]]] = None,
                        ) -> Dict[str, Any]:
         """
         Apply assignments (aligned with self.get_robots() order), then advance SUMO one step.
@@ -1068,6 +1180,8 @@ class RLControllerAdapter:
                 if locked_owner is not None and locked_owner != rid:
                     chosen[ridx] = None
 
+            chosen_before_resolve = list(chosen)
+
             
             if self.logger:
                 self.logger.log_debug(self._now(), "apply-mapped", {
@@ -1111,6 +1225,89 @@ class RLControllerAdapter:
                 selection_margins=selection_margins,
                 selection_raw_logits=selection_raw_logits,
             )
+
+            # Per-step robot-level coordination counters, based on current policy decisions
+            # and the resolver output of this exact call.
+            has_candidate_by_robot: List[bool] = []
+            selected_noop_by_robot: List[bool] = []
+
+            if (
+                final_action_mask is not None
+                and policy_robot_ids is not None
+                and len(policy_robot_ids) > 0
+            ):
+                mask_arr = np.asarray(final_action_mask)
+                policy_slots = {str(rid): i for i, rid in enumerate(policy_robot_ids) if rid is not None}
+                for ridx, rid in enumerate(robots):
+                    slot = policy_slots.get(str(rid), None)
+                    if slot is not None and 0 <= int(slot) < int(mask_arr.shape[0]):
+                        row = np.asarray(mask_arr[int(slot)])
+                        if row.ndim == 0:
+                            row = np.asarray([row])
+                        if noop_index is not None and row.shape[0] > int(noop_index) >= 0:
+                            has_candidate = bool(np.any(row[: int(noop_index)] > 0))
+                        else:
+                            has_candidate = bool(np.any(row > 0))
+                    else:
+                        has_candidate = bool(ridx < len(cand_lists) and len(cand_lists[ridx]) > 0)
+                    has_candidate_by_robot.append(has_candidate)
+            else:
+                for ridx, _ in enumerate(robots):
+                    has_candidate_by_robot.append(bool(ridx < len(cand_lists) and len(cand_lists[ridx]) > 0))
+
+            for ridx, _ in enumerate(robots):
+                sel_noop = False
+                if action_slots is not None and noop_index is not None and ridx < len(action_slots):
+                    try:
+                        sel_noop = int(action_slots[ridx]) == int(noop_index)
+                    except Exception:
+                        sel_noop = False
+                else:
+                    sel_noop = chosen_before_resolve[ridx] is None
+                selected_noop_by_robot.append(bool(sel_noop))
+
+            counters, off_proposals, validation_messages = compute_coordination_step_counters(
+                robots=list(robots),
+                has_candidate=has_candidate_by_robot,
+                selected_noop=selected_noop_by_robot,
+                proposed_tasks=chosen_before_resolve,
+                final_assignments=chosen,
+                assume_single_winner_per_bucket=True,
+            )
+
+            if self.logger:
+                try:
+                    self.logger.log_coordination(self._now(), counters)
+                except Exception as e:
+                    print(f"[WARN][coordination] log_coordination failed: {e}")
+
+            for msg in validation_messages:
+                print(
+                    f"[WARN][coordination] episode={int(getattr(self, '_ep_idx', -1))} "
+                    f"time={float(self._now()):.1f} {msg} counters={counters}"
+                )
+
+            for off in off_proposals:
+                print(
+                    f"[WARN][coordination][off-proposal] episode={int(getattr(self, '_ep_idx', -1))} "
+                    f"time={float(self._now()):.1f} robot={off['robot']} "
+                    f"original_proposal={off['original_proposal']} final_assignment={off['final_assignment']}"
+                )
+                if self.logger:
+                    try:
+                        self.logger.log_debug(
+                            self._now(),
+                            "coordination-off-proposal",
+                            {
+                                "episode": int(getattr(self, "_ep_idx", -1)),
+                                "time": float(self._now()),
+                                "robot": str(off["robot"]),
+                                "original_proposal": str(off["original_proposal"]),
+                                "final_assignment": str(off["final_assignment"]),
+                            },
+                        )
+                    except Exception:
+                        pass
 
             if self.logger:
                 self.logger.log_debug(self._now(), "apply-winners", {

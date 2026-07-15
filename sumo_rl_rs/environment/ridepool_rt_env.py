@@ -270,6 +270,7 @@ class RidepoolRTEnv(gym.Env):
         }
 
         # (1) apply chosen assignments now
+        decision_action_mask = self.action_mask()
         assignments = self._decode(action)
         selected_task_margins = self._selected_task_margins(action)
         selected_task_raw_logits = self._selected_task_raw_logits(action)
@@ -278,6 +279,10 @@ class RidepoolRTEnv(gym.Env):
             allow_redispatch=True,
             selection_margins=selected_task_margins,
             selection_raw_logits=selected_task_raw_logits,
+            action_slots=action.tolist(),
+            noop_index=self._noop_index,
+            final_action_mask=decision_action_mask,
+            policy_robot_ids=list(self._last_robot_ids),
         )  # controller aligns with its robot order
          # Expect dict like {"per_robot": {...}, "sum_reward": float, "terms": {...}}
         total_reward += float(step_out.get("sum_reward", 0.0))
