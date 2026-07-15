@@ -133,6 +133,13 @@ def parse_baseline_log(filepath):
     try:
         df = parse_metrics_log(filepath)
         if not df.empty and 'pol' in df.columns:
+            # Prefer actual per-seed baseline rows and ignore summary/table artifacts.
+            # Baseline logs commonly use ts=0, so do not filter by ts>0.
+            if 'seed' in df.columns:
+                seed_num = pd.to_numeric(df['seed'], errors='coerce').fillna(0)
+                df_seed_rows = df[seed_num > 0].copy()
+                if not df_seed_rows.empty:
+                    df = df_seed_rows
             metric_names = ['rew', 'cap', 'step', 'dln', 'wait', 'trav', 'comp', 'nsv', 'ecr', 'unop', 'ncpr', 'psur', 'offpr']
             available_metrics = [m for m in metric_names if m in df.columns]
             out = {}
@@ -175,6 +182,9 @@ def parse_baseline_log(filepath):
         for line in lines[summary_start+1:]:
             if not line or line.startswith('#'):
                 break
+            # Keep fallback strict: only parse compact table rows, not narrative summaries.
+            if '|' not in line:
+                continue
             if '±' not in line:
                 continue
             # Use regex to extract: policy name, then all value±std pairs
@@ -665,21 +675,22 @@ def main():
     
     # Add baseline horizontal lines
     if baselines:
-        ts_range = [ts.min(), ts.max()] if len(ts) else [0, 1]
         baseline_colors = {'random': '#d62728', 'greedy': '#ff7f0e', 'unique': '#8c564b'}
         baseline_labels = {'random': 'Random', 'greedy': 'Greedy', 'unique': 'Greedy-Unique'}
         random_baseline_mean = None
         for pol, stats in baselines.items():
             color = baseline_colors.get(pol, '#95a5a6')
             label = baseline_labels.get(pol, pol.capitalize())
-            mean_val = stats['mean']
-            std_val = stats['std']
+            mean_val = stats.get('mean', None)
+            std_val = stats.get('std', None)
+            if mean_val is None:
+                continue
             if pol == 'random':
                 random_baseline_mean = mean_val
             # Horizontal line for mean
             ax.axhline(mean_val, color=color, linestyle='--', linewidth=2.5, alpha=0.9, label=f'{label} Baseline')
             # Dotted lines for ±1 std only if baseline_std is set
-            if baseline_std:
+            if baseline_std and std_val is not None:
                 ax.axhline(mean_val + std_val, color=color, linestyle=':', linewidth=1.5, alpha=0.7)
                 ax.axhline(mean_val - std_val, color=color, linestyle=':', linewidth=1.5, alpha=0.7)
         # Set ylim if no baseline_std and random baseline present
@@ -720,7 +731,9 @@ def main():
         for pol, stats in baselines.items():
             color = baseline_colors.get(pol, '#95a5a6')
             label = baseline_labels.get(pol, pol.capitalize())
-            mean_val = stats['mean']
+            mean_val = stats.get('mean', None)
+            if mean_val is None:
+                continue
             ax.axhline(mean_val, color=color, linestyle='--', linewidth=2.5, alpha=0.9, label=f'{label} Baseline')
 
     ax.set_xticks(range(len(seeds)))
