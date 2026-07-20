@@ -154,7 +154,8 @@ class RLControllerAdapter:
         *,
         k_max: int = 8,
         vicinity_m: float = 2_000.0,
-        sorted_candidates: bool = False,
+        candidates_sorting: Optional[str] = None,
+        sorted_candidates: Optional[bool] = None,
         max_steps: Optional[int] = None,
         min_episode_steps: int = 0,            # warmup; don't allow done before this many steps
         idle_patience_steps:int = 600,       # how long whole-fleet idle must persist
@@ -176,7 +177,14 @@ class RLControllerAdapter:
             sumo: the TraCI handle/module (usually `traci`).
             k_max: cap on candidates per robot.
             vicinity_m: maximum road-network distance (meters) robot→task pickup to be a valid candidate.
-            sorted_candidates: if True, candidates are sorted by pickup distance; if False, randomized.
+            candidates_sorting: candidate ordering mode.
+                "pickup_distance": sort by pickup distance ascending.
+                "pickup_deadline": sort by pickup deadline ascending.
+                "pickup_deadline_distance": sort by dense-rank sum of (deadline, distance).
+                "randomized" (default): keep feasible candidates in random order.
+                "predicted_reward": reserved for future use (raises NotImplementedError).
+            sorted_candidates: deprecated bool alias. If candidates_sorting is not provided,
+                True maps to "pickup_distance", False maps to "randomized".
             max_steps: hard episode max length.
             min_episode_steps: minimum episode length.
             idle_patience_steps: end if whole fleet is idle for that long
@@ -198,7 +206,11 @@ class RLControllerAdapter:
         self.sumo = sumo
         self.k_max = int(k_max)
         self.vicinity_m = float(vicinity_m)
-        self.sorted_candidates = bool(sorted_candidates)
+        self.candidates_sorting = self._resolve_candidates_sorting_mode(
+            candidates_sorting=candidates_sorting,
+            sorted_candidates=sorted_candidates,
+        )
+        self.sorted_candidates = self.candidates_sorting == "pickup_distance"
         self.max_steps = max_steps
         self.completion_mode = completion_mode.lower().strip()
         assert self.completion_mode in {"pickup", "dropoff", "valid_dropoff"}, "completion_mode must be 'pickup', 'dropoff', or 'valid_dropoff'"
@@ -288,6 +300,49 @@ class RLControllerAdapter:
         # Tracks event/obsolete/terminal breakdown separately from rewards.csv.
         self._rew_accum: Dict[str, Any] = self._make_rew_accum()
         self._last_episode_quality_context: Dict[str, Any] | None = None
+
+    @staticmethod
+    def _dense_ranks(values: Sequence[float]) -> Dict[float, int]:
+        """Return ascending dense ranks (1..M) for numeric values."""
+        uniq = sorted({float(v) for v in values})
+        return {v: i + 1 for i, v in enumerate(uniq)}
+
+    def _resolve_candidates_sorting_mode(
+        self,
+        *,
+        candidates_sorting: Optional[str],
+        sorted_candidates: Optional[bool],
+    ) -> str:
+        """Resolve canonical candidates sorting mode with deprecated alias support."""
+        if candidates_sorting is None:
+            if sorted_candidates is None:
+                mode = "randomized"
+            else:
+                mode = "pickup_distance" if bool(sorted_candidates) else "randomized"
+        else:
+            mode = str(candidates_sorting).strip().lower()
+
+        aliases = {
+            "random": "randomized",
+            "shuffle": "randomized",
+            "unsorted": "randomized",
+            "none": "randomized",
+        }
+        mode = aliases.get(mode, mode)
+
+        allowed = {
+            "pickup_distance",
+            "pickup_deadline",
+            "pickup_deadline_distance",
+            "randomized",
+            "predicted_reward",
+        }
+        if mode not in allowed:
+            allowed_list = ", ".join(sorted(allowed))
+            raise ValueError(f"Unknown candidates_sorting='{mode}'. Expected one of: {allowed_list}")
+        if mode == "predicted_reward":
+            raise NotImplementedError("candidates_sorting='predicted_reward' is reserved for future implementation")
+        return mode
 
     @staticmethod
     def _make_rew_accum() -> Dict[str, Any]:
@@ -813,7 +868,7 @@ class RLControllerAdapter:
     def get_tasks_and_candidate_lists(self, K: Optional[int] = None) -> tuple[List[Task], List[List[int]]]:
         """
         For each robot, return viable task list and list of candidates - up to K tasks within vicinity_m,
-        randomized by default to avoid ordering leakage (or sorted by pickup distance if enabled).
+        sorted according to candidates_sorting after feasibility filtering and before K truncation.
         Output indices reference viable task list.
         """
         if not self._last_robot_ids:
@@ -851,7 +906,7 @@ class RLControllerAdapter:
                 cand_lists.append([])
                 continue
 
-            dist_idx: List[Tuple[float, int]] = []
+            feasible: List[Tuple[float, int, Task]] = []
             for j, t in enumerate(tasks_viable):
                 locked_owner = locked_owner_by_task.get(t.id)
                 if locked_owner is not None and locked_owner != rid:
@@ -860,13 +915,30 @@ class RLControllerAdapter:
                     continue
                 d = self._road_distance(r_edge, t.fromEdge)
                 if np.isfinite(d) and d <= self.vicinity_m:
-                    dist_idx.append((float(d), j))
-            if dist_idx:
-                if self.sorted_candidates:
-                    dist_idx.sort(key=lambda x: x[0])
+                    feasible.append((float(d), j, t))
+            if feasible:
+                mode = self.candidates_sorting
+                if mode == "randomized":
+                    self._rng.shuffle(feasible)
+                elif mode == "pickup_distance":
+                    # Keep existing pickup-distance sort behavior.
+                    feasible.sort(key=lambda x: x[0])
+                elif mode == "pickup_deadline":
+                    feasible.sort(key=lambda x: (x[2].pickupDeadline, x[0], str(x[2].id)))
+                elif mode == "pickup_deadline_distance":
+                    dist_rank = self._dense_ranks([x[0] for x in feasible])
+                    deadline_rank = self._dense_ranks([x[2].pickupDeadline for x in feasible])
+                    feasible.sort(
+                        key=lambda x: (
+                            dist_rank[x[0]] + deadline_rank[x[2].pickupDeadline],
+                            x[2].pickupDeadline,
+                            x[0],
+                            str(x[2].id),
+                        )
+                    )
                 else:
-                    self._rng.shuffle(dist_idx)
-            cand_lists.append([j for _, j in dist_idx[:K]])
+                    raise ValueError(f"Unsupported candidates_sorting mode: {mode}")
+            cand_lists.append([j for _, j, _ in feasible[:K]])
         
    
         if self.logger:

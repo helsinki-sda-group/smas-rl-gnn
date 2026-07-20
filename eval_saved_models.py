@@ -153,7 +153,8 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             reset_fn=reset_fn,
             k_max=config['k_max'],
             vicinity_m=config['vicinity_m'],
-            sorted_candidates=config.get('sorted_candidates', False),
+            candidates_sorting=config.get('candidates_sorting', 'randomized'),
+            sorted_candidates=config.get('sorted_candidates', None),
             completion_mode=config.get('completion_mode', 'dropoff'),
             reassignment_mode=str(config.get('reassignment_mode', 'locked_until_pickup')),
             max_steps=config['max_steps'],
@@ -536,8 +537,17 @@ def main():
     parser.add_argument('--sumoport', type=int, default=None,
                         help='Base SUMO remote port (default: 8900)')
     parser.add_argument('--gui', action='store_true', help='Enable SUMO GUI (default: disabled)')
+    parser.add_argument(
+        '--candidates-sorting',
+        type=str,
+        default=None,
+        help=(
+            'Candidate sorting mode: pickup_distance | pickup_deadline | '
+            'pickup_deadline_distance | randomized | predicted_reward'
+        ),
+    )
     parser.add_argument('--sorted', action='store_true',
-                        help='Sort candidates by pickup distance (default: randomized)')
+                        help='DEPRECATED alias for --candidates-sorting=pickup_distance')
     parser.add_argument('--print-steps', action='store_true',
                         help='Print observation, logits, and action for each env step')
     parser.add_argument('--deterministic', action='store_true',
@@ -546,6 +556,20 @@ def main():
     cfg = Config(parser)
     opt = cfg.opt
     args = opt
+
+    def resolve_candidates_sorting(opt_obj) -> str:
+        cli_mode = getattr(opt_obj, 'candidates_sorting', None)
+        if cli_mode not in (None, ''):
+            return str(cli_mode)
+        if bool(getattr(opt_obj, 'sorted', False)):
+            return 'pickup_distance'
+        env_mode = getattr(opt_obj.env, 'candidates_sorting', None)
+        if env_mode not in (None, ''):
+            return str(env_mode)
+        legacy_sorted = getattr(opt_obj.env, 'sorted_candidates', None)
+        if legacy_sorted is not None:
+            return 'pickup_distance' if bool(legacy_sorted) else 'randomized'
+        return 'randomized'
     
     # Seeds
     TRAIN_SEEDS = list(opt.seeds.train)
@@ -586,6 +610,8 @@ def main():
     # Configuration
     completion_mode = str(getattr(opt.env, "completion_mode", "dropoff"))
     reward_params = dict(getattr(opt.env, "reward_params", {}) or {})
+    candidates_sorting = resolve_candidates_sorting(opt)
+
     config = {
         'sumo_cfg': opt.env.sumo_cfg,
         'use_gui': bool(opt.env.use_gui) or bool(getattr(args, "gui", False)),
@@ -620,7 +646,8 @@ def main():
         'eval_run_dir': os.path.join(output_dir, 'evaluation_runs'),
         'print_steps': bool(getattr(args, "print_steps", False)),
         'deterministic': bool(getattr(args, "deterministic", False)),
-        'sorted_candidates': bool(getattr(args, "sorted", False)) or bool(opt.env.sorted_candidates),
+        'candidates_sorting': candidates_sorting,
+        'sorted_candidates': bool(getattr(args, "sorted", False)),
         'completion_mode': completion_mode,
         'noop_mode': str(getattr(opt.ppo.policy_kwargs, 'noop_mode', 'scalar')),
         'log_conflict_metrics': bool(getattr(opt.logging, 'log_conflict_metrics', False)),

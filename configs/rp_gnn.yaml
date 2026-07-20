@@ -1,5 +1,5 @@
-env:
-  sumo_cfg: configs/small_net.sumocfg
+﻿env:
+  sumo_cfg: configs/small_net_cap2.sumocfg
   use_gui: false
   R: 6
   K_max: 3
@@ -7,28 +7,28 @@ env:
   E_max: 64
   G: 0
   vicinity_m: 2000.0
-  max_steps: 2400
+  max_steps: 3000
   min_episode_steps: 100
   decision_dt: 60
-  max_wait_delay_s: 240.0
-  max_travel_delay_s: 900.0
-  max_robot_capacity: 3
-  conflict_resolution: logit_diff
-  sorted_candidates: false
+  max_wait_delay_s: 300.0
+  max_travel_delay_s: 240.0
+  max_robot_capacity: 2
+  conflict_resolution: closest_then_capacity
+  candidates_sorting: pickup_distance
   two_hop: true
   two_hop_directed: true
   two_hop_critic: true
   two_hop_arch: comp_corr
   reward_params:
     reward_type: wait_travel
-    w_comp: 2.0
+    w_comp: 3.0
     w_wait: 1.5
-    w_travel: 1.0
-    w_deadline: 10.0
+    w_travel: 1.25
+    w_deadline: 0.0
     wait_cap: 600.0
-    travel_cap: 90.0
+    travel_cap: 240.0
     deadline_cap: 600.0
-  completion_mode: dropoff
+  completion_mode: valid_dropoff
 
 features:
   base_dim: 9
@@ -37,14 +37,46 @@ features:
   use_node_type: true
   use_ego_robot: true
   use_edge_rt: true
-  edge_features: [dx, dy, eta, is_ego_edge]
+  edge_features:
+  - dx
+  - dy
+  - eta
+  - is_ego_edge
   robot_commitment: route_slots
   route_slots_k: 2
-
 seeds:
-  train: [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000]
-  eval: [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
-
+  train:
+  - 100
+  - 200
+  - 300
+  - 400
+  - 500
+  - 600
+  - 700
+  - 800
+  - 900
+  - 1000
+  - 1100
+  - 1200
+  - 1300
+  - 1400
+  - 1500
+  - 1600
+  - 1700
+  - 1800
+  - 1900
+  - 2000
+  eval:
+  - 42
+  - 123
+  - 456
+  - 789
+  - 1011
+  - 1213
+  - 1415
+  - 1617
+  - 1819
+  - 2021
 ppo:
   policy_kwargs:
     hidden: 128
@@ -56,7 +88,7 @@ ppo:
     lambda_init: 0.5
   n_steps: 256
   batch_size: 64
-  learning_rate: 3e-4
+  learning_rate: 0.0003
   gamma: 0.99
   clip_range: 0.2
   clip_range_vf: null
@@ -64,7 +96,7 @@ ppo:
   ent_coef: 0.003
   gae_lambda: 0.95
   n_epochs: 5
-  total_timesteps: 60000
+  total_timesteps: 120000
 
 logging:
   run_name: rp_gnn_debug
@@ -80,9 +112,14 @@ logging:
 continue_training: false
 
 baselines:
-  policies: [random, greedy, unique]
+  policies:
+  - random
+  - greedy
+  - unique
   num_seeds: 10
 
 sorted: false
 sumoport: 8813
+
+
 

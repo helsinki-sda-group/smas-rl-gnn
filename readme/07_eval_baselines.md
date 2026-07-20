@@ -33,6 +33,17 @@ For each robot, action indices are:
 
 At each decision step, policies use an action mask (`1` = valid, `0` = invalid) from environment info.
 
+## Implementation notes
+Baselines use different ways of sorting task candidates lists. Supported types, specified by
+canonical parameter `candidates_sorting`:
+`pickup_distance` (the same as `sorted_candidates=True` in earlier implementation);
+`pickup_deadline`;
+`pickup_deadline_distance`;
+`randomized`;
+`predicted_reward (reserved)`.
+
+For learnt proposal algorithms, the value of the parameter should be set to randomized to avoid position bias. The sorting is performed before pruning the candidates to top-K list.
+
 ## Baseline policy behavior
 
 ## 1) `greedy`

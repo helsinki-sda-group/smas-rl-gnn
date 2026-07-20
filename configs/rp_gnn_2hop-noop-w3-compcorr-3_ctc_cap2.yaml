@@ -1,4 +1,4 @@
-env:
+﻿env:
   sumo_cfg: /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/configs/small_net_cap2.sumocfg
   use_gui: false
   R: 6
@@ -14,7 +14,7 @@ env:
   max_travel_delay_s: 240.0
   max_robot_capacity: 2
   conflict_resolution: closest_then_capacity
-  sorted_candidates: false
+  candidates_sorting: randomized
   two_hop: true
   two_hop_directed: true
   two_hop_critic: true
@@ -116,4 +116,6 @@ baselines:
   num_seeds: 10
 sorted: false
 sumoport: 8813
+
+
 

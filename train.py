@@ -20,12 +20,40 @@ import sys
 parser = argparse.ArgumentParser(description="Train GNN PPO with SUMO")
 parser.add_argument("--config", type=str, default="configs/rp_gnn.yaml", help="Path to config YAML")
 parser.add_argument("--sumoport", type=int, default=None, help="SUMO remote port (default: SUMO default)")
-parser.add_argument("--sorted", action="store_true", help="Sort candidates by pickup distance (default: randomized)")
+parser.add_argument(
+    "--candidates-sorting",
+    type=str,
+    default=None,
+    help=(
+        "Candidate sorting mode: pickup_distance | pickup_deadline | "
+        "pickup_deadline_distance | randomized | predicted_reward"
+    ),
+)
+parser.add_argument(
+    "--sorted",
+    action="store_true",
+    help="DEPRECATED alias for --candidates-sorting=pickup_distance",
+)
 parser.add_argument("--continue-training", action="store_true", help="Continue training from latest saved model")
 from utils.config import Config
 cfg = Config(parser)
 opt = cfg.opt
 SUMO_PORT = opt.sumoport
+
+
+def resolve_candidates_sorting(opt_obj) -> str:
+    cli_mode = getattr(opt_obj, "candidates_sorting", None)
+    if cli_mode not in (None, ""):
+        return str(cli_mode)
+    if bool(getattr(opt_obj, "sorted", False)):
+        return "pickup_distance"
+    env_mode = getattr(opt_obj.env, "candidates_sorting", None)
+    if env_mode not in (None, ""):
+        return str(env_mode)
+    legacy_sorted = getattr(opt_obj.env, "sorted_candidates", None)
+    if legacy_sorted is not None:
+        return "pickup_distance" if bool(legacy_sorted) else "randomized"
+    return "randomized"
 
 class Tee(object):
     def __init__(self, filename, mode: str = "w"):
@@ -91,6 +119,7 @@ MAX_ROBOT_CAPACITY = int(opt.env.max_robot_capacity)
 CONFLICT_RESOLUTION = str(getattr(opt.env, "conflict_resolution", "closest_then_capacity"))
 COMPLETION_MODE = str(getattr(opt.env, "completion_mode", "dropoff"))
 reward_params = dict(getattr(opt.env, "reward_params", {}) or {})
+CANDIDATES_SORTING = resolve_candidates_sorting(opt)
 
 # Training seeds - different from evaluation seeds [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
 TRAIN_SEEDS = list(opt.seeds.train)
@@ -158,7 +187,8 @@ controller = RLControllerAdapter(
     reset_fn=reset_fn,  # Use rotating seed reset function
     k_max=K_max,
     vicinity_m=VICINITY_M,      # vicinity in meters
-    sorted_candidates=bool(opt.sorted),
+    candidates_sorting=CANDIDATES_SORTING,
+    sorted_candidates=bool(getattr(opt, "sorted", False)),
     completion_mode=COMPLETION_MODE,
     reassignment_mode=str(getattr(opt.env, "reassignment_mode", "locked_until_pickup")),
     max_steps=MAX_STEPS,
