@@ -12,6 +12,7 @@ from utils.sumo_bootstrap import start_sumo, make_reset_fn
 from utils.feature_fns import make_feature_fn, compute_feature_dim, expand_edge_features
 from utils.metrics_calculator import (
     EpisodeMetrics,
+    POLICY_WIDTH,
     compute_episode_metrics_from_logs,
     metrics_to_string,
     get_metrics_header,
@@ -363,7 +364,13 @@ print(f"{'='*80}")
 summary_path = metrics_log_path
 with open(summary_path, "a", encoding="utf-8") as f:
     f.write("\n\n# SUMMARY STATISTICS\n")
-    f.write("pol           rew±std   |     cap±std       step±std     dln±std       wait±std      trav±std      comp±std       nsv±std   |     pkr±std       obsr±std      pkvr±std      mwt±std       cmr±std       anpr±std      pncr±std |  noop±std   overld±std   mcand±std  cne_fr±std cne_mn±std  dstep±std    macmr±std     msd±std  | drp_ev±std  vcmr±std    invdr±std   ddvr±std\n")
+    summary_header = (
+        f"{'pol':<{POLICY_WIDTH}} rew±std   |     cap±std       step±std     dln±std       wait±std      trav±std      comp±std       nsv±std   |"
+        f"     pkr±std       obsr±std      pkvr±std      mwt±std       cmr±std       anpr±std      pncr±std |"
+        f"  noop±std   overld±std   mcand±std  cne_fr±std cne_mn±std  dstep±std    macmr±std     msd±std  |"
+        f" drp_ev±std  vcmr±std    invdr±std   ddvr±std"
+    )
+    f.write(summary_header + "\n")
     
     for policy_name in POLICIES:
         metrics_list = all_metrics_by_policy[policy_name]
@@ -399,7 +406,7 @@ with open(summary_path, "a", encoding="utf-8") as f:
         ddv_rates = [m.dropoff_deadline_violation_rate for m in metrics_list]
 
         summary_line = (
-            f"{policy_name:<10}"
+            f"{policy_name:<{POLICY_WIDTH}}"
             f" {np.mean(rewards):>6.2f}±{np.std(rewards):<5.2f} | "
             f" {np.mean(caps):>6.2f}±{np.std(caps):<5.2f}"
             f"  {np.mean(steps):>6.2f}±{np.std(steps):<5.2f}"
