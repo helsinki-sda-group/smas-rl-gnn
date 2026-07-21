@@ -17,6 +17,28 @@ from utils.metrics_calculator import (
     get_metrics_header,
 )
 
+
+SUPPORTED_BASELINE_POLICIES = {
+    "random",
+    "unique",
+    "greedy",
+    "pickup_distance",
+    "pickup_deadline",
+    "pickup_deadline_distance",
+    "predicted_reward",
+    "predicted_reward_joint",
+}
+
+# Shared slot-0 candidate baseline family.
+SLOT0_SORTING_POLICY_MAP = {
+    "greedy": "pickup_distance",
+    "pickup_distance": "pickup_distance",
+    "pickup_deadline": "pickup_deadline",
+    "pickup_deadline_distance": "pickup_deadline_distance",
+    "predicted_reward": "predicted_reward",
+    "predicted_reward_joint": "predicted_reward_joint",
+}
+
 parser = argparse.ArgumentParser(description="Evaluate baseline policies")
 parser.add_argument("--config", type=str, default="configs/rp_gnn.yaml", help="Path to config YAML")
 parser.add_argument("--sumoport", type=int, default=None, help="SUMO remote port (default: SUMO default)")
@@ -24,10 +46,18 @@ parser.add_argument(
     "--candidates-sorting",
     type=str,
     default=None,
+    choices=["pickup_distance", "pickup_deadline", "pickup_deadline_distance", "randomized", "predicted_reward", "predicted_reward_joint"],
     help=(
         "Candidate sorting mode: pickup_distance | pickup_deadline | "
-        "pickup_deadline_distance | randomized | predicted_reward"
+        "pickup_deadline_distance | randomized | predicted_reward | predicted_reward_joint"
     ),
+)
+parser.add_argument(
+    "--policies",
+    nargs="+",
+    default=None,
+    choices=sorted(SUPPORTED_BASELINE_POLICIES),
+    help="Optional override for baseline policies list",
 )
 parser.add_argument(
     "--sorted",
@@ -53,6 +83,25 @@ def resolve_candidates_sorting(opt_obj) -> str:
     if legacy_sorted is not None:
         return "pickup_distance" if bool(legacy_sorted) else "randomized"
     return "pickup_distance"
+
+
+def resolve_policies(opt_obj) -> List[str]:
+    cli_policies = getattr(opt_obj, "policies", None)
+    if cli_policies not in (None, ""):
+        policies = [str(p).strip().lower() for p in list(cli_policies)]
+    else:
+        policies = [str(p).strip().lower() for p in list(getattr(opt_obj.baselines, "policies", []))]
+
+    invalid = sorted({p for p in policies if p not in SUPPORTED_BASELINE_POLICIES})
+    if invalid:
+        allowed = ", ".join(sorted(SUPPORTED_BASELINE_POLICIES))
+        raise ValueError(f"Unsupported baseline policy name(s): {invalid}. Allowed: {allowed}")
+    return policies
+
+
+def policy_candidates_sorting(policy_name: str, default_sorting: str) -> str:
+    """Map policy name to controller candidates_sorting mode."""
+    return SLOT0_SORTING_POLICY_MAP.get(policy_name, default_sorting)
 
 # 1) SUMO/controller setup (example; adapt to your config)
 SUMO_CFG = opt.env.sumo_cfg
@@ -98,7 +147,7 @@ NUM_SEEDS = int(opt.baselines.num_seeds)
 SEEDS = list(opt.seeds.eval)
 #SEEDS = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
                   # 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000]
-POLICIES = list(opt.baselines.policies)
+POLICIES = resolve_policies(opt)
 
 
 # Initialize metrics log file
@@ -128,6 +177,7 @@ for seed in SEEDS[:NUM_SEEDS]:
 
     # Policy loop moved here for per-policy logger/env
     for policy_name in POLICIES:
+        policy_sorting = policy_candidates_sorting(policy_name, CANDIDATES_SORTING)
         rp_logger = RidepoolLogger(
             RidepoolLogConfig(
                 out_dir="runs",
@@ -139,32 +189,39 @@ for seed in SEEDS[:NUM_SEEDS]:
             )
         )
 
-        controller = RLControllerAdapter(
-            sumo=traci,
-            reset_fn=make_reset_fn(
-                SUMO_CFG,
-                use_gui=USE_GUI,
-                extra_args=extra_args,
-                remote_port=SUMO_PORT,
-            ),
-            k_max=K_max,
-            vicinity_m=VICINITY_M,
-            candidates_sorting=CANDIDATES_SORTING,
-            sorted_candidates=bool(getattr(opt, "sorted", False)),
-            completion_mode=COMPLETION_MODE,
-            reassignment_mode=str(getattr(opt.env, "reassignment_mode", "locked_until_pickup")),
-            max_steps=MAX_STEPS,
-            min_episode_steps=100,
-            serve_to_empty=True,
-            require_seen_reservation=True,
-            max_wait_delay_s=MAX_WAIT_DELAY_S,
-            max_travel_delay_s=MAX_TRAVEL_DELAY_S,
-            max_robot_capacity=MAX_ROBOT_CAPACITY,
-            logger=rp_logger,
-            respect_sumo_end=True,
-            conflict_resolution=CONFLICT_RESOLUTION,
-            reward_params=reward_params,
-        )
+        try:
+            controller = RLControllerAdapter(
+                sumo=traci,
+                reset_fn=make_reset_fn(
+                    SUMO_CFG,
+                    use_gui=USE_GUI,
+                    extra_args=extra_args,
+                    remote_port=SUMO_PORT,
+                ),
+                k_max=K_max,
+                vicinity_m=VICINITY_M,
+                candidates_sorting=policy_sorting,
+                sorted_candidates=bool(getattr(opt, "sorted", False)),
+                completion_mode=COMPLETION_MODE,
+                reassignment_mode=str(getattr(opt.env, "reassignment_mode", "locked_until_pickup")),
+                max_steps=MAX_STEPS,
+                min_episode_steps=100,
+                serve_to_empty=True,
+                require_seen_reservation=True,
+                max_wait_delay_s=MAX_WAIT_DELAY_S,
+                max_travel_delay_s=MAX_TRAVEL_DELAY_S,
+                max_robot_capacity=MAX_ROBOT_CAPACITY,
+                logger=rp_logger,
+                respect_sumo_end=True,
+                conflict_resolution=CONFLICT_RESOLUTION,
+                reward_params=reward_params,
+            )
+        except NotImplementedError as e:
+            print(f"\n  Policy: {policy_name} (sorting={policy_sorting})")
+            print(f"    SKIP: {e}")
+            with open(metrics_log_path, "a", encoding="utf-8") as f:
+                f.write(f"# SKIP policy={policy_name} seed={seed} reason={e}\n")
+            continue
         feature_fn = make_feature_fn(
             controller,
             use_xy_pickup=use_xy_pickup,
@@ -197,7 +254,7 @@ for seed in SEEDS[:NUM_SEEDS]:
         # The rest of the per-policy loop (from 'def greedy_nearest_action' to metrics extraction and logging)
         NOOP = K_max
 
-        def greedy_nearest_action(action_mask: np.ndarray) -> np.ndarray:
+        def slot0_candidate_action(action_mask: np.ndarray) -> np.ndarray:
             a = np.full((R,), NOOP, dtype=np.int64)
             for r in range(R):
                 if action_mask[r,0] == 1:
@@ -222,7 +279,7 @@ for seed in SEEDS[:NUM_SEEDS]:
             env0 = env.unwrapped
             cand_ids = getattr(env0, "_last_cand_task_ids", None)
             if cand_ids is None:
-                return greedy_nearest_action(action_mask)
+                return slot0_candidate_action(action_mask)
 
             chosen = set()
             a = np.full((action_mask.shape[0],), NOOP, dtype=np.int64)
@@ -241,7 +298,7 @@ for seed in SEEDS[:NUM_SEEDS]:
                     break
             return a
 
-        print(f"\n  Policy: {policy_name}")
+        print(f"\n  Policy: {policy_name} (sorting={policy_sorting})")
         obs, info = env.reset()
         done = False
         trunc = False
@@ -249,8 +306,8 @@ for seed in SEEDS[:NUM_SEEDS]:
         while not (done or trunc):
             mask = info.get("action_mask", env.unwrapped.action_mask())
 
-            if policy_name == "greedy":
-                action = greedy_nearest_action(mask)
+            if policy_name in SLOT0_SORTING_POLICY_MAP:
+                action = slot0_candidate_action(mask)
             elif policy_name == "random":
                 action = random_valid_action(mask)
             elif policy_name == "unique":

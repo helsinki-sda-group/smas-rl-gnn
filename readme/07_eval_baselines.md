@@ -16,11 +16,18 @@ At a high level:
 ## Policies configured from YAML
 
 From `configs/rp_gnn.yaml`:
-- `baselines.policies`: list of policies to evaluate (default: `[random, greedy, unique]`)
+- `baselines.policies`: list of policies to evaluate (default in this repo):
+	- `random`
+	- `unique`
+	- `pickup_distance`
+	- `pickup_deadline`
+	- `pickup_deadline_distance`
+	- `predicted_reward`
+	- `predicted_reward_joint`
 - `baselines.num_seeds`: number of seeds to use from `seeds.eval`
 - `seeds.eval`: evaluation seed list
 
-Current defaults evaluate all three baselines over the first 10 eval seeds.
+Current defaults evaluate all listed policies over the first 10 eval seeds.
 
 ## Action space convention used by baselines
 
@@ -34,29 +41,36 @@ For each robot, action indices are:
 At each decision step, policies use an action mask (`1` = valid, `0` = invalid) from environment info.
 
 ## Implementation notes
-Baselines use different ways of sorting task candidates lists. Supported types, specified by
-canonical parameter `candidates_sorting`:
-`pickup_distance` (the same as `sorted_candidates=True` in earlier implementation);
-`pickup_deadline`;
-`pickup_deadline_distance`;
-`randomized`;
-`predicted_reward (reserved)`.
 
-For learnt proposal algorithms, the value of the parameter should be set to randomized to avoid position bias. The sorting is performed before pruning the candidates to top-K list.
+The script supports two policy families:
+- `random` and `unique`: action-selection policies that compute per-robot actions from the current action mask.
+- Slot-0 policies: `greedy`, `pickup_distance`, `pickup_deadline`, `pickup_deadline_distance`, `predicted_reward`, `predicted_reward_joint`.
+
+Slot-0 policies choose candidate slot `0` when valid and rely on controller-side candidate ordering via `candidates_sorting`.
+
+Current policy-to-sorting mapping used by `policy_candidates_sorting(...)`:
+- `greedy` -> `pickup_distance`
+- `pickup_distance` -> `pickup_distance`
+- `pickup_deadline` -> `pickup_deadline`
+- `pickup_deadline_distance` -> `pickup_deadline_distance`
+- `predicted_reward` -> `predicted_reward`
+- `predicted_reward_joint` -> `predicted_reward_joint`
+
+If a selected sorting mode is not implemented in the controller, the script catches `NotImplementedError`, writes a `# SKIP ...` line in the metrics log, and continues with remaining policies.
 
 ## Baseline policy behavior
 
-## 1) `greedy`
+## 1) Slot-0 family (`greedy`, `pickup_distance`, `pickup_deadline`, `pickup_deadline_distance`, `predicted_reward`, `predicted_reward_joint`)
 
-Implementation: `greedy_nearest_action(action_mask)`.
+Implementation: `slot0_candidate_action(action_mask)`.
 
 Behavior per robot:
 - If candidate slot `0` is valid (`action_mask[r, 0] == 1`), choose action `0`.
 - Otherwise choose `NOOP`.
 
 Interpretation:
-- This assumes candidate slot ordering already reflects a good heuristic (typically nearest/most preferred first).
-- The script currently constructs controller with `sorted_candidates=True`, so candidate `0` is deterministic and priority-ordered.
+- These policies differ by candidate ordering mode, not by action-selection logic.
+- Candidate ordering is controlled via `candidates_sorting` (per-policy mapping above).
 
 ## 2) `random`
 
@@ -120,7 +134,9 @@ It contains:
 
 ## Important implementation notes
 
-- The CLI flag `--sorted` exists but is not used to configure candidate ordering in this script; controller creation currently hardcodes `sorted_candidates=True`.
+- `--policies` can override YAML policy list and accepts all names in `SUPPORTED_BASELINE_POLICIES`.
+- Candidate sorting default is resolved in this order: `--candidates-sorting`, then `--sorted` (deprecated alias for `pickup_distance`), then `env.candidates_sorting`, then legacy `env.sorted_candidates`, else `pickup_distance`.
+- Slot-0 policy names override default sorting mode through `policy_candidates_sorting(...)`.
 - `stable_baselines3.common.monitor.Monitor`, `pandas`, and `os` are imported but not used in this script.
 - `G` is read from config but environment is created with `G=0` in this script.
 
@@ -134,3 +150,5 @@ python eval_baselines.py --config configs/rp_gnn.yaml
 
 Optional:
 - `--sumoport <port>` to select SUMO remote port.
+- `--policies <names...>` to override policy list for one run.
+- `--candidates-sorting <mode>` to set default sorting mode for policies that do not override it.

@@ -7,6 +7,9 @@ import json
 import pandas as pd
 
 
+POLICY_WIDTH = 26
+
+
 def _sum_int_column(df: pd.DataFrame, col: str) -> int:
     if col not in df.columns:
         return 0
@@ -466,21 +469,26 @@ def compute_episode_metrics_from_logs(
 
 
 def metrics_to_string(metrics: EpisodeMetrics) -> str:
-    identity_block = f"{metrics.policy:<10} {metrics.seed:>4} {metrics.ts:>8}"
+    identity_block = f"{metrics.policy:<{POLICY_WIDTH}} {metrics.seed:>4} {metrics.ts:>8}"
     reward_block = (
         f" {metrics.reward_sum:>8.2f} {metrics.capacity_sum:>8.2f} {metrics.step_sum:>8.2f}"
         f" {metrics.deadline_sum:>8.2f} {metrics.wait_sum:>8.2f} {metrics.travel_sum:>8.2f}"
         f" {metrics.completion_sum:>8.2f} {metrics.nonserved_sum:>8.2f}"
     )
+    picked_total = f"{metrics.picked_up_tasks:>2}/{metrics.total_tasks:<2}"
+    violated_picked = f"{metrics.pickup_violated:>2}/{metrics.picked_up_tasks:<2}"
+    completed_total = f"{metrics.completed_tasks:>2}/{metrics.total_tasks:<2}"
+    assigned_total = f"{metrics.assigned_never_picked:>2}/{metrics.total_tasks:<2}"
+    picked_not_completed = f"{metrics.picked_not_completed:>2}/{metrics.picked_up_tasks:<2}"
     ridepool_block = (
-        f"{metrics.picked_up_tasks:>2}/{metrics.total_tasks:<2} {metrics.pickup_rate:>6.2f}"
+        f"{picked_total:>5} {metrics.pickup_rate:>6.2f}"
         f" {metrics.obsolete_tasks:>2} {metrics.obsolete_rate:>6.2f}"
-        f" {metrics.pickup_violated:>2}/{metrics.picked_up_tasks:<2} {metrics.pickup_violated_rate:>6.2f}"
+        f" {violated_picked:>5} {metrics.pickup_violated_rate:>6.2f}"
         f" {metrics.mean_wait_time:>7.2f}"
-        f" {metrics.completed_tasks:>2}/{metrics.total_tasks:<2} {metrics.completion_rate:>6.2f}"
-        f" {metrics.assigned_never_picked:>2}/{metrics.total_tasks:<2} {metrics.assigned_never_picked_rate:>6.2f}"
+        f" {completed_total:>5} {metrics.completion_rate:>6.2f}"
+        f" {assigned_total:>5} {metrics.assigned_never_picked_rate:>6.2f}"
         f" {metrics.mean_travel_time_completed:>7.2f}"
-        f" {metrics.picked_not_completed:>2}/{metrics.picked_up_tasks:<2} {metrics.picked_not_completed_rate:>6.2f}"
+        f" {picked_not_completed:>5} {metrics.picked_not_completed_rate:>6.2f}"
     )
     candidate_block = (
         f" {metrics.noop_fraction:>6.3f} {metrics.overload_assignment_fraction:>6.3f}"
@@ -500,11 +508,19 @@ def metrics_to_string(metrics: EpisodeMetrics) -> str:
 
 
 def get_metrics_header() -> str:
-    identity_header = "pol        seed      ts"
-    reward_header = "      rew      cap     step      dln     wait     trav     comp      nsv"
-    ridepool_header = "  pku    pkr obs  obsr   pkv   pkvr    mwt   cmp    cmr   anp   anpr     mtt   pnc    pncr"
-    candidate_header = "  noop  overld  mcand  cne_fr cne_mn   dstep    macmr    msd   ovrlap   shared"
-    coordination_header = "   ecr   unop   ncpr   psur  offpr"
+    identity_header = f"{'pol':<{POLICY_WIDTH}} {'seed':>4} {'ts':>8}"
+    reward_header = (
+        f" {'rew':>8} {'cap':>8} {'step':>8} {'dln':>8} {'wait':>8} {'trav':>8} {'comp':>8} {'nsv':>8}"
+    )
+    ridepool_header = (
+        f"{'pku':>5} {'pkr':>6} {'obs':>2} {'obsr':>6} {'pkv':>5} {'pkvr':>6}"
+        f" {'mwt':>7} {'cmp':>5} {'cmr':>6} {'anp':>5} {'anpr':>6} {'mtt':>7} {'pnc':>5} {'pncr':>6}"
+    )
+    candidate_header = (
+        f" {'noop':>6} {'overld':>6} {'mcand':>6} {'cne_fr':>6} {'cne_mn':>6} {'dstep':>6}"
+        f" {'macmr':>8} {'msd':>6} {'ovrlap':>8} {'shared':>8}"
+    )
+    coordination_header = f" {'ecr':>6} {'unop':>6} {'ncpr':>6} {'psur':>6} {'offpr':>6}"
     return f"{identity_header} |{reward_header} |{ridepool_header} |{candidate_header} |{coordination_header}"
 
 

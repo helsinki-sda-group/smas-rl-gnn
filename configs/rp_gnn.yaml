@@ -114,8 +114,12 @@ continue_training: false
 baselines:
   policies:
   - random
-  - greedy
   - unique
+  - pickup_distance
+  - pickup_deadline
+  - pickup_deadline_distance
+  - predicted_reward
+  - predicted_reward_joint
   num_seeds: 10
 
 sorted: false

@@ -336,12 +336,11 @@ class RLControllerAdapter:
             "pickup_deadline_distance",
             "randomized",
             "predicted_reward",
+            "predicted_reward_joint",
         }
         if mode not in allowed:
             allowed_list = ", ".join(sorted(allowed))
             raise ValueError(f"Unknown candidates_sorting='{mode}'. Expected one of: {allowed_list}")
-        if mode == "predicted_reward":
-            raise NotImplementedError("candidates_sorting='predicted_reward' is reserved for future implementation")
         return mode
 
     @staticmethod
@@ -652,6 +651,293 @@ class RLControllerAdapter:
         # return the reservation id sequence (ids may repeat)
         return seq
 
+    def _estimate_sequence_candidate_prediction(
+        self,
+        *,
+        rid: str,
+        candidate: Task,
+        res_index: dict[str, object],
+        current_edge: Optional[str] = None,
+        current_customer_ids: Optional[Sequence[str]] = None,
+    ) -> tuple[float, float, float]:
+        """Estimate (score, pickup_time, pickup_distance) using greedy POI sequencing.
+
+        The score follows the wait_travel/valid_dropoff approximation requested by the user.
+        This method is side-effect free: it only reads controller/SUMO state.
+        """
+        if candidate.id not in res_index:
+            raise ValueError("candidate reservation not present in current reservation index")
+
+        if current_edge is None:
+            current_edge = self._get_taxi_current_edge(rid)
+        if not current_edge:
+            raise ValueError("unable to determine taxi current edge")
+
+        prev_seq = list(self._shadow_plan_by_robot.get(rid, []))
+        prev_ids = list(dict.fromkeys(prev_seq))
+
+        if current_customer_ids is None:
+            p2r = self._person_to_res_index(res_index)
+            current_customer_ids = self._current_reservation_ids_onboard(rid, p2r)
+
+        base_ids = list(dict.fromkeys(prev_ids + list(current_customer_ids) + [candidate.id]))
+        already_picked = {r for r in base_ids if (r in res_index) and self._is_picked(res_index[r])}
+
+        seq = self._greedy_pd_sequence(rid, base_ids, res_index, already_picked)
+        if not seq:
+            raise ValueError("empty greedy sequence")
+
+        now = float(self._now())
+        w_comp = float(self.reward_weights.get("comp", 1.0))
+        w_wait = float(self.reward_weights.get("wait", 1.5))
+        w_travel = float(self.reward_weights.get("travel", 2.0))
+        wait_cap = max(1e-6, float(self.reward_caps.get("wait", 600.0)))
+        travel_cap = max(1e-6, float(self.reward_caps.get("travel", 90.0)))
+
+        seen: Dict[str, int] = {}
+        cur_edge = current_edge
+        cur_time = now
+        pickup_time: Optional[float] = None
+        dropoff_time: Optional[float] = None
+
+        for res_id in seq:
+            res_obj = res_index.get(res_id)
+            if res_obj is None:
+                raise ValueError(f"missing reservation object for {res_id}")
+            occ = seen.get(res_id, 0)
+            action = "pickup" if occ == 0 else "dropoff"
+            seen[res_id] = occ + 1
+            edge = self._edge_for_pickup(res_obj) if action == "pickup" else self._edge_for_dropoff(res_obj)
+            if not edge:
+                raise ValueError(f"missing {action} edge for {res_id}")
+
+            travel = float(self._estimate_travel_time(cur_edge, edge))
+            if not np.isfinite(travel) or travel < 0.0:
+                raise ValueError(f"invalid travel estimate from {cur_edge} to {edge}")
+
+            cur_time += travel
+            cur_edge = edge
+
+            if res_id == candidate.id and action == "pickup" and pickup_time is None:
+                pickup_time = cur_time
+            if res_id == candidate.id and action == "dropoff":
+                dropoff_time = cur_time
+                break
+
+        if pickup_time is None or dropoff_time is None:
+            raise ValueError("failed to estimate candidate pickup/dropoff times")
+
+        predicted_wait = max(0.0, pickup_time - float(candidate.reservationTime))
+        normalized_wait = min(predicted_wait, wait_cap) / wait_cap
+
+        predicted_ride_time = max(0.0, dropoff_time - pickup_time)
+        predicted_excess_ride_time = max(0.0, predicted_ride_time - float(candidate.estTravelTime))
+        normalized_excess_ride_time = min(predicted_excess_ride_time, travel_cap) / travel_cap
+
+        valid_completion = (
+            pickup_time <= float(candidate.pickupDeadline)
+            and dropoff_time <= float(candidate.dropoffDeadline)
+        )
+
+        score = (
+            w_comp * float(int(valid_completion))
+            - w_wait * normalized_wait
+            - w_travel * normalized_excess_ride_time
+        )
+        pickup_distance = float(self._road_distance(current_edge, candidate.fromEdge)) if candidate.fromEdge else float("inf")
+        return float(score), float(pickup_time), float(pickup_distance)
+
+    def _task_from_reservation(self, res_id: str, res_obj: object) -> Task:
+        """Build a Task snapshot from a reservation object for side-effect-free scoring."""
+        rid = str(res_id)
+        from_edge = str(getattr(res_obj, "fromEdge", ""))
+        to_edge = str(getattr(res_obj, "toEdge", ""))
+        st = int(getattr(res_obj, "state", self.STATE_REQUESTED))
+        t0 = float(getattr(res_obj, "reservationTime", 0.0))
+        est_tt = self._estimate_travel_time(from_edge, to_edge)
+        pickup_deadline = t0 + self.max_wait_delay_s
+        dropoff_deadline = t0 + self.max_wait_delay_s + est_tt + self.max_travel_delay_s
+        return Task(
+            id=rid,
+            fromEdge=from_edge,
+            toEdge=to_edge,
+            state=st,
+            reservationTime=t0,
+            estTravelTime=est_tt,
+            pickupDeadline=pickup_deadline,
+            dropoffDeadline=dropoff_deadline,
+            is_obsolete=False,
+            is_assigned=bool(st & self.STATE_ASSIGNED),
+        )
+
+    def _estimate_plan_event_times(
+        self,
+        *,
+        rid: str,
+        res_ids: Sequence[str],
+        res_index: dict[str, object],
+        current_edge: str,
+        current_customer_ids: Sequence[str],
+    ) -> Dict[str, Dict[str, float]]:
+        """Return predicted pickup/dropoff times per task for a greedy PD sequence."""
+        base_ids = list(dict.fromkeys(list(res_ids)))
+        already_picked = {r for r in base_ids if (r in res_index) and self._is_picked(res_index[r])}
+        seq = self._greedy_pd_sequence(rid, base_ids, res_index, already_picked)
+        if not seq:
+            raise ValueError("empty greedy sequence")
+
+        seen: Dict[str, int] = {}
+        cur_edge = str(current_edge)
+        cur_time = float(self._now())
+        out: Dict[str, Dict[str, float]] = {}
+
+        for res_id in seq:
+            res_obj = res_index.get(res_id)
+            if res_obj is None:
+                raise ValueError(f"missing reservation object for {res_id}")
+
+            occ = seen.get(res_id, 0)
+            action = "pickup" if occ == 0 else "dropoff"
+            seen[res_id] = occ + 1
+
+            edge = self._edge_for_pickup(res_obj) if action == "pickup" else self._edge_for_dropoff(res_obj)
+            if not edge:
+                raise ValueError(f"missing {action} edge for {res_id}")
+
+            travel = float(self._estimate_travel_time(cur_edge, edge))
+            if not np.isfinite(travel) or travel < 0.0:
+                raise ValueError(f"invalid travel estimate from {cur_edge} to {edge}")
+
+            cur_time += travel
+            cur_edge = edge
+
+            rec = out.setdefault(str(res_id), {})
+            if action == "pickup" and "pickup" not in rec:
+                rec["pickup"] = float(cur_time)
+            if action == "dropoff":
+                rec["dropoff"] = float(cur_time)
+
+        return out
+
+    def _task_predicted_score_from_times(
+        self,
+        *,
+        task: Task,
+        predicted_pickup_time: Optional[float],
+        predicted_dropoff_time: Optional[float],
+        actual_pickup_time: Optional[float],
+        preserve_actual_pickup_validity: bool,
+    ) -> float:
+        """Compute per-task predicted score used by predicted_reward_joint."""
+        if predicted_dropoff_time is None:
+            raise ValueError(f"missing predicted dropoff time for task {task.id}")
+
+        pickup_time_for_wait = actual_pickup_time if actual_pickup_time is not None else predicted_pickup_time
+        if pickup_time_for_wait is None:
+            raise ValueError(f"missing pickup time for task {task.id}")
+
+        w_comp = float(self.reward_weights.get("comp", 1.0))
+        w_wait = float(self.reward_weights.get("wait", 1.5))
+        w_travel = float(self.reward_weights.get("travel", 2.0))
+        wait_cap = max(1e-6, float(self.reward_caps.get("wait", 600.0)))
+        travel_cap = max(1e-6, float(self.reward_caps.get("travel", 90.0)))
+
+        normalized_wait = min(max(0.0, float(pickup_time_for_wait) - float(task.reservationTime)), wait_cap) / wait_cap
+        ride_time = max(0.0, float(predicted_dropoff_time) - float(pickup_time_for_wait))
+        normalized_excess_ride_time = min(max(0.0, ride_time - float(task.estTravelTime)), travel_cap) / travel_cap
+
+        if preserve_actual_pickup_validity and actual_pickup_time is not None:
+            pickup_ok = float(actual_pickup_time) <= float(task.pickupDeadline)
+        else:
+            pickup_ok = float(pickup_time_for_wait) <= float(task.pickupDeadline)
+        dropoff_ok = float(predicted_dropoff_time) <= float(task.dropoffDeadline)
+        valid_completion = pickup_ok and dropoff_ok
+
+        return (
+            w_comp * float(int(valid_completion))
+            - w_wait * normalized_wait
+            - w_travel * normalized_excess_ride_time
+        )
+
+    def _estimate_joint_candidate_marginal_prediction(
+        self,
+        *,
+        rid: str,
+        candidate: Task,
+        res_index: dict[str, object],
+        current_edge: str,
+        current_customer_ids: Sequence[str],
+    ) -> tuple[float, float, float, float]:
+        """Estimate (marginal_score, after_score, candidate_pickup_time, pickup_distance)."""
+        if candidate.id not in res_index:
+            raise ValueError("candidate reservation not present in current reservation index")
+
+        prev_ids = list(dict.fromkeys(self._shadow_plan_by_robot.get(rid, [])))
+        before_ids = list(dict.fromkeys(prev_ids + list(current_customer_ids)))
+        before_ids = [r for r in before_ids if r in res_index and not self._is_completed(res_index[r])]
+        after_ids = list(dict.fromkeys(before_ids + [candidate.id]))
+
+        # Build task snapshots for all unfinished tasks in the resulting plan.
+        tasks_by_id: Dict[str, Task] = {}
+        for res_id in after_ids:
+            res_obj = res_index.get(res_id)
+            if res_obj is None:
+                continue
+            tasks_by_id[res_id] = self._task_from_reservation(res_id, res_obj)
+
+        before_times: Dict[str, Dict[str, float]] = {}
+        if before_ids:
+            before_times = self._estimate_plan_event_times(
+                rid=rid,
+                res_ids=before_ids,
+                res_index=res_index,
+                current_edge=current_edge,
+                current_customer_ids=current_customer_ids,
+            )
+        after_times = self._estimate_plan_event_times(
+            rid=rid,
+            res_ids=after_ids,
+            res_index=res_index,
+            current_edge=current_edge,
+            current_customer_ids=current_customer_ids,
+        )
+
+        def _score_plan(task_ids: Sequence[str], times: Dict[str, Dict[str, float]]) -> float:
+            total = 0.0
+            for tid in task_ids:
+                task = tasks_by_id.get(tid)
+                res_obj = res_index.get(tid)
+                if task is None or res_obj is None:
+                    continue
+                tdict = times.get(tid, {})
+                predicted_pickup = tdict.get("pickup")
+                predicted_dropoff = tdict.get("dropoff")
+
+                picked = self._is_picked(res_obj)
+                actual_pickup_time = None
+                if picked:
+                    lc = self._task_lifecycle.get(str(tid), {})
+                    raw_pickup_time = lc.get("actual_pickup_time")
+                    if raw_pickup_time is not None:
+                        actual_pickup_time = float(raw_pickup_time)
+
+                total += float(
+                    self._task_predicted_score_from_times(
+                        task=task,
+                        predicted_pickup_time=predicted_pickup,
+                        predicted_dropoff_time=predicted_dropoff,
+                        actual_pickup_time=actual_pickup_time,
+                        preserve_actual_pickup_validity=bool(picked),
+                    )
+                )
+            return float(total)
+
+        r_before = _score_plan(before_ids, before_times) if before_ids else 0.0
+        r_after = _score_plan(after_ids, after_times)
+        candidate_pickup_time = float(after_times.get(candidate.id, {}).get("pickup", float("inf")))
+        pickup_distance = float(self._road_distance(current_edge, candidate.fromEdge)) if candidate.fromEdge else float("inf")
+        return float(r_after - r_before), float(r_after), candidate_pickup_time, pickup_distance
+
 
     def taxis_available(self, min_robots: int = 1) -> bool:
         """Return True if at least `min_robots` taxis exist in the sim."""
@@ -877,6 +1163,7 @@ class RLControllerAdapter:
         K = self.k_max if K is None else int(K)
         tasks_all = self.get_tasks()
         tasks_viable = [t for t in tasks_all if not t.is_obsolete ] # and not t.is_assigned]  # <- keep only viable tasks
+        res_index = self._reservation_index()
         locked_owner_by_task = {
             t.id: self._locked_owner_for_reservation(t.id, task=t)
             for t in tasks_viable
@@ -936,6 +1223,57 @@ class RLControllerAdapter:
                             str(x[2].id),
                         )
                     )
+                elif mode == "predicted_reward":
+                    scored: List[Tuple[float, float, float, str, int, Task]] = []
+                    current_customer_ids = self._current_reservation_ids_onboard(rid, self._person_to_res_index(res_index))
+                    for dist, j, t in feasible:
+                        try:
+                            score, pickup_time, pickup_distance = self._estimate_sequence_candidate_prediction(
+                                rid=rid,
+                                candidate=t,
+                                res_index=res_index,
+                                current_edge=r_edge,
+                                current_customer_ids=current_customer_ids,
+                            )
+                        except Exception:
+                            score = float("-inf")
+                            pickup_time = float("inf")
+                            pickup_distance = float("inf")
+
+                        scored.append((float(score), float(pickup_time), float(pickup_distance), str(t.id), j, t))
+                    scored.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
+                    feasible = [(dist, j, t) for _, _, _, _, j, t in scored]
+                elif mode == "predicted_reward_joint":
+                    scored_joint: List[Tuple[float, float, float, float, str, int, Task]] = []
+                    current_customer_ids = self._current_reservation_ids_onboard(rid, self._person_to_res_index(res_index))
+                    for dist, j, t in feasible:
+                        try:
+                            marginal_score, r_after, pickup_time, pickup_distance = self._estimate_joint_candidate_marginal_prediction(
+                                rid=rid,
+                                candidate=t,
+                                res_index=res_index,
+                                current_edge=r_edge,
+                                current_customer_ids=current_customer_ids,
+                            )
+                        except Exception:
+                            marginal_score = float("-inf")
+                            r_after = float("-inf")
+                            pickup_time = float("inf")
+                            pickup_distance = float("inf")
+
+                        scored_joint.append(
+                            (
+                                float(marginal_score),
+                                float(r_after),
+                                float(pickup_time),
+                                float(pickup_distance),
+                                str(t.id),
+                                j,
+                                t,
+                            )
+                        )
+                    scored_joint.sort(key=lambda x: (-x[0], -x[1], x[2], x[3], x[4]))
+                    feasible = [(dist, j, t) for _, _, _, _, _, j, t in scored_joint]
                 else:
                     raise ValueError(f"Unsupported candidates_sorting mode: {mode}")
             cand_lists.append([j for _, j, _ in feasible[:K]])
