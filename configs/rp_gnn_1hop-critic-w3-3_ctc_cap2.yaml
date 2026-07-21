@@ -30,8 +30,9 @@
     deadline_cap: 600.0
   completion_mode: valid_dropoff
 features:
-  base_dim: 9
   use_xy_pickup: false
+  use_reservation_time: false
+  base_dim: 9
   normalize_features: true
   use_node_type: true
   use_ego_robot: true
@@ -110,11 +111,15 @@ continue_training: false
 baselines:
   policies:
   - random
-  - greedy
   - unique
+  - pickup_distance
+  - predicted_reward
+  - predicted_reward_joint
   num_seeds: 10
 sorted: false
 sumoport: 8813
+
+
 
 
 

@@ -84,6 +84,7 @@ def expand_edge_features(
 def make_feature_fn(
     ctrl: RLControllerAdapter,
     use_xy_pickup: bool = False,
+    use_reservation_time: bool = False,
     normalize_features: bool = False,
     use_node_type: bool = False,
     use_edge_rt: bool = False,
@@ -327,11 +328,11 @@ def make_feature_fn(
                 return out
 
             if normalize_features:
-                out[0] = float(t.reservationTime) / time_scale
+                out[0] = (float(t.reservationTime) / time_scale) if use_reservation_time else 0.0
                 out[1] = float(max(0.0, now - float(t.reservationTime))) / wait_scale
                 out[2] = float(getattr(t, "estTravelTime", 0.0)) / travel_scale
             else:
-                out[0] = float(t.reservationTime)
+                out[0] = float(t.reservationTime) if use_reservation_time else 0.0
                 out[1] = float(max(0.0, now - float(t.reservationTime)))
                 out[2] = float(getattr(t, "estTravelTime", 0.0))
 

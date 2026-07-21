@@ -79,6 +79,8 @@ R = int(opt.env.R)
 K_max = int(opt.env.K_max)
 N_max = int(opt.env.N_max)
 E_max = int(opt.env.E_max)
+features_cfg = getattr(opt, "features", {})
+use_reservation_time = bool(features_cfg.get("use_reservation_time", False))
 use_xy_pickup = bool(opt.features.use_xy_pickup)
 use_node_type = bool(getattr(opt.features, "use_node_type", False))
 use_ego_robot = bool(getattr(opt.features, "use_ego_robot", False))
@@ -205,6 +207,7 @@ controller = RLControllerAdapter(
 feature_fn = make_feature_fn(
     controller,
     use_xy_pickup=use_xy_pickup,
+    use_reservation_time=use_reservation_time,
     normalize_features=bool(getattr(opt.features, "normalize_features", False)),
     use_node_type=use_node_type,
     use_edge_rt=use_edge_rt,

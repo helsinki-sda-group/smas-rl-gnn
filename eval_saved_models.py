@@ -172,6 +172,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
         feature_fn = make_feature_fn(
             controller,
             use_xy_pickup=bool(config.get('use_xy_pickup', False)),
+            use_reservation_time=bool(config.get('use_reservation_time', False)),
             normalize_features=bool(config.get('normalize_features', False)),
             use_node_type=bool(config.get('use_node_type', False)),
             use_edge_rt=bool(config.get('use_edge_rt', False)),
@@ -585,6 +586,8 @@ def main():
     output_dir = str(getattr(args, "output_dir", "eval_results"))
     model_dir = str(getattr(args, "model_dir", "runs/rp_gnn_debug/saved_models"))
 
+    features_cfg = getattr(opt, "features", {})
+    use_reservation_time = bool(features_cfg.get("use_reservation_time", False))
     use_xy_pickup = bool(opt.features.use_xy_pickup)
     use_node_type = bool(getattr(opt.features, "use_node_type", False))
     use_ego_robot = bool(getattr(opt.features, "use_ego_robot", False))
@@ -620,6 +623,7 @@ def main():
         'N_max': int(opt.env.N_max),
         'E_max': int(opt.env.E_max),
         'F': feature_dim,
+        'use_reservation_time': use_reservation_time,
         'use_xy_pickup': use_xy_pickup,
         'normalize_features': bool(getattr(opt.features, "normalize_features", False)),
         'use_node_type': use_node_type,
