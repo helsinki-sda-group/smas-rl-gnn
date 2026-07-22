@@ -29,6 +29,25 @@ From `configs/rp_gnn.yaml`:
 
 Current defaults evaluate all listed policies over the first 10 eval seeds.
 
+## Complete supported policy list
+
+`eval_baselines.py` accepts the following `SUPPORTED_BASELINE_POLICIES`:
+- `random`
+- `unique`
+- `greedy`
+- `pickup_distance`
+- `pickup_deadline`
+- `pickup_deadline_distance`
+- `predicted_reward`
+- `predicted_reward_joint`
+
+Notes:
+- `greedy` is supported by CLI (`--policies greedy ...`) but is not part of the default YAML list in this repo.
+- If `--policies` is provided, it overrides `baselines.policies` from YAML.
+
+## Supported conflict resolution mechanisms
+"capacity" | "closest" | "closest_then_capacity" | "logit_diff" | "random"
+
 ## Action space convention used by baselines
 
 For each robot, action indices are:
@@ -58,21 +77,9 @@ Current policy-to-sorting mapping used by `policy_candidates_sorting(...)`:
 
 If a selected sorting mode is not implemented in the controller, the script catches `NotImplementedError`, writes a `# SKIP ...` line in the metrics log, and continues with remaining policies.
 
-## Baseline policy behavior
+## Baseline policy behavior (all policies)
 
-## 1) Slot-0 family (`greedy`, `pickup_distance`, `pickup_deadline`, `pickup_deadline_distance`, `predicted_reward`, `predicted_reward_joint`)
-
-Implementation: `slot0_candidate_action(action_mask)`.
-
-Behavior per robot:
-- If candidate slot `0` is valid (`action_mask[r, 0] == 1`), choose action `0`.
-- Otherwise choose `NOOP`.
-
-Interpretation:
-- These policies differ by candidate ordering mode, not by action-selection logic.
-- Candidate ordering is controlled via `candidates_sorting` (per-policy mapping above).
-
-## 2) `random`
+## 1) `random`
 
 Implementation: `random_valid_action(action_mask)`.
 
@@ -85,7 +92,7 @@ Notes:
 - RNG is seeded per episode seed (`np.random.default_rng(seed)`), so runs are reproducible per seed.
 - Because sampling is independent per robot, multiple robots may choose actions that map to the same task before conflict resolution.
 
-## 3) `unique`
+## 2) `unique`
 
 Implementation: `greedy_unique_action(action_mask)`.
 
@@ -101,6 +108,134 @@ Fallback:
 Interpretation:
 - This is a per-step greedy matching heuristic that avoids duplicate assignment attempts within the same decision step.
 - Priority is robot-order dependent (lower robot index gets first claim).
+
+## 3) `greedy`
+
+Implementation: `slot0_candidate_action(action_mask)` with `candidates_sorting=pickup_distance`.
+
+Behavior per robot:
+- If candidate slot `0` is valid (`action_mask[r, 0] == 1`), choose action `0`.
+- Otherwise choose `NOOP`.
+
+Interpretation:
+- Equivalent action logic to other slot-0 policies.
+- Uses distance-first candidate ordering.
+
+## 4) `pickup_distance`
+
+Implementation: `slot0_candidate_action(action_mask)` with `candidates_sorting=pickup_distance`.
+
+Behavior per robot:
+- If slot `0` is valid, take slot `0`; else `NOOP`.
+
+Interpretation:
+- Picks the top candidate under pickup-distance sorting.
+
+## 5) `pickup_deadline`
+
+Implementation: `slot0_candidate_action(action_mask)` with `candidates_sorting=pickup_deadline`.
+
+Behavior per robot:
+- If slot `0` is valid, take slot `0`; else `NOOP`.
+
+Interpretation:
+- Picks the top candidate under pickup-deadline sorting.
+
+## 6) `pickup_deadline_distance`
+
+Implementation: `slot0_candidate_action(action_mask)` with `candidates_sorting=pickup_deadline_distance`.
+
+Behavior per robot:
+- If slot `0` is valid, take slot `0`; else `NOOP`.
+
+Interpretation:
+- Picks the top candidate under combined deadline-and-distance sorting.
+
+## 7) `predicted_reward`
+
+Implementation: `slot0_candidate_action(action_mask)` with `candidates_sorting=predicted_reward`.
+
+Behavior per robot:
+- If slot `0` is valid, take slot `0`; else `NOOP`.
+
+Interpretation:
+- Picks the top candidate ranked by single-agent predicted reward.
+
+How the score is computed:
+- For each feasible candidate, the controller simulates a greedy pickup/dropoff sequence for the current taxi plan after inserting that candidate.
+- It predicts candidate pickup and dropoff times from route travel-time estimates.
+- It computes:
+
+$$
+s = w_{comp}\cdot \mathbf{1}_{\text{valid completion}} - w_{wait}\cdot \widehat{\text{wait}} - w_{travel}\cdot \widehat{\text{excess travel}}
+$$
+
+Where:
+- $\widehat{\text{wait}} = \min(\text{predicted wait},\, \text{wait cap}) / \text{wait cap}$
+- $\widehat{\text{excess travel}} = \min(\text{predicted ride time} - \text{direct est. travel},\, \text{travel cap}) / \text{travel cap}$
+- `valid completion` is `1` only if both predicted pickup and dropoff satisfy their deadlines.
+
+Candidate ordering (`predicted_reward`):
+- Higher `score` first
+- Earlier predicted pickup time
+- Shorter pickup distance
+- Reservation ID lexical order (final tie-break)
+
+Meaning of this sorting:
+- It is a local per-candidate objective: "which single candidate looks best for this taxi right now".
+- It does not optimize by comparing total plan value before vs after insertion.
+
+## 8) `predicted_reward_joint`
+
+Implementation: `slot0_candidate_action(action_mask)` with `candidates_sorting=predicted_reward_joint`.
+
+Behavior per robot:
+- If slot `0` is valid, take slot `0`; else `NOOP`.
+
+Interpretation:
+- Picks the top candidate ranked by joint predicted reward.
+
+How the score is computed:
+- Let `before` be the taxi's current unfinished plan (shadow plan + onboard unfinished tasks).
+- Let `after` be the same plan with the candidate inserted.
+- For both plans, the controller predicts pickup/dropoff times for all tasks in a greedy pickup/dropoff sequence.
+- It computes per-task predicted scores with the same components as above (completion, normalized wait penalty, normalized excess-travel penalty).
+- It then sums task scores:
+
+$$
+R_{before} = \sum_{t \in \text{before}} \text{score}(t),\quad
+R_{after} = \sum_{t \in \text{after}} \text{score}(t)
+$$
+
+and ranks by marginal improvement:
+
+$$
+\Delta R = R_{after} - R_{before}
+$$
+
+Candidate ordering (`predicted_reward_joint`):
+- Higher marginal score $\Delta R$ first
+- Higher absolute $R_{after}$
+- Earlier candidate pickup time
+- Shorter pickup distance
+- Reservation ID lexical order (final tie-break)
+
+Meaning of this sorting:
+- It is a plan-aware objective: "which candidate improves the full current plan the most".
+- It can prefer a candidate with lower standalone score if it interferes less with already onboard/assigned tasks.
+
+Default reward parameters used by these predicted-reward sortings (unless overridden in config):
+- $w_{comp}=1.0$
+- $w_{wait}=1.5$
+- $w_{travel}=2.0$
+- `wait_cap=600`
+- `travel_cap=90`
+
+## Slot-0 family summary
+
+Slot-0 policies are: `greedy`, `pickup_distance`, `pickup_deadline`, `pickup_deadline_distance`, `predicted_reward`, `predicted_reward_joint`.
+
+All slot-0 policies share the same action-selection function (`slot0_candidate_action`). They differ only in how candidate slot `0` is produced by controller-side sorting (`candidates_sorting`).
 
 ## Evaluation loop details
 

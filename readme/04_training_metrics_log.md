@@ -133,6 +133,19 @@ Definitions used at decision-step level:
 - existing `conflict_ratio` in `conflicts.log` is a task-bucket conflict frequency (`conflicts_total / tasks_total`) and remains unchanged.
 - `ncpr` is proposal/robot based (`unique_proposals / real_proposals`) and measures how many submitted proposals were nonconflicting.
 
+### Additional dropoff metrics (summary only)
+- `drp_ev`	dropoff_event_rate (all dropoffs / total tasks)
+- `vcmr`	valid_completion_rate (pickup+dropoff before deadlines / total tasks)
+- `invdr`	invalid_dropoff_rate (dropoffs failing validity / total tasks)
+- `ddvr`	dropoff_deadline_violation_rate (dropped after dropoff_deadline / total tasks)
+
+Invalid completion rate `1-vcmr` id calculated as rate of tasks which had dropoff but violated it `invdr` + rate of tasks which did not have dropoff:
+$$1-vcmr = invdr + (1-drp\_ev)$$
+Then invalide dropoff rate `invdr` is sum of rates of tasks violating only pickup $O_{pick}$, only dropoff $O_{drop}$, or both: $invdr=$O_{pick}+$O_{drop}+both$.
+Given that $ddvr = $O_{drop}+both$, $O_pick = indvr - ddvr$.
+$O_{pick}+both$ is pickup violation rate among all tasks, and it is $pvr_{tot} = pkr \cdot pkvr$.
+Then $both = pvr_{tot}-indvr+ddvr$, $O_{drop}=ddvr-both$.
+
 These quantities are related but not interchangeable.
 
 ## Practical interpretation
