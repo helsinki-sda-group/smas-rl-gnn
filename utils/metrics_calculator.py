@@ -4,10 +4,86 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 import os
 import json
+import xml.etree.ElementTree as ET
 import pandas as pd
 
 
 POLICY_WIDTH = 26
+REWARD_PARAM_HEADER_KEYS = [
+    "w_comp",
+    "w_wait",
+    "w_deadline",
+    "w_travel",
+    "wait_cap",
+    "travel_cap",
+    "deadline_cap",
+]
+REWARD_PARAM_DEFAULTS = {
+    "w_comp": 1.0,
+    "w_wait": 1.5,
+    "w_deadline": 10.0,
+    "w_travel": 2.0,
+    "wait_cap": 600.0,
+    "travel_cap": 90.0,
+    "deadline_cap": 600.0,
+}
+
+
+def extract_route_files_from_sumocfg(sumo_cfg_path: str) -> str:
+    """Return SUMO <route-files> value from sumocfg, or 'unknown' on failure."""
+    candidate_paths: List[str] = [str(sumo_cfg_path)]
+    cfg_basename = os.path.basename(str(sumo_cfg_path).replace("\\", "/"))
+    if cfg_basename:
+        candidate_paths.extend([
+            cfg_basename,
+            os.path.join("configs", cfg_basename),
+        ])
+
+    seen = set()
+    for path in candidate_paths:
+        norm = os.path.normpath(path)
+        if norm in seen or not os.path.exists(norm):
+            continue
+        seen.add(norm)
+        try:
+            root = ET.parse(norm).getroot()
+            route_files_node = root.find("./input/route-files")
+            if route_files_node is not None:
+                value = str(route_files_node.attrib.get("value", "")).strip()
+                if value:
+                    return value
+        except Exception:
+            continue
+    return "unknown"
+
+
+def build_metrics_metadata_lines(
+    *,
+    sumo_cfg_path: str,
+    conflict_resolution: str,
+    reward_params: Optional[Dict],
+    completion_mode: Optional[str] = None,
+    reassignment_mode: Optional[str] = None,
+) -> List[str]:
+    """Build standardized metadata header lines for metrics log files."""
+    reward_params_dict = dict(reward_params or {})
+    instance = extract_route_files_from_sumocfg(sumo_cfg_path)
+
+    line_parts: List[str] = [
+        f"instance={instance}",
+        f"resolver={str(conflict_resolution)}",
+    ]
+    if completion_mode is not None:
+        line_parts.append(f"completion_mode={str(completion_mode)}")
+    if reassignment_mode is not None:
+        line_parts.append(f"reassignment_mode={str(reassignment_mode)}")
+    if "reward_type" in reward_params_dict:
+        line_parts.append(f"reward_type={reward_params_dict.get('reward_type')}")
+    line_parts.extend(
+        f"{key}={reward_params_dict.get(key, REWARD_PARAM_DEFAULTS[key])}"
+        for key in REWARD_PARAM_HEADER_KEYS
+    )
+    return [", ".join(line_parts)]
 
 
 def _sum_int_column(df: pd.DataFrame, col: str) -> int:
@@ -524,9 +600,11 @@ def get_metrics_header() -> str:
     return f"{identity_header} |{reward_header} |{ridepool_header} |{candidate_header} |{coordination_header}"
 
 
-def ensure_metrics_log(path: str, overwrite: bool = False) -> None:
+def ensure_metrics_log(path: str, overwrite: bool = False, metadata_lines: Optional[List[str]] = None) -> None:
     if overwrite or not os.path.exists(path) or os.path.getsize(path) == 0:
         with open(path, "w", encoding="utf-8") as f:
+            for line in list(metadata_lines or []):
+                f.write(line.rstrip("\n") + "\n")
             f.write(get_metrics_header() + "\n")
 
 

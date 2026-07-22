@@ -16,6 +16,7 @@ from utils.metrics_calculator import (
     compute_episode_metrics_from_logs,
     metrics_to_string,
     get_metrics_header,
+    build_metrics_metadata_lines,
 )
 
 
@@ -161,10 +162,14 @@ metrics_log_path = (
 with open(metrics_log_path, "w", encoding="utf-8") as f:
     f.write(f"vicinity_m={VICINITY_M}, max_steps={MAX_STEPS}, max_wait_delay_s={MAX_WAIT_DELAY_S}, "
             f"max_travel_delay_s={MAX_TRAVEL_DELAY_S}, max_robot_capacity={MAX_ROBOT_CAPACITY}\n")
-    f.write(
-        f"completion_mode={COMPLETION_MODE}, reward_type={reward_params.get('reward_type', 'deadline')}, "
-        f"reassignment_mode={str(getattr(opt.env, 'reassignment_mode', 'locked_until_pickup'))}\n"
-    )
+    for line in build_metrics_metadata_lines(
+        sumo_cfg_path=SUMO_CFG,
+        conflict_resolution=CONFLICT_RESOLUTION,
+        reward_params=reward_params,
+        completion_mode=COMPLETION_MODE,
+        reassignment_mode=str(getattr(opt.env, "reassignment_mode", "locked_until_pickup")),
+    ):
+        f.write(line + "\n")
     f.write(get_metrics_header() + "\n")
 
 all_metrics_by_policy: Dict[str, List[EpisodeMetrics]] = {p: [] for p in POLICIES}

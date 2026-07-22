@@ -643,6 +643,7 @@ def main():
         'max_travel_delay_s': float(opt.env.max_travel_delay_s),
         'max_robot_capacity': int(opt.env.max_robot_capacity),
         'conflict_resolution': str(getattr(opt.env, 'conflict_resolution', 'closest_then_capacity')),
+        'reassignment_mode': str(getattr(opt.env, 'reassignment_mode', 'locked_until_pickup')),
         'reward_params': reward_params,
         'decision_dt': int(opt.env.decision_dt),
         'min_episode_steps': int(opt.env.min_episode_steps),
@@ -721,8 +722,18 @@ def main():
     results = []
     metrics_file = os.path.join(output_base, f'evaluation_metrics.log')
     logit_metrics_file = os.path.join(output_base, f'logit_metrics.log')
-    from utils.metrics_calculator import ensure_metrics_log
-    ensure_metrics_log(metrics_file, overwrite=True)
+    from utils.metrics_calculator import ensure_metrics_log, build_metrics_metadata_lines
+    ensure_metrics_log(
+        metrics_file,
+        overwrite=True,
+        metadata_lines=build_metrics_metadata_lines(
+            sumo_cfg_path=str(config.get("sumo_cfg", "")),
+            conflict_resolution=str(config.get("conflict_resolution", "closest_then_capacity")),
+            reward_params=dict(config.get("reward_params", {}) or {}),
+            completion_mode=str(config.get("completion_mode", "dropoff")),
+            reassignment_mode=str(config.get("reassignment_mode", "locked_until_pickup")),
+        ),
+    )
     from utils.logit_metrics_logger import ensure_logit_metrics_log
     ensure_logit_metrics_log(logit_metrics_file)
     

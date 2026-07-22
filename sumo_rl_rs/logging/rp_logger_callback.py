@@ -21,7 +21,7 @@ class RPLoggerCallback(BaseCallback):
     def __init__(self, rp_logger, controller, verbose: int = 0, metrics_log_path: str | None = None,
                  num_robots: int | None = None, seed: int = 0, reset_fn = None, save_model_dir: str | None = None,
                  logit_metrics_log_path: str | None = None, continue_training: bool = False,
-                 config_id: str = ""):
+                 config_id: str = "", metrics_metadata_lines: Optional[List[str]] = None):
         super().__init__(verbose)
         self.rp_logger = rp_logger                # RidepoolLogger
         self.controller = controller              # RLControllerAdapter
@@ -33,6 +33,7 @@ class RPLoggerCallback(BaseCallback):
         self.save_model_dir = save_model_dir      # Directory to save models after each rollout
         self.continue_training = continue_training
         self.config_id = config_id
+        self.metrics_metadata_lines = list(metrics_metadata_lines or [])
         self.ep_idx = 0
         self.sum_reward = 0.0
         self.steps_in_ep = 0
@@ -47,7 +48,11 @@ class RPLoggerCallback(BaseCallback):
 
     def _on_training_start(self) -> None:
         if self.metrics_log_path:
-            ensure_metrics_log(self.metrics_log_path, overwrite=not self.continue_training)
+            ensure_metrics_log(
+                self.metrics_log_path,
+                overwrite=not self.continue_training,
+                metadata_lines=self.metrics_metadata_lines,
+            )
         if self.logit_metrics_log_path:
             ensure_logit_metrics_log(self.logit_metrics_log_path, overwrite=not self.continue_training)
 

@@ -13,6 +13,7 @@ from sumo_rl_rs.logging.rp_logger_callback import RPLoggerCallback
 from utils.sumo_bootstrap import start_sumo, make_reset_fn
 import numpy as np
 from utils.feature_fns import make_feature_fn, compute_feature_dim, expand_edge_features
+from utils.metrics_calculator import build_metrics_metadata_lines
 
 # to write PPO output to txt file
 import sys
@@ -337,6 +338,13 @@ callback = RPLoggerCallback(
     save_model_dir=model_save_dir,  # Enable model saving after each rollout
     continue_training=continue_training,
     config_id=str(getattr(cfg, "prefix", "")),
+    metrics_metadata_lines=build_metrics_metadata_lines(
+        sumo_cfg_path=SUMO_CFG,
+        conflict_resolution=CONFLICT_RESOLUTION,
+        reward_params=reward_params,
+        completion_mode=COMPLETION_MODE,
+        reassignment_mode=str(getattr(opt.env, "reassignment_mode", "locked_until_pickup")),
+    ),
 )
 
 if continue_training:
