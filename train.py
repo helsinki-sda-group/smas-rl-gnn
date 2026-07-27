@@ -203,6 +203,9 @@ controller = RLControllerAdapter(
     max_robot_capacity=MAX_ROBOT_CAPACITY, # should match to taxis.rou.xml
     logger= rp_logger,
     conflict_resolution=CONFLICT_RESOLUTION,
+    route_construction=str(getattr(opt.env, "route_construction", "nearest")),
+    route_exhaustive_max_stops=int(getattr(opt.env, "route_exhaustive_max_stops", 8)),
+    route_construction_debug=bool(getattr(opt.env, "route_construction_debug", False)),
     reward_params=reward_params,
 )
 feature_fn = make_feature_fn(
@@ -341,6 +344,7 @@ callback = RPLoggerCallback(
     metrics_metadata_lines=build_metrics_metadata_lines(
         sumo_cfg_path=SUMO_CFG,
         conflict_resolution=CONFLICT_RESOLUTION,
+        route_construction=str(getattr(opt.env, "route_construction", "nearest")),
         reward_params=reward_params,
         completion_mode=COMPLETION_MODE,
         reassignment_mode=str(getattr(opt.env, "reassignment_mode", "locked_until_pickup")),

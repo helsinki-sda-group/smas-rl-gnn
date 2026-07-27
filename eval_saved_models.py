@@ -166,6 +166,9 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             max_robot_capacity=config['max_robot_capacity'],
             logger=rp_logger,
             conflict_resolution=str(config.get('conflict_resolution', 'closest_then_capacity')),
+            route_construction=str(config.get('route_construction', 'nearest')),
+            route_exhaustive_max_stops=int(config.get('route_exhaustive_max_stops', 8)),
+            route_construction_debug=bool(config.get('route_construction_debug', False)),
             reward_params=dict(config.get("reward_params", {}) or {}),
         )
         
@@ -643,6 +646,9 @@ def main():
         'max_travel_delay_s': float(opt.env.max_travel_delay_s),
         'max_robot_capacity': int(opt.env.max_robot_capacity),
         'conflict_resolution': str(getattr(opt.env, 'conflict_resolution', 'closest_then_capacity')),
+        'route_construction': str(getattr(opt.env, 'route_construction', 'nearest')),
+        'route_exhaustive_max_stops': int(getattr(opt.env, 'route_exhaustive_max_stops', 8)),
+        'route_construction_debug': bool(getattr(opt.env, 'route_construction_debug', False)),
         'reassignment_mode': str(getattr(opt.env, 'reassignment_mode', 'locked_until_pickup')),
         'reward_params': reward_params,
         'decision_dt': int(opt.env.decision_dt),
@@ -729,6 +735,7 @@ def main():
         metadata_lines=build_metrics_metadata_lines(
             sumo_cfg_path=str(config.get("sumo_cfg", "")),
             conflict_resolution=str(config.get("conflict_resolution", "closest_then_capacity")),
+            route_construction=str(config.get("route_construction", "nearest")),
             reward_params=dict(config.get("reward_params", {}) or {}),
             completion_mode=str(config.get("completion_mode", "dropoff")),
             reassignment_mode=str(config.get("reassignment_mode", "locked_until_pickup")),

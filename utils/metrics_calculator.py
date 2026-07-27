@@ -61,6 +61,7 @@ def build_metrics_metadata_lines(
     *,
     sumo_cfg_path: str,
     conflict_resolution: str,
+    route_construction: Optional[str] = None,
     reward_params: Optional[Dict],
     completion_mode: Optional[str] = None,
     reassignment_mode: Optional[str] = None,
@@ -73,6 +74,8 @@ def build_metrics_metadata_lines(
         f"instance={instance}",
         f"resolver={str(conflict_resolution)}",
     ]
+    if route_construction is not None:
+        line_parts.append(f"route_construction={str(route_construction)}")
     if completion_mode is not None:
         line_parts.append(f"completion_mode={str(completion_mode)}")
     if reassignment_mode is not None:

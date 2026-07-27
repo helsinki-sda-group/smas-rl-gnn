@@ -22,6 +22,29 @@ class Task:
     is_assigned: bool = False            # reservation currently assigned to some taxi
 
 
+@dataclass(frozen=True)
+class RouteStop:
+    """One remaining stop in a route-construction search.
+
+    time values are absolute simulation timestamps when evaluated.
+    """
+
+    res_id: str
+    kind: str  # "pickup" | "dropoff"
+    edge: str
+
+
+@dataclass(frozen=True)
+class RouteScore:
+    predicted_route_reward: float
+    max_travel_time_excess_onboard: float
+    max_travel_time_excess_overall: float
+    total_route_duration: float
+    predicted_valid_completion_count: int
+    total_weighted_wait_penalty: float
+    total_weighted_travel_penalty: float
+
+
 def compute_coordination_step_counters(
     *,
     robots: Sequence[str],
@@ -170,6 +193,9 @@ class RLControllerAdapter:
         logger: Optional["RidepoolLogger"]=None,
         conflict_resolution: str = "closest_then_capacity", # "capacity" | "closest" | "closest_then_capacity" | "logit_diff" | "random"
         reassignment_mode: str = "locked_until_pickup",
+        route_construction: str = "nearest",
+        route_exhaustive_max_stops: int = 8,
+        route_construction_debug: bool = False,
         reward_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
@@ -201,6 +227,13 @@ class RLControllerAdapter:
             reassignment_mode: ownership policy for assigned-but-not-picked reservations.
                 "locked_until_pickup" keeps a reservation bound to its current taxi until pickup.
                 "free" preserves the legacy behavior where assigned reservations may be re-bid.
+            route_construction: ordered-stop routing heuristic for dispatch sequence rebuild.
+                "nearest": existing nearest-edge greedy behavior.
+                "deadline_travel": exhaustive reward-aligned search (legacy name retained).
+                "reward_aligned": alias for "deadline_travel".
+            route_exhaustive_max_stops: maximum remaining stop count for exhaustive search.
+                If exceeded, fallback to "nearest".
+            route_construction_debug: emit lightweight debug diagnostics for route reconstruction.
             reward_params: reward configuration (reward_type, weights, caps)
         """
         self.sumo = sumo
@@ -218,6 +251,10 @@ class RLControllerAdapter:
         assert self.conflict_resolution in {"capacity", "closest", "closest_then_capacity", "logit_diff", "random"}, "conflict resolution must be 'capacity', 'closest', 'closest_then_capacity', 'logit_diff', or 'random'"
         self.reassignment_mode = str(reassignment_mode).lower().strip()
         assert self.reassignment_mode in {"locked_until_pickup", "free"}, "reassignment_mode must be 'locked_until_pickup' or 'free'"
+        self.route_construction = self._resolve_route_construction_mode(route_construction)
+        self.route_exhaustive_max_stops = max(0, int(route_exhaustive_max_stops))
+        self.route_construction_debug = bool(route_construction_debug)
+        self._last_route_construction_diag_by_robot: Dict[str, Dict[str, Any]] = {}
         self._warned_missing_logit_diff = False
 
         self.reset_fn = reset_fn
@@ -342,6 +379,42 @@ class RLControllerAdapter:
             allowed_list = ", ".join(sorted(allowed))
             raise ValueError(f"Unknown candidates_sorting='{mode}'. Expected one of: {allowed_list}")
         return mode
+
+    @staticmethod
+    def _resolve_route_construction_mode(mode: str) -> str:
+        value = str(mode).strip().lower()
+        aliases = {
+            "reward_aligned": "deadline_travel",
+        }
+        value = aliases.get(value, value)
+        allowed = {"nearest", "deadline_travel"}
+        if value not in allowed:
+            allowed_list = ", ".join(sorted(allowed))
+            raise ValueError(f"Unknown route_construction='{mode}'. Expected one of: {allowed_list}")
+        return value
+
+    @staticmethod
+    def _is_valid_completion_times(
+        *,
+        pickup_time: Optional[float],
+        dropoff_time: Optional[float],
+        pickup_deadline: Optional[float],
+        dropoff_deadline: Optional[float],
+    ) -> bool:
+        """True iff pickup_time <= pickup_deadline AND dropoff_time <= dropoff_deadline."""
+        if pickup_time is None or dropoff_time is None or pickup_deadline is None or dropoff_deadline is None:
+            return False
+        return float(pickup_time) <= float(pickup_deadline) and float(dropoff_time) <= float(dropoff_deadline)
+
+    def _is_valid_completion(self, res_id: str) -> bool:
+        """Lifecycle-backed validity check used by real reward accounting."""
+        info = self._task_lifecycle.get(str(res_id), {})
+        return self._is_valid_completion_times(
+            pickup_time=info.get("actual_pickup_time"),
+            dropoff_time=info.get("actual_dropoff_time"),
+            pickup_deadline=info.get("pickup_deadline"),
+            dropoff_deadline=info.get("dropoff_deadline"),
+        )
 
     @staticmethod
     def _make_rew_accum() -> Dict[str, Any]:
@@ -651,6 +724,431 @@ class RLControllerAdapter:
         # return the reservation id sequence (ids may repeat)
         return seq
 
+    @staticmethod
+    def _stable_stop_key(stop: RouteStop) -> tuple[str, int]:
+        kind_rank = 0 if stop.kind == "pickup" else 1
+        return (str(stop.res_id), kind_rank)
+
+    @staticmethod
+    def _generate_valid_stop_orders(
+        *,
+        stops: Sequence[RouteStop],
+        initially_picked: Set[str],
+        initial_occupancy: int,
+        capacity: int,
+    ) -> list[list[RouteStop]]:
+        """Generate all valid stop orders with precedence/capacity pruning."""
+        if not stops:
+            return [[]]
+
+        if capacity < 0 or initial_occupancy < 0 or initial_occupancy > capacity:
+            return []
+
+        pickups_by_res: Dict[str, RouteStop] = {}
+        dropoffs_by_res: Dict[str, RouteStop] = {}
+        unpicked_ids: Set[str] = set()
+        for stop in stops:
+            rid = str(stop.res_id)
+            if stop.kind == "pickup":
+                pickups_by_res[rid] = stop
+                unpicked_ids.add(rid)
+            else:
+                dropoffs_by_res[rid] = stop
+
+        ordered_stops = sorted(list(stops), key=RLControllerAdapter._stable_stop_key)
+        used: Set[tuple[str, str]] = set()
+        picked_in_seq: Set[str] = set()
+        current: list[RouteStop] = []
+        all_valid: list[list[RouteStop]] = []
+
+        def _can_take(stop: RouteStop, occ: int) -> bool:
+            key = (str(stop.res_id), str(stop.kind))
+            if key in used:
+                return False
+            if stop.kind == "pickup":
+                return occ + 1 <= capacity
+            # dropoff
+            rid = str(stop.res_id)
+            if rid in unpicked_ids and rid not in picked_in_seq and rid not in initially_picked:
+                return False
+            return occ - 1 >= 0
+
+        def _dfs(occ: int) -> None:
+            if len(current) == len(ordered_stops):
+                all_valid.append(list(current))
+                return
+
+            for stop in ordered_stops:
+                if not _can_take(stop, occ):
+                    continue
+
+                key = (str(stop.res_id), str(stop.kind))
+                used.add(key)
+                current.append(stop)
+                prev_occ = occ
+                if stop.kind == "pickup":
+                    picked_in_seq.add(str(stop.res_id))
+                    occ = occ + 1
+                else:
+                    occ = occ - 1
+
+                _dfs(occ)
+
+                occ = prev_occ
+                if stop.kind == "pickup":
+                    picked_in_seq.discard(str(stop.res_id))
+                current.pop()
+                used.remove(key)
+
+        _dfs(int(initial_occupancy))
+        return all_valid
+
+    def _score_route_stop_order(
+        self,
+        *,
+        sequence: Sequence[RouteStop],
+        start_edge: str,
+        start_time: float,
+        travel_time_fn: Callable[[str, str], float],
+        tasks_by_res: Dict[str, Task],
+        actual_pickup_time_by_res: Dict[str, Optional[float]],
+        initially_picked: Set[str],
+    ) -> tuple[RouteScore, dict[str, dict[str, float]]]:
+        """Simulate a sequence and compute reward-aligned score for exhaustive routing."""
+        cur_edge = str(start_edge)
+        now = float(start_time)
+        travel_cache: Dict[tuple[str, str], float] = {}
+        times: Dict[str, Dict[str, float]] = {}
+
+        for stop in sequence:
+            edge = str(stop.edge)
+            key = (cur_edge, edge)
+            if key in travel_cache:
+                travel = travel_cache[key]
+            else:
+                travel = float(travel_time_fn(cur_edge, edge)) if edge else float("inf")
+                travel_cache[key] = travel
+            if (not np.isfinite(travel)) or travel < 0.0:
+                travel = float("inf")
+            now += travel
+            cur_edge = edge
+
+            rec = times.setdefault(str(stop.res_id), {})
+            if stop.kind == "pickup":
+                rec["pickup"] = float(now)
+            else:
+                rec["dropoff"] = float(now)
+
+        route_duration = max(0.0, float(now) - float(start_time))
+
+        reward_type = str(self.reward_type)
+        if reward_type not in {"wait_travel", "deadline"}:
+            raise ValueError(
+                f"route_construction='deadline_travel' requires reward_type in {{'wait_travel','deadline'}}; got '{self.reward_type}'"
+            )
+
+        w_comp = float(self.reward_weights.get("comp", 1.0))
+        w_wait = float(self.reward_weights.get("wait", 1.5))
+        w_travel = float(self.reward_weights.get("travel", 2.0))
+        w_deadline = float(self.reward_weights.get("deadline", 10.0))
+
+        wait_cap = max(1e-6, float(self.reward_caps.get("wait", 600.0)))
+        travel_cap = max(1e-6, float(self.reward_caps.get("travel", 90.0)))
+        deadline_cap = max(1e-6, float(self.reward_caps.get("deadline", 600.0)))
+
+        valid_completion_count = 0
+        total_weighted_wait_penalty = 0.0
+        total_weighted_travel_penalty = 0.0
+        total_weighted_deadline_penalty = 0.0
+        max_travel_excess_overall = 0.0
+        max_travel_excess_onboard = 0.0
+
+        for rid in sorted(tasks_by_res.keys()):
+            task = tasks_by_res[rid]
+            rec = times.get(rid, {})
+            pickup_t = rec.get("pickup")
+            dropoff_t = rec.get("dropoff")
+            if dropoff_t is None:
+                continue
+
+            if rid in initially_picked:
+                actual_pickup = actual_pickup_time_by_res.get(rid)
+                pickup_base = float(actual_pickup) if actual_pickup is not None else float(start_time)
+                pickup_for_validity: Optional[float] = float(actual_pickup) if actual_pickup is not None else float(start_time)
+            else:
+                if pickup_t is None:
+                    continue
+                pickup_base = float(pickup_t)
+                pickup_for_validity = float(pickup_t)
+
+                predicted_wait_time = max(0.0, float(pickup_t) - float(task.reservationTime))
+                wait_penalty = -min(predicted_wait_time, wait_cap) / wait_cap
+                total_weighted_wait_penalty += w_wait * wait_penalty
+
+            predicted_travel_time = max(0.0, float(dropoff_t) - float(pickup_base))
+            travel_excess = max(0.0, predicted_travel_time - max(0.0, float(task.estTravelTime)))
+            travel_penalty = -min(travel_excess, travel_cap) / travel_cap
+            total_weighted_travel_penalty += w_travel * travel_penalty
+
+            max_travel_excess_overall = max(max_travel_excess_overall, travel_excess)
+            if rid in initially_picked:
+                max_travel_excess_onboard = max(max_travel_excess_onboard, travel_excess)
+
+            if self.completion_mode == "pickup":
+                completion_valid = False
+            elif self.completion_mode == "valid_dropoff":
+                completion_valid = self._is_valid_completion_times(
+                    pickup_time=pickup_for_validity,
+                    dropoff_time=float(dropoff_t),
+                    pickup_deadline=float(task.pickupDeadline),
+                    dropoff_deadline=float(task.dropoffDeadline),
+                )
+            else:
+                completion_valid = True
+
+            if completion_valid:
+                valid_completion_count += 1
+
+            if reward_type == "deadline":
+                # Reuse the existing deadline penalty semantics: weighted tardiness at pickup and dropoff.
+                if rid not in initially_picked and pickup_t is not None:
+                    pickup_late = max(0.0, float(pickup_t) - float(task.pickupDeadline))
+                    total_weighted_deadline_penalty += w_deadline * (-min(pickup_late, deadline_cap) / deadline_cap)
+                dropoff_late = max(0.0, float(dropoff_t) - float(task.dropoffDeadline))
+                total_weighted_deadline_penalty += w_deadline * (-min(dropoff_late, deadline_cap) / deadline_cap)
+
+        completion_reward = w_comp * float(valid_completion_count)
+        if reward_type == "wait_travel":
+            predicted_route_reward = completion_reward + total_weighted_wait_penalty + total_weighted_travel_penalty
+        else:
+            predicted_route_reward = completion_reward + total_weighted_deadline_penalty
+
+        score = RouteScore(
+            predicted_route_reward=float(predicted_route_reward),
+            max_travel_time_excess_onboard=float(max_travel_excess_onboard),
+            max_travel_time_excess_overall=float(max_travel_excess_overall),
+            total_route_duration=float(route_duration),
+            predicted_valid_completion_count=int(valid_completion_count),
+            total_weighted_wait_penalty=float(total_weighted_wait_penalty),
+            total_weighted_travel_penalty=float(total_weighted_travel_penalty),
+        )
+        return score, times
+
+    @staticmethod
+    def _score_sort_key(
+        score: RouteScore,
+        sequence_signature: tuple[tuple[str, str], ...],
+    ) -> tuple[float, float, float, float, tuple[tuple[str, str], ...]]:
+        precision = 6
+        return (
+            -round(float(score.predicted_route_reward), precision),
+            round(float(score.max_travel_time_excess_onboard), precision),
+            round(float(score.max_travel_time_excess_overall), precision),
+            round(float(score.total_route_duration), precision),
+            sequence_signature,
+        )
+
+    @staticmethod
+    def _stable_sequence_signature(sequence: Sequence[RouteStop]) -> tuple[tuple[str, str], ...]:
+        return tuple((str(stop.res_id), str(stop.kind)) for stop in sequence)
+
+    def _route_diag(self, rid: str, diag: Dict[str, Any]) -> None:
+        self._last_route_construction_diag_by_robot[str(rid)] = dict(diag)
+        if not self.route_construction_debug:
+            return
+        if self.logger:
+            try:
+                self.logger.log_debug(self._now(), "route-construction", {"rid": str(rid), **diag})
+                return
+            except Exception:
+                pass
+        print(f"[route-construction] rid={rid} {diag}")
+
+    def _build_pd_sequence(
+        self,
+        *,
+        rid: str,
+        base_ids: list[str],
+        res_index: dict[str, object],
+        already_picked: set[str],
+        current_edge: str,
+        start_time: float,
+    ) -> list[str]:
+        """Build dispatch sequence using selected route_construction heuristic."""
+        if not base_ids:
+            self._route_diag(rid, {"mode": self.route_construction, "used_exhaustive": False, "fallback": False, "valid_sequences": 0, "score": None})
+            return []
+
+        if self.route_construction == "nearest":
+            seq = self._greedy_pd_sequence(rid, base_ids, res_index, already_picked)
+            self._route_diag(rid, {"mode": self.route_construction, "used_exhaustive": False, "fallback": False, "valid_sequences": 0, "score": None})
+            return seq
+
+        # deadline_travel / reward_aligned mode
+        base_order = [r for r in base_ids if r in res_index and not self._is_completed(res_index.get(r))]
+        initial_picked = {r for r in base_order if r in already_picked}
+        picked_prefix = [r for r in base_order if r in initial_picked]
+
+        stops: list[RouteStop] = []
+        for res_id in base_order:
+            res_obj = res_index.get(res_id)
+            if res_obj is None:
+                continue
+            if res_id in initial_picked:
+                d_edge = self._edge_for_dropoff(res_obj)
+                if d_edge:
+                    stops.append(RouteStop(res_id=str(res_id), kind="dropoff", edge=d_edge))
+            else:
+                p_edge = self._edge_for_pickup(res_obj)
+                d_edge = self._edge_for_dropoff(res_obj)
+                if p_edge:
+                    stops.append(RouteStop(res_id=str(res_id), kind="pickup", edge=p_edge))
+                if d_edge:
+                    stops.append(RouteStop(res_id=str(res_id), kind="dropoff", edge=d_edge))
+
+        if not stops:
+            self._route_diag(rid, {"mode": self.route_construction, "used_exhaustive": True, "fallback": False, "valid_sequences": 1, "score": None})
+            return []
+
+        if self.route_exhaustive_max_stops > 0 and len(stops) > self.route_exhaustive_max_stops:
+            seq = self._greedy_pd_sequence(rid, base_order, res_index, already_picked)
+            self._route_diag(
+                rid,
+                {
+                    "mode": self.route_construction,
+                    "used_exhaustive": False,
+                    "fallback": True,
+                    "fallback_reason": "max_stops",
+                    "remaining_stops": int(len(stops)),
+                    "max_stops": int(self.route_exhaustive_max_stops),
+                    "valid_sequences": 0,
+                    "score": None,
+                },
+            )
+            return seq
+
+        cap = int(self._get_vehicle_capacity(rid))
+        initial_occupancy = int(len(initial_picked))
+        if cap <= 0 or initial_occupancy > cap:
+            seq = self._greedy_pd_sequence(rid, base_order, res_index, already_picked)
+            self._route_diag(
+                rid,
+                {
+                    "mode": self.route_construction,
+                    "used_exhaustive": False,
+                    "fallback": True,
+                    "fallback_reason": "capacity_invalid",
+                    "remaining_stops": int(len(stops)),
+                    "capacity": int(cap),
+                    "initial_occupancy": int(initial_occupancy),
+                    "valid_sequences": 0,
+                    "score": None,
+                },
+            )
+            return seq
+
+        valid_sequences = self._generate_valid_stop_orders(
+            stops=stops,
+            initially_picked=initial_picked,
+            initial_occupancy=initial_occupancy,
+            capacity=cap,
+        )
+
+        if not valid_sequences:
+            seq = self._greedy_pd_sequence(rid, base_order, res_index, already_picked)
+            self._route_diag(
+                rid,
+                {
+                    "mode": self.route_construction,
+                    "used_exhaustive": False,
+                    "fallback": True,
+                    "fallback_reason": "no_valid_sequence",
+                    "remaining_stops": int(len(stops)),
+                    "valid_sequences": 0,
+                    "score": None,
+                },
+            )
+            return seq
+
+        tasks_by_res: Dict[str, Task] = {}
+        actual_pickup_time_by_res: Dict[str, Optional[float]] = {}
+        for res_id in sorted(set(s.res_id for s in stops)):
+            res_obj = res_index.get(res_id)
+            if res_obj is None:
+                continue
+            task = self._task_from_reservation(str(res_id), res_obj)
+            tasks_by_res[str(res_id)] = task
+            lc = self._task_lifecycle.get(str(res_id), {})
+            raw_pick = lc.get("actual_pickup_time")
+            actual_pickup_time_by_res[str(res_id)] = float(raw_pick) if raw_pick is not None else None
+
+        tt_cache: Dict[tuple[str, str], float] = {}
+
+        def _travel_time(from_edge: str, to_edge: str) -> float:
+            key = (str(from_edge), str(to_edge))
+            if key in tt_cache:
+                return tt_cache[key]
+            val = float(self._estimate_travel_time(str(from_edge), str(to_edge)))
+            tt_cache[key] = val
+            return val
+
+        best_seq: Optional[list[RouteStop]] = None
+        best_score: Optional[RouteScore] = None
+        best_key: Optional[tuple[float, float, float, float, tuple[tuple[str, str], ...]]] = None
+
+        for seq_stops in valid_sequences:
+            score, _times = self._score_route_stop_order(
+                sequence=seq_stops,
+                start_edge=current_edge,
+                start_time=start_time,
+                travel_time_fn=_travel_time,
+                tasks_by_res=tasks_by_res,
+                actual_pickup_time_by_res=actual_pickup_time_by_res,
+                initially_picked=initial_picked,
+            )
+            sig = self._stable_sequence_signature(seq_stops)
+            key = self._score_sort_key(score, sig)
+            if best_seq is None:
+                best_seq = list(seq_stops)
+                best_score = score
+                best_key = key
+                continue
+            assert best_key is not None
+            if key < best_key:
+                best_seq = list(seq_stops)
+                best_score = score
+                best_key = key
+
+        if best_seq is None:
+            seq = self._greedy_pd_sequence(rid, base_order, res_index, already_picked)
+            self._route_diag(
+                rid,
+                {
+                    "mode": self.route_construction,
+                    "used_exhaustive": False,
+                    "fallback": True,
+                    "fallback_reason": "selection_failed",
+                    "valid_sequences": int(len(valid_sequences)),
+                    "score": None,
+                },
+            )
+            return seq
+
+        result_seq = list(picked_prefix) + [s.res_id for s in best_seq]
+        self._route_diag(
+            rid,
+            {
+                "mode": self.route_construction,
+                "used_exhaustive": True,
+                "fallback": False,
+                "remaining_stops": int(len(stops)),
+                "valid_sequences": int(len(valid_sequences)),
+                "score": self._score_sort_key(best_score, self._stable_sequence_signature(best_seq)),
+                "predicted_route_reward": float(best_score.predicted_route_reward),
+            },
+        )
+        return result_seq
+
     def _estimate_sequence_candidate_prediction(
         self,
         *,
@@ -660,9 +1158,10 @@ class RLControllerAdapter:
         current_edge: Optional[str] = None,
         current_customer_ids: Optional[Sequence[str]] = None,
     ) -> tuple[float, float, float]:
-        """Estimate (score, pickup_time, pickup_distance) using greedy POI sequencing.
+        """Estimate (score, pickup_time, pickup_distance) using configured PD sequencing.
 
-        The score follows the wait_travel/valid_dropoff approximation requested by the user.
+        Route order is built through _build_pd_sequence, so it follows route_construction
+        (nearest or exhaustive reward-aligned with fallback safeguards).
         This method is side-effect free: it only reads controller/SUMO state.
         """
         if candidate.id not in res_index:
@@ -682,12 +1181,19 @@ class RLControllerAdapter:
 
         base_ids = list(dict.fromkeys(prev_ids + list(current_customer_ids) + [candidate.id]))
         already_picked = {r for r in base_ids if (r in res_index) and self._is_picked(res_index[r])}
+        now = float(self._now())
 
-        seq = self._greedy_pd_sequence(rid, base_ids, res_index, already_picked)
+        seq = self._build_pd_sequence(
+            rid=rid,
+            base_ids=base_ids,
+            res_index=res_index,
+            already_picked=already_picked,
+            current_edge=str(current_edge),
+            start_time=float(now),
+        )
         if not seq:
             raise ValueError("empty greedy sequence")
 
-        now = float(self._now())
         w_comp = float(self.reward_weights.get("comp", 1.0))
         w_wait = float(self.reward_weights.get("wait", 1.5))
         w_travel = float(self.reward_weights.get("travel", 2.0))
@@ -779,10 +1285,17 @@ class RLControllerAdapter:
         current_edge: str,
         current_customer_ids: Sequence[str],
     ) -> Dict[str, Dict[str, float]]:
-        """Return predicted pickup/dropoff times per task for a greedy PD sequence."""
+        """Return predicted pickup/dropoff times per task for configured PD sequence."""
         base_ids = list(dict.fromkeys(list(res_ids)))
         already_picked = {r for r in base_ids if (r in res_index) and self._is_picked(res_index[r])}
-        seq = self._greedy_pd_sequence(rid, base_ids, res_index, already_picked)
+        seq = self._build_pd_sequence(
+            rid=rid,
+            base_ids=base_ids,
+            res_index=res_index,
+            already_picked=already_picked,
+            current_edge=str(current_edge),
+            start_time=float(self._now()),
+        )
         if not seq:
             raise ValueError("empty greedy sequence")
 
@@ -847,11 +1360,16 @@ class RLControllerAdapter:
         normalized_excess_ride_time = min(max(0.0, ride_time - float(task.estTravelTime)), travel_cap) / travel_cap
 
         if preserve_actual_pickup_validity and actual_pickup_time is not None:
-            pickup_ok = float(actual_pickup_time) <= float(task.pickupDeadline)
+            pickup_for_validity: Optional[float] = float(actual_pickup_time)
         else:
-            pickup_ok = float(pickup_time_for_wait) <= float(task.pickupDeadline)
-        dropoff_ok = float(predicted_dropoff_time) <= float(task.dropoffDeadline)
-        valid_completion = pickup_ok and dropoff_ok
+            pickup_for_validity = float(pickup_time_for_wait)
+
+        valid_completion = self._is_valid_completion_times(
+            pickup_time=pickup_for_validity,
+            dropoff_time=float(predicted_dropoff_time),
+            pickup_deadline=float(task.pickupDeadline),
+            dropoff_deadline=float(task.dropoffDeadline),
+        )
 
         return (
             w_comp * float(int(valid_completion))
@@ -1800,7 +2318,14 @@ class RLControllerAdapter:
                 # FULL RESET strategy: every active reservation appears twice
                 # seq = self._build_sequence_reset_twice(base_ids)
                 already_picked = {r for r in base_ids if (r in res_index) and self._is_picked(res_index[r])}
-                seq = self._greedy_pd_sequence(rid, base_ids, res_index, already_picked)
+                seq = self._build_pd_sequence(
+                    rid=rid,
+                    base_ids=base_ids,
+                    res_index=res_index,
+                    already_picked=already_picked,
+                    current_edge=str(self._get_taxi_current_edge(rid)),
+                    start_time=float(self._now()),
+                )
 
                 # log pre-dispatch
                 try:
@@ -2260,17 +2785,6 @@ class RLControllerAdapter:
         W_COMP_acc = float(self.reward_weights.get("comp", 1.0))
         completion_by_robot: Dict[str, float] = {rid: 0.0 for rid in robots}
 
-        def _is_valid_completion(res_id: str) -> bool:
-            """True iff pickup_time <= pickup_deadline AND dropoff_time <= dropoff_deadline."""
-            info = self._task_lifecycle.get(res_id, {})
-            ptime = info.get("actual_pickup_time")
-            dtime = info.get("actual_dropoff_time")
-            pdl = info.get("pickup_deadline")
-            ddl = info.get("dropoff_deadline")
-            if ptime is None or dtime is None or pdl is None or ddl is None:
-                return False
-            return float(ptime) <= float(pdl) and float(dtime) <= float(ddl)
-
         if self.completion_mode == "pickup":
             for rid in robots:
                 cnt = len(picked_up_ids_by_robot[rid])
@@ -2281,7 +2795,7 @@ class RLControllerAdapter:
             for rid in robots:
                 for res_id in dropped_off_ids_by_robot[rid]:
                     self._rew_accum["dropoff_event_count"] += 1
-                    if _is_valid_completion(res_id):
+                    if self._is_valid_completion(res_id):
                         self._rew_accum["valid_dropoff_count"] += 1
                     else:
                         self._rew_accum["invalid_dropoff_count"] += 1
@@ -2290,7 +2804,7 @@ class RLControllerAdapter:
             for rid in robots:
                 for res_id in dropped_off_ids_by_robot[rid]:
                     self._rew_accum["dropoff_event_count"] += 1
-                    if _is_valid_completion(res_id):
+                    if self._is_valid_completion(res_id):
                         completion_by_robot[rid] += 1.0
                         self._rew_accum["completion_event_count"] += 1
                         self._rew_accum["completion_event_sum"] += W_COMP_acc
@@ -2309,7 +2823,7 @@ class RLControllerAdapter:
                     self._rew_accum["completion_event_sum"] += W_COMP_acc
                     self._rew_accum["dropoff_event_count"] += 1
                     self._rew_accum["dropoff_event_sum"] += W_COMP_acc
-                    if _is_valid_completion(res_id):
+                    if self._is_valid_completion(res_id):
                         self._rew_accum["valid_dropoff_count"] += 1
                         self._rew_accum["valid_dropoff_sum"] += W_COMP_acc
                     else:

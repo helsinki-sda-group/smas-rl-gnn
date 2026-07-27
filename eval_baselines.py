@@ -165,6 +165,7 @@ with open(metrics_log_path, "w", encoding="utf-8") as f:
     for line in build_metrics_metadata_lines(
         sumo_cfg_path=SUMO_CFG,
         conflict_resolution=CONFLICT_RESOLUTION,
+        route_construction=str(getattr(opt.env, "route_construction", "nearest")),
         reward_params=reward_params,
         completion_mode=COMPLETION_MODE,
         reassignment_mode=str(getattr(opt.env, "reassignment_mode", "locked_until_pickup")),
@@ -222,6 +223,9 @@ for seed in SEEDS[:NUM_SEEDS]:
                 logger=rp_logger,
                 respect_sumo_end=True,
                 conflict_resolution=CONFLICT_RESOLUTION,
+                route_construction=str(getattr(opt.env, "route_construction", "nearest")),
+                route_exhaustive_max_stops=int(getattr(opt.env, "route_exhaustive_max_stops", 8)),
+                route_construction_debug=bool(getattr(opt.env, "route_construction_debug", False)),
                 reward_params=reward_params,
             )
         except NotImplementedError as e:
