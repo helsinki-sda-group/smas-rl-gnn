@@ -9,8 +9,9 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 
-ID_COLUMNS = {"source_file", "instance", "resolver", "pol"}
+ID_COLUMNS = {"source_file", "instance", "resolver", "route_construction", "pol"}
 DEFAULT_OUTPUT_DIR = "metrics_wide_plots"
+ROUTE_CONSTRUCTION_OUTPUT_SUBDIR = "route_counstruction_cmp"
 RATIO_METRICS = {"crat", "conf_ratio"}
 
 
@@ -44,6 +45,11 @@ def parse_args() -> argparse.Namespace:
         "--resolver-cmp",
         action="store_true",
         help="Create one bar-chart figure per metric with one subplot per resolver",
+    )
+    parser.add_argument(
+        "--route-construction",
+        action="store_true",
+        help="Compare metrics across route_construction methods (requires same resolver in all rows)",
     )
     return parser.parse_args()
 
@@ -107,11 +113,30 @@ def select_metrics(requested_metrics: list[str], available_metrics: list[str]) -
 
 def resolve_plot_types(args: argparse.Namespace) -> list[str]:
     requested_types: list[str] = []
+    if args.route_construction:
+        requested_types.append("route_construction_cmp")
     if args.resolver_cmp:
         requested_types.append("resolver_cmp")
     if requested_types:
         return requested_types
     return ["resolver_cmp"]
+
+
+def _route_construction_of_row(row: dict[str, object]) -> str:
+    value = row.get("route_construction")
+    text = str(value).strip() if value is not None else ""
+    return text if text else "nearest"
+
+
+def _validate_single_resolver(rows: list[dict[str, object]]) -> str:
+    resolvers = sorted({str(row.get("resolver", "")).strip() for row in rows if str(row.get("resolver", "")).strip()})
+    if len(resolvers) != 1:
+        joined = ", ".join(resolvers) if resolvers else "<none>"
+        raise ValueError(
+            "--route-construction requires all rows to have the same resolver, "
+            f"but found: {joined}"
+        )
+    return resolvers[0]
 
 
 def safe_number(value: object) -> float | None:
@@ -216,6 +241,75 @@ def plot_resolver_cmp(rows: list[dict[str, object]], metrics: list[str], output_
     return saved_paths
 
 
+def plot_route_construction_cmp(rows: list[dict[str, object]], metrics: list[str], output_dir: Path) -> list[Path]:
+    _validate_single_resolver(rows)
+    route_dir = output_dir / ROUTE_CONSTRUCTION_OUTPUT_SUBDIR
+    route_dir.mkdir(parents=True, exist_ok=True)
+
+    route_modes = sorted({_route_construction_of_row(row) for row in rows})
+    saved_paths: list[Path] = []
+
+    for metric in metrics:
+        y_min, y_max = metric_limits(rows, metric)
+        figure, axes = plt.subplots(
+            nrows=1,
+            ncols=len(route_modes),
+            figsize=(max(5 * len(route_modes), 6), 5),
+            squeeze=False,
+            sharey=True,
+        )
+        axis_row = axes[0]
+        figure.suptitle(f"{metric}: comparison across route_construction", fontsize=14)
+
+        for axis, route_mode in zip(axis_row, route_modes):
+            route_rows = [row for row in rows if _route_construction_of_row(row) == route_mode]
+            route_rows.sort(key=lambda row: str(row.get("pol", "")))
+
+            policies = [str(row["pol"]) for row in route_rows if row.get("pol") is not None]
+            means = [safe_number(row.get(metric)) for row in route_rows]
+            stds = [(safe_number(row.get(f"{metric}_std")) or 0.0) for row in route_rows]
+
+            filtered = [
+                (policy, mean, std)
+                for policy, mean, std in zip(policies, means, stds)
+                if mean is not None
+            ]
+
+            if not filtered:
+                axis.set_visible(False)
+                continue
+
+            policies = [item[0] for item in filtered]
+            means = [item[1] for item in filtered]
+            stds = [item[2] for item in filtered]
+            positions = list(range(len(policies)))
+
+            axis.bar(
+                positions,
+                means,
+                yerr=stds,
+                capsize=4,
+                color="#4C78A8",
+                edgecolor="#2F3E4E",
+                alpha=0.9,
+            )
+            axis.set_title(route_mode)
+            axis.set_xticks(positions)
+            axis.set_xticklabels(policies, rotation=45, ha="right")
+            axis.set_ylim(y_min, y_max)
+            axis.grid(axis="y", alpha=0.3, linestyle="--")
+            axis.set_axisbelow(True)
+
+        axis_row[0].set_ylabel(metric)
+        figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.93))
+        output_path = route_dir / f"{metric}_route_construction_cmp.png"
+        figure.savefig(output_path, dpi=200, bbox_inches="tight")
+        plt.close(figure)
+        saved_paths.append(output_path)
+
+    return saved_paths
+
+
 def main() -> int:
     args = parse_args()
     rows, available_metrics = load_rows(args.csv_path)
@@ -228,6 +322,8 @@ def main() -> int:
     saved_paths: list[Path] = []
     if "resolver_cmp" in plot_types:
         saved_paths.extend(plot_resolver_cmp(rows, metrics, output_dir))
+    if "route_construction_cmp" in plot_types:
+        saved_paths.extend(plot_route_construction_cmp(rows, metrics, output_dir))
 
     print(f"Saved {len(saved_paths)} plot(s) to {output_dir}")
     return 0

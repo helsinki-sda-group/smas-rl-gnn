@@ -1,5 +1,5 @@
 ﻿env:
-  sumo_cfg: configs/small_net_cap2.sumocfg
+  sumo_cfg: configs/small_net_cap2_wave.sumocfg
   use_gui: false
   R: 6
   K_max: 3
@@ -13,7 +13,10 @@
   max_wait_delay_s: 300.0
   max_travel_delay_s: 240.0
   max_robot_capacity: 2
-  conflict_resolution: closest_then_capacity
+  route_construction: reward_aligned
+  route_exhaustive_max_stops: 8
+  route_construction_debug: false
+  conflict_resolution: random
   candidates_sorting: pickup_distance
   two_hop: true
   two_hop_directed: true

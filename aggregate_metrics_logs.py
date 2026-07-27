@@ -67,6 +67,12 @@ class ParsedLog:
     def instance(self) -> str:
         return self.metadata.get("instance", "unknown")
 
+    @property
+    def route_construction(self) -> str:
+        value = self.metadata.get("route_construction", "nearest")
+        text = str(value).strip()
+        return text if text else "nearest"
+
     def policies(self) -> list[str]:
         names = {row["pol"] for row in self.per_seed_rows if "pol" in row}
         names.update(self.summary_by_policy.keys())
@@ -98,6 +104,12 @@ def _parse_args() -> argparse.Namespace:
         nargs="+",
         default=[],
         help="Additional metric names to append to the default list",
+    )
+    parser.add_argument(
+        "--route-construction",
+        type=str,
+        default="nearest",
+        help="Default route_construction to use when metadata is missing/empty (default: nearest)",
     )
     return parser.parse_args()
 
@@ -196,7 +208,7 @@ def _parse_summary_rows(lines: list[str], header_index: int) -> dict[str, dict[s
     return summary_by_policy
 
 
-def parse_metrics_log(path: Path) -> ParsedLog:
+def parse_metrics_log(path: Path, *, default_route_construction: str = "nearest") -> ParsedLog:
     lines = path.read_text(encoding="utf-8").splitlines()
     per_seed_header_index = _find_header_index(lines, require_token="seed")
     if per_seed_header_index is None:
@@ -204,6 +216,8 @@ def parse_metrics_log(path: Path) -> ParsedLog:
 
     summary_header_index = _find_header_index(lines, require_marker=SUMMARY_SUFFIX)
     metadata = _parse_metadata(lines[:per_seed_header_index])
+    if not str(metadata.get("route_construction", "")).strip():
+        metadata["route_construction"] = str(default_route_construction)
     per_seed_rows = _parse_per_seed_rows(lines, per_seed_header_index, summary_header_index)
     summary_by_policy = {}
     if summary_header_index is not None:
@@ -354,6 +368,7 @@ def build_output_rows(parsed_logs: list[ParsedLog], metric_names: list[str], inc
                 "source_file": parsed_log.path.name,
                 "instance": parsed_log.instance,
                 "resolver": parsed_log.resolver,
+                "route_construction": parsed_log.route_construction,
                 "pol": policy,
             }
             for metric_name in metric_names:
@@ -400,7 +415,8 @@ def main() -> int:
         print(f"No metrics*.log files found in {folder}", file=sys.stderr)
         return 1
 
-    parsed_logs = [parse_metrics_log(path) for path in log_paths]
+    default_route_construction = str(getattr(args, "route_construction", "nearest") or "nearest").strip() or "nearest"
+    parsed_logs = [parse_metrics_log(path, default_route_construction=default_route_construction) for path in log_paths]
     known_metrics = set(available_metrics(parsed_logs))
     unknown_metrics = [metric for metric in metric_names if metric not in known_metrics]
     if unknown_metrics:
@@ -414,7 +430,7 @@ def main() -> int:
         return 1
 
     rows = build_output_rows(parsed_logs, metric_names, include_std)
-    fieldnames = ["source_file", "instance", "resolver", "pol"]
+    fieldnames = ["source_file", "instance", "resolver", "route_construction", "pol"]
     for metric_name in metric_names:
         fieldnames.append(metric_name)
         if include_std:
