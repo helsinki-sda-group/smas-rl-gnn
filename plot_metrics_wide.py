@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 
 ID_COLUMNS = {"source_file", "instance", "resolver", "pol"}
 DEFAULT_OUTPUT_DIR = "metrics_wide_plots"
+RATIO_METRICS = {"crat", "conf_ratio"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -122,6 +123,9 @@ def safe_number(value: object) -> float | None:
 
 
 def metric_limits(rows: list[dict[str, object]], metric: str) -> tuple[float, float]:
+    if metric.lower() in RATIO_METRICS:
+        return (-0.02, 1.02)
+
     lower = math.inf
     upper = -math.inf
 

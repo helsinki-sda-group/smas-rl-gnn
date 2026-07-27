@@ -100,8 +100,10 @@ METRIC_GROUPS: dict[str, list[str]] = {
     ],
     "conflicts_absolute": [
         "conf_total",
+        "conf_avg_taxis_per_conflict",
     ],
     "conflicts_rates": [
+        "conf_ratio",
         "conf_winner_pickup_rate",
         "conf_resolver_override_rate",
         "conf_policy_matches_resolver_rate",

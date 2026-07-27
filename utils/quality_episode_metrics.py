@@ -54,6 +54,15 @@ def _safe_ratio(numerator: float, denominator: float, default: float = 0.0) -> f
     return float(numerator) / float(denominator)
 
 
+def _count_pipe_items(value: Any) -> int:
+    if _HAS_PANDAS and pd.isna(value):
+        return 0
+    text = str(value).strip()
+    if not text:
+        return 0
+    return len([part for part in text.split("|") if str(part).strip()])
+
+
 def _read_csv_safe(path: str, required_cols: Optional[list] = None) -> "Optional[pd.DataFrame]":
     """Read a CSV from path, returning None on any error."""
     if not _HAS_PANDAS:
@@ -482,16 +491,30 @@ def _compute_candidate_section(episode_dir: str) -> dict:
     return row
 
 
-def _compute_conflict_section(conflict_stats: dict) -> dict:
-    """Section 6: conflict quality metrics from conflict_stats dict."""
+def _compute_conflict_section(episode_dir: str, conflict_stats: dict) -> dict:
+    """Section 6: conflict quality metrics from conflict_stats and conflicts.csv."""
     row: dict = {}
     cs = conflict_stats or {}
 
     def _g(k: str, default: float = 0.0) -> float:
         return float(cs.get(k, default))
 
-    row["conf_total"] = int(_g("conflicts_total"))
+    csv_conf_total = None
+    csv_avg_taxis = None
+    if _HAS_PANDAS:
+        conf_path = os.path.join(episode_dir, "conflicts.csv")
+        cdf = _read_csv_safe(conf_path)
+        if cdf is not None and len(cdf) > 0:
+            csv_conf_total = int(len(cdf))
+            if "taxi_candidates" in cdf.columns:
+                taxi_counts = cdf["taxi_candidates"].apply(_count_pipe_items).astype(float)
+                if len(taxi_counts) > 0:
+                    csv_avg_taxis = float(taxi_counts.mean())
+
+    row["conf_total"] = int(csv_conf_total if csv_conf_total is not None else _g("conflicts_total"))
     row["conf_tasks_total"] = int(_g("tasks_total"))
+    row["conf_ratio"] = _safe_ratio(row["conf_total"], row["conf_tasks_total"])
+    row["conf_avg_taxis_per_conflict"] = float(csv_avg_taxis) if csv_avg_taxis is not None else 0.0
     row["conf_winner_pickup"] = int(_g("winner_pickup"))
     row["conf_winner_margin"] = int(_g("winner_margin"))
     row["conf_winner_raw_logit"] = int(_g("winner_raw_logit"))
@@ -611,7 +634,7 @@ def compute_quality_episode_metrics(
     flat_row.update(_compute_candidate_section(episode_dir))
 
     # conflict stats
-    flat_row.update(_compute_conflict_section(conflict_stats))
+    flat_row.update(_compute_conflict_section(episode_dir, conflict_stats))
 
     task_events = task_events_raw if include_task_level else []
     decision_events = decision_events_raw if include_decision_level else []

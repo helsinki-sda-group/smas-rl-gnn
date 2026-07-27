@@ -35,6 +35,24 @@ COORDINATION_METRICS = {
     },
 }
 
+CONFLICT_METRICS = {
+    "ctot": {
+        "label": "Conflicts Total",
+        "filename": "conflicts_total_vs_ts.png",
+        "ylim": None,
+    },
+    "crat": {
+        "label": "Conflict Ratio",
+        "filename": "conflict_ratio_vs_ts.png",
+        "ylim": (-0.02, 1.02),
+    },
+    "catx": {
+        "label": "Avg Taxis per Conflict",
+        "filename": "avg_taxis_per_conflict_vs_ts.png",
+        "ylim": None,
+    },
+}
+
 
 def parse_metrics_log(filepath):
     """Parse the evaluation metrics log file."""
@@ -140,7 +158,7 @@ def parse_baseline_log(filepath):
                 df_seed_rows = df[seed_num > 0].copy()
                 if not df_seed_rows.empty:
                     df = df_seed_rows
-            metric_names = ['rew', 'cap', 'step', 'dln', 'wait', 'trav', 'comp', 'nsv', 'ecr', 'unop', 'ncpr', 'psur', 'offpr']
+            metric_names = ['rew', 'cap', 'step', 'dln', 'wait', 'trav', 'comp', 'nsv', 'ecr', 'unop', 'ncpr', 'psur', 'offpr', 'ctot', 'crat', 'catx']
             available_metrics = [m for m in metric_names if m in df.columns]
             out = {}
             if available_metrics:
@@ -178,7 +196,7 @@ def parse_baseline_log(filepath):
         if line.startswith('pol') and 'rew±std' in line:
             summary_start = i
     if summary_start is not None:
-        metric_names = ['rew', 'cap', 'step', 'dln', 'wait', 'trav', 'comp', 'nsv', 'ecr', 'unop', 'ncpr', 'psur', 'offpr']
+        metric_names = ['rew', 'cap', 'step', 'dln', 'wait', 'trav', 'comp', 'nsv', 'ecr', 'unop', 'ncpr', 'psur', 'offpr', 'ctot', 'crat', 'catx']
         for line in lines[summary_start+1:]:
             if not line or line.startswith('#'):
                 break
@@ -424,6 +442,62 @@ def _plot_single_coordination_overview(df, ma_window, coord_dir):
     print(f"[OK] Saved {out_png}")
 
 
+def _plot_single_conflict_metric(df, metric_key, spec, ma_window, conflict_dir, baselines, baseline_std):
+    if metric_key not in df.columns:
+        print(f"[INFO] Column '{metric_key}' not present — skipping {spec['label']} plot")
+        return False
+
+    grouped = group_metric_by_ts(df, metric_key)
+    if grouped.empty:
+        print(f"[INFO] Column '{metric_key}' has no grouped rows — skipping {spec['label']} plot")
+        return False
+
+    ts = grouped['ts'].values
+    means = grouped['mean'].values
+    sems = grouped['std'].values / np.sqrt(np.maximum(grouped['count'].values, 1))
+
+    fig, ax = plt.subplots(figsize=(12, 6), facecolor='#fafafa')
+    ax.set_facecolor('#fafafa')
+    ax.errorbar(
+        ts,
+        means,
+        yerr=sems,
+        fmt='o-',
+        alpha=0.6,
+        color='#8e44ad',
+        capsize=5,
+        markersize=6,
+        label=f"Mean {spec['label']}",
+    )
+    if len(means) > 1:
+        ma_vals = ma(means, ma_window)
+        ax.plot(ts, ma_vals, 'r-', lw=2.5, alpha=0.7, label=f'Moving Average (w={ma_window})')
+
+    add_baseline_lines(ax, baselines, metric_key, baseline_std)
+
+    if spec.get('ylim') is not None:
+        ax.set_ylim(*spec['ylim'])
+
+    ax.set_xlabel('Training Steps', fontsize=11, fontweight='bold')
+    ax.set_ylabel(spec['label'], fontsize=11, fontweight='bold')
+    ax.set_title(f"{spec['label']} vs Training Steps", fontsize=12, fontweight='bold')
+    ax.legend(fontsize=9, loc='best')
+    ax.grid(alpha=0.25)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    plt.tight_layout()
+    out_png = os.path.join(conflict_dir, spec['filename'])
+    plt.savefig(out_png, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"[OK] Saved {out_png}")
+
+    out_csv = os.path.join(conflict_dir, f"{os.path.splitext(spec['filename'])[0]}_data.csv")
+    grouped[['ts', 'mean', 'std', 'count']].to_csv(out_csv, index=False)
+    print(f"[OK] Saved {out_csv}")
+    return True
+
+
 def _plot_compare_coordination_overview(run_frames, output_dir, mean_run):
     available = []
     for key in COORDINATION_METRICS:
@@ -544,6 +618,21 @@ def plot_aggregate_runs(compare_logs, output_dir, baselines, baseline_std, mean_
             y_limits=(-0.02, 1.02),
             use_baselines=True,
             subdirectory='coord',
+        )
+
+    for metric_key, spec in CONFLICT_METRICS.items():
+        plot_aggregate_metric(
+            run_frames,
+            metric_key,
+            spec['label'],
+            spec['filename'],
+            output_dir,
+            baselines,
+            baseline_std,
+            mean_run,
+            y_limits=spec.get('ylim'),
+            use_baselines=True,
+            subdirectory='conflict',
         )
 
     _plot_compare_coordination_overview(run_frames, output_dir, mean_run)
@@ -930,6 +1019,18 @@ def main():
     else:
         try:
             os.rmdir(coord_dir)
+        except Exception:
+            pass
+
+    conflict_dir = os.path.join(output_dir, 'conflict')
+    os.makedirs(conflict_dir, exist_ok=True)
+    any_conflict = False
+    for metric_key, spec in CONFLICT_METRICS.items():
+        any_conflict = _plot_single_conflict_metric(df, metric_key, spec, ma_window, conflict_dir, baselines, baseline_std) or any_conflict
+
+    if not any_conflict:
+        try:
+            os.rmdir(conflict_dir)
         except Exception:
             pass
 

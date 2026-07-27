@@ -376,7 +376,8 @@ with open(summary_path, "a", encoding="utf-8") as f:
         f"{'pol':<{POLICY_WIDTH}} rew±std   |     cap±std       step±std     dln±std       wait±std      trav±std      comp±std       nsv±std   |"
         f"     pkr±std       obsr±std      pkvr±std      mwt±std       cmr±std       anpr±std      pncr±std |"
         f"  noop±std   overld±std   mcand±std  cne_fr±std cne_mn±std  dstep±std    macmr±std     msd±std  |"
-        f" drp_ev±std  vcmr±std    invdr±std   ddvr±std"
+        f" drp_ev±std  vcmr±std    invdr±std   ddvr±std |"
+        f"   ctot±std    crat±std    catx±std"
     )
     f.write(summary_header + "\n")
     
@@ -412,6 +413,9 @@ with open(summary_path, "a", encoding="utf-8") as f:
         valid_completion_rates = [m.valid_completion_rate for m in metrics_list]
         invalid_dropoff_rates = [m.invalid_dropoff_rate for m in metrics_list]
         ddv_rates = [m.dropoff_deadline_violation_rate for m in metrics_list]
+        conflict_totals = [m.conflicts_total for m in metrics_list]
+        conflict_ratios = [m.conflict_ratio for m in metrics_list]
+        conflict_avg_taxis = [m.conflict_avg_taxis_per_conflict for m in metrics_list]
 
         summary_line = (
             f"{policy_name:<{POLICY_WIDTH}}"
@@ -442,6 +446,9 @@ with open(summary_path, "a", encoding="utf-8") as f:
             f"  {np.mean(valid_completion_rates):>6.3f}±{np.std(valid_completion_rates):<5.3f}"
             f"  {np.mean(invalid_dropoff_rates):>6.3f}±{np.std(invalid_dropoff_rates):<5.3f}"
             f"  {np.mean(ddv_rates):>6.3f}±{np.std(ddv_rates):<5.3f}"
+            f" |  {np.mean(conflict_totals):>6.2f}±{np.std(conflict_totals):<5.2f}"
+            f"  {np.mean(conflict_ratios):>6.3f}±{np.std(conflict_ratios):<5.3f}"
+            f"  {np.mean(conflict_avg_taxis):>6.3f}±{np.std(conflict_avg_taxis):<5.3f}"
         )
         
         f.write(summary_line + "\n")
@@ -466,6 +473,9 @@ with open(summary_path, "a", encoding="utf-8") as f:
         print(f"  Valid Completion Rate: {np.mean(valid_completion_rates):.3f} ± {np.std(valid_completion_rates):.3f}")
         print(f"  Invalid Dropoff Rate: {np.mean(invalid_dropoff_rates):.3f} ± {np.std(invalid_dropoff_rates):.3f}")
         print(f"  Dropoff Deadline Violation Rate: {np.mean(ddv_rates):.3f} ± {np.std(ddv_rates):.3f}")
+        print(f"  Conflicts Total: {np.mean(conflict_totals):.2f} ± {np.std(conflict_totals):.2f}")
+        print(f"  Conflict Ratio: {np.mean(conflict_ratios):.3f} ± {np.std(conflict_ratios):.3f}")
+        print(f"  Avg Taxis per Conflict: {np.mean(conflict_avg_taxis):.3f} ± {np.std(conflict_avg_taxis):.3f}")
 
     f.write("\n# METRIC LEGEND\n")
     f.write("short\tfull\n")
@@ -506,6 +516,9 @@ with open(summary_path, "a", encoding="utf-8") as f:
         ("vcmr", "valid_completion_rate (pickup+dropoff before deadlines / total tasks)"),
         ("invdr", "invalid_dropoff_rate (dropoffs failing validity / total tasks)"),
         ("ddvr", "dropoff_deadline_violation_rate (dropped after dropoff_deadline / total tasks)"),
+        ("ctot", "conflicts_total (rows in conflicts.csv)"),
+        ("crat", "conflict_ratio (conflicts_total / tasks_total as in 05_conflicts.log)"),
+        ("catx", "conflict_avg_taxis_per_conflict (mean taxi_candidates count in conflicts.csv)"),
     ]
     for short, full in legend_rows:
         f.write(f"{short}\t{full}\n")

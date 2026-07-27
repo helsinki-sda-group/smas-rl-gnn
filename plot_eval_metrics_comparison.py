@@ -29,6 +29,9 @@ METRIC_MAP = {
     'cne_mn': ('cne_mn', 'Candidate Mean Non-Empty', 'Count'),
     'ovrlap': ('ovrlap', 'Overlap Rate', 'Rate'),
     'shared': ('shared', 'Mean Shared Tasks per Step', 'Count'),
+    'ctot': ('ctot', 'Conflicts Total', 'Count'),
+    'crat': ('crat', 'Conflict Ratio', 'Rate'),
+    'catx': ('catx', 'Avg Taxis per Conflict', 'Count'),
 }
 
 

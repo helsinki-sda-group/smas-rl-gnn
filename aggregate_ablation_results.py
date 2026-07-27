@@ -41,6 +41,7 @@ TRAIN_OUTPUT_METRICS = [
     "value_loss",
 ]
 COORDINATION_METRIC_KEYS = ["ecr", "unop", "ncpr", "psur", "offpr"]
+CONFLICT_METRIC_KEYS = ["ctot", "crat", "catx"]
 COORDINATION_METRICS = {
     "ecr": {
         "label": "Empty Candidate Rate",
@@ -61,6 +62,20 @@ COORDINATION_METRICS = {
     "offpr": {
         "label": "Off-Proposal Assignment Rate",
         "filename": "offprop_assign_rate_vs_ts.png",
+    },
+}
+CONFLICT_METRICS = {
+    "ctot": {
+        "label": "Conflicts Total",
+        "filename": "conflicts_total_vs_ts.png",
+    },
+    "crat": {
+        "label": "Conflict Ratio",
+        "filename": "conflict_ratio_vs_ts.png",
+    },
+    "catx": {
+        "label": "Avg Taxis per Conflict",
+        "filename": "avg_taxis_per_conflict_vs_ts.png",
     },
 }
 
@@ -106,6 +121,7 @@ def _metrics_for_df(df: pd.DataFrame, reward_type: str) -> List[str]:
         out.append(component)
     out.extend([m for m in COMMON_REWARD_METRICS if m != "rew"])
     out.extend([m for m in COORDINATION_METRIC_KEYS if m in df.columns])
+    out.extend([m for m in CONFLICT_METRIC_KEYS if m in df.columns])
     return [m for m in out if m in df.columns]
 
 
@@ -594,11 +610,14 @@ def _plot_eval_comparison(
 
     reward_metrics = [m for m in ["rew", "wait", "comp", "dln", "trav", "mdl"] if m in available_metrics]
     coordination_metrics = [m for m in COORDINATION_METRIC_KEYS if m in available_metrics]
+    conflict_metrics = [m for m in CONFLICT_METRIC_KEYS if m in available_metrics]
 
     plot_dir = output_dir / "eval_comp_plots"
     plot_dir.mkdir(parents=True, exist_ok=True)
     coord_dir = coordination_output_dir or (output_dir / "coord_cmp")
     coord_dir.mkdir(parents=True, exist_ok=True)
+    conflict_dir = output_dir / "conflict_cmp"
+    conflict_dir.mkdir(parents=True, exist_ok=True)
     coord_window = int(coordination_ma_window) if coordination_ma_window is not None else int(ma_window)
 
     def _collect_series_rows(metric: str) -> List[Dict[str, object]]:
@@ -840,6 +859,18 @@ def _plot_eval_comparison(
         fig.savefig(out_overview, dpi=150, bbox_inches="tight")
         plt.close(fig)
         print(f"[OK] Saved {out_overview}")
+
+    for metric in conflict_metrics:
+        spec = CONFLICT_METRICS[metric]
+        _plot_metric(
+            metric,
+            spec["label"],
+            conflict_dir / spec["filename"],
+            conflict_dir / f"{Path(spec['filename']).stem}_data.csv",
+            coord_window,
+            (-0.02, 1.02) if metric == "crat" else None,
+            std_enabled=True,
+        )
 
 
 def main() -> None:

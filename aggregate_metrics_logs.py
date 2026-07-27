@@ -29,6 +29,9 @@ DEFAULT_METRICS = [
     "unop",
     "ncpr",
     "psur",
+    "ctot",
+    "crat",
+    "catx",
 ]
 
 METRIC_ALIASES = {

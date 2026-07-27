@@ -93,6 +93,15 @@ def _sum_int_column(df: pd.DataFrame, col: str) -> int:
     return int(vals.sum())
 
 
+def _count_pipe_items(value: object) -> int:
+    if pd.isna(value):
+        return 0
+    text = str(value).strip()
+    if not text:
+        return 0
+    return len([part for part in text.split("|") if str(part).strip()])
+
+
 def _warn_metrics_validation(episode_dir: str, message: str, counters: Dict[str, int]) -> None:
     print(f"Warning: [coordination] {message} in {episode_dir} counters={counters}")
 
@@ -164,6 +173,11 @@ class EpisodeMetrics:
     nonconflicting_proposal_rate: float = 0.0
     proposal_survival_rate: float = 0.0
     off_proposal_assignment_rate: float = 0.0
+
+    # conflict-level metrics (from conflicts.csv + coordination.csv)
+    conflicts_total: int = 0
+    conflict_ratio: float = 0.0
+    conflict_avg_taxis_per_conflict: float = 0.0
 
     # new: deadline / valid-completion breakdown
     dropoff_event_count: int = 0
@@ -313,6 +327,26 @@ def compute_episode_metrics_from_logs(
                     )
         except Exception as e:
             print(f"Warning: Could not read coordination.csv: {e}")
+
+    conflicts_path = os.path.join(episode_dir, "conflicts.csv")
+    if os.path.exists(conflicts_path):
+        try:
+            df_conflicts = pd.read_csv(conflicts_path)
+            if not df_conflicts.empty:
+                metrics.conflicts_total = int(len(df_conflicts))
+                if "taxi_candidates" in df_conflicts.columns:
+                    taxi_counts = df_conflicts["taxi_candidates"].apply(_count_pipe_items).astype(float)
+                    if len(taxi_counts) > 0:
+                        metrics.conflict_avg_taxis_per_conflict = float(taxi_counts.mean())
+        except Exception as e:
+            print(f"Warning: Could not read conflicts.csv: {e}")
+
+    # Keep definition aligned with readme/05_conflicts_log.md: conflicts_total / tasks_total.
+    # Here tasks_total is reconstructed from coordination logs via distinct_proposed_tasks.
+    if metrics.distinct_proposed_tasks > 0:
+        metrics.conflict_ratio = float(metrics.conflicts_total) / float(metrics.distinct_proposed_tasks)
+    else:
+        metrics.conflict_ratio = 0.0
 
     task_lifecycle_path = os.path.join(episode_dir, "task_lifecycle.csv")
     if not os.path.exists(task_lifecycle_path):
@@ -578,8 +612,12 @@ def metrics_to_string(metrics: EpisodeMetrics) -> str:
         f" {metrics.nonconflicting_proposal_rate:>6.3f} {metrics.proposal_survival_rate:>6.3f}"
         f" {metrics.off_proposal_assignment_rate:>6.3f}"
     )
+    conflict_block = (
+        f" {metrics.conflicts_total:>6d} {metrics.conflict_ratio:>6.3f}"
+        f" {metrics.conflict_avg_taxis_per_conflict:>6.3f}"
+    )
     return (
-        f"{identity_block} |{reward_block} | {ridepool_block} |{candidate_block} |{coordination_block}"
+        f"{identity_block} |{reward_block} | {ridepool_block} |{candidate_block} |{coordination_block} |{conflict_block}"
     )
 
 
@@ -597,7 +635,8 @@ def get_metrics_header() -> str:
         f" {'macmr':>8} {'msd':>6} {'ovrlap':>8} {'shared':>8}"
     )
     coordination_header = f" {'ecr':>6} {'unop':>6} {'ncpr':>6} {'psur':>6} {'offpr':>6}"
-    return f"{identity_header} |{reward_header} |{ridepool_header} |{candidate_header} |{coordination_header}"
+    conflict_header = f" {'ctot':>6} {'crat':>6} {'catx':>6}"
+    return f"{identity_header} |{reward_header} |{ridepool_header} |{candidate_header} |{coordination_header} |{conflict_header}"
 
 
 def ensure_metrics_log(path: str, overwrite: bool = False, metadata_lines: Optional[List[str]] = None) -> None:

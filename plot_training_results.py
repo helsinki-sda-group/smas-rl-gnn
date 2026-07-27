@@ -36,6 +36,9 @@ def _normalize_metric_key(name: str) -> str | None:
         "travel": "travel",
         "comp": "comp",
         "nsv": "nsv",
+        "ctot": "ctot",
+        "crat": "crat",
+        "catx": "catx",
     }
     return mapping.get(name)
 
@@ -44,8 +47,10 @@ def _extract_header_tokens(lines: list[str]) -> list[str]:
     for line in lines:
         if line.startswith("pol") and "|" in line:
             parts = re.split(r'\s*\|\s*', line)
-            if len(parts) >= 2:
-                return parts[1].split()
+            tokens = []
+            for part in parts:
+                tokens.extend(part.split())
+            return tokens
     return []
 
 
@@ -63,10 +68,15 @@ def parse_metrics_log(filepath):
         if len(parts) < 2:
             continue
 
-        seg0 = parts[0].split()
-        seg1 = parts[1].split()
+        tokens = []
+        for part in parts:
+            tokens.extend(part.split())
 
-        if len(seg0) < 2 or len(seg1) < 4:
+        if len(tokens) < 3:
+            continue
+
+        seg0 = parts[0].split()
+        if len(seg0) < 3:
             continue
 
         ts_val = None
@@ -88,10 +98,13 @@ def parse_metrics_log(filepath):
             "travel": 0.0,
             "comp": 0.0,
             "nsv": 0.0,
+            "ctot": 0.0,
+            "crat": 0.0,
+            "catx": 0.0,
         }
 
-        if header_tokens and len(header_tokens) == len(seg1):
-            for name, val in zip(header_tokens, seg1):
+        if header_tokens and len(header_tokens) == len(tokens):
+            for name, val in zip(header_tokens, tokens):
                 key = _normalize_metric_key(name)
                 if key is None:
                     continue
@@ -100,6 +113,9 @@ def parse_metrics_log(filepath):
                 except Exception:
                     row[key] = 0.0
         else:
+            if len(parts) < 2:
+                continue
+            seg1 = parts[1].split()
             try:
                 row["rew"] = float(seg1[0])
                 row["cap"] = float(seg1[1])
@@ -512,8 +528,54 @@ def print_summary(df, train_df):
         kl = train_df['approx_kl'].values
         print(f"  Approx KL:   [{kl.min():.2e}, {kl.max():.2e}]")
         print(f"  Frozen:      {100*np.mean(kl < 1e-6):.0f}%")
+
+    if all(col in df.columns for col in ["ctot", "crat", "catx"]):
+        print(f"\nConflict Metrics:")
+        print(f"  Conflicts Total:         {df['ctot'].mean():.2f} ± {df['ctot'].std():.2f}")
+        print(f"  Conflict Ratio:          {df['crat'].mean():.3f} ± {df['crat'].std():.3f}")
+        print(f"  Avg Taxis per Conflict:  {df['catx'].mean():.3f} ± {df['catx'].std():.3f}")
     
     print("="*70 + "\n")
+
+
+def plot_conflict_metrics(df, output_file='conflict_metrics.png'):
+    required = ["ctot", "crat", "catx"]
+    if any(col not in df.columns for col in required):
+        print("[INFO] Conflict columns not found in training metrics log — skipping conflict_metrics.png")
+        return
+
+    use_ts = 'ts' in df.columns and df['ts'].notna().any()
+    eps = df['ts'].values if use_ts else df['pol'].values
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5), facecolor='#fafafa')
+    for ax in axes:
+        ax.set_facecolor('#fafafa')
+
+    specs = [
+        ('ctot', 'Conflicts Total', None, '#8e44ad'),
+        ('crat', 'Conflict Ratio', (-0.02, 1.02), '#c0392b'),
+        ('catx', 'Avg Taxis per Conflict', None, '#16a085'),
+    ]
+
+    for ax, (key, title, ylim, color) in zip(axes, specs):
+        vals = pd.to_numeric(df[key], errors='coerce').to_numpy(dtype=float)
+        ax.plot(eps, vals, lw=1.8, alpha=0.55, color=color, label='Raw')
+        if len(vals) > 1:
+            ax.plot(eps, ma(vals, 20), lw=2.5, alpha=0.9, color=color, label='MA 20')
+        ax.set_title(title, fontsize=11, fontweight='bold')
+        ax.set_xlabel('Timestep' if use_ts else 'Episode', fontsize=10, fontweight='bold')
+        ax.set_ylabel(title, fontsize=10, fontweight='bold')
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=8, loc='best')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"✓ Saved {output_file}")
 
 
 def plot_reward_by_seed(df, ma_window=20, output_prefix='reward_seed'):
@@ -616,6 +678,7 @@ def main():
     # Generate plots
     print("Generating plots...")
     plot_reward_components(df, reward_type=reward_type, output_file='reward_components.png')
+    plot_conflict_metrics(df, output_file='conflict_metrics.png')
     plot_ppo_metrics(train_df, output_file='ppo_metrics.png')
     
     print(f"\nGenerating per-seed plots (MA window: {args.ma_window})...")
