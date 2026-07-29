@@ -21,9 +21,9 @@ DEFAULT_METRICS = [
     "cmr",
     "vcmr",
     "invdr",
-    "opvr",
-    "odvr",
-    "pdvr",
+    "opvr", # only pickup violations
+    "odvr", # only dropoff violations
+    "pdvr", # pickup and dropoff violations
     "shared",
     "ect",
     "unop",
@@ -72,6 +72,12 @@ class ParsedLog:
         value = self.metadata.get("route_construction", "nearest")
         text = str(value).strip()
         return text if text else "nearest"
+
+    @property
+    def admission_aware(self) -> str:
+        value = self.metadata.get("admission_aware", "false")
+        text = str(value).strip().lower()
+        return text if text in {"true", "false"} else "false"
 
     def policies(self) -> list[str]:
         names = {row["pol"] for row in self.per_seed_rows if "pol" in row}
@@ -369,6 +375,7 @@ def build_output_rows(parsed_logs: list[ParsedLog], metric_names: list[str], inc
                 "instance": parsed_log.instance,
                 "resolver": parsed_log.resolver,
                 "route_construction": parsed_log.route_construction,
+                "admission_aware": parsed_log.admission_aware,
                 "pol": policy,
             }
             for metric_name in metric_names:
@@ -430,7 +437,7 @@ def main() -> int:
         return 1
 
     rows = build_output_rows(parsed_logs, metric_names, include_std)
-    fieldnames = ["source_file", "instance", "resolver", "route_construction", "pol"]
+    fieldnames = ["source_file", "instance", "resolver", "route_construction", "admission_aware", "pol"]
     for metric_name in metric_names:
         fieldnames.append(metric_name)
         if include_std:

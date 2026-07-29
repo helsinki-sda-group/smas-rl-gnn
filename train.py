@@ -56,6 +56,13 @@ def resolve_candidates_sorting(opt_obj) -> str:
         return "pickup_distance" if bool(legacy_sorted) else "randomized"
     return "randomized"
 
+
+def resolve_admission_aware(opt_obj) -> bool:
+    raw_value = getattr(opt_obj.env, "admission_aware", False)
+    if isinstance(raw_value, bool):
+        return raw_value
+    raise ValueError("env.admission_aware must be a YAML boolean (true/false)")
+
 class Tee(object):
     def __init__(self, filename, mode: str = "w"):
         self.file = open(filename, mode)
@@ -123,6 +130,8 @@ CONFLICT_RESOLUTION = str(getattr(opt.env, "conflict_resolution", "closest_then_
 COMPLETION_MODE = str(getattr(opt.env, "completion_mode", "dropoff"))
 reward_params = dict(getattr(opt.env, "reward_params", {}) or {})
 CANDIDATES_SORTING = resolve_candidates_sorting(opt)
+ADMISSION_AWARE = resolve_admission_aware(opt)
+print(f"admission_aware={ADMISSION_AWARE}")
 
 # Training seeds - different from evaluation seeds [42, 123, 456, 789, 1011, 1213, 1415, 1617, 1819, 2021]
 TRAIN_SEEDS = list(opt.seeds.train)
@@ -206,6 +215,7 @@ controller = RLControllerAdapter(
     route_construction=str(getattr(opt.env, "route_construction", "nearest")),
     route_exhaustive_max_stops=int(getattr(opt.env, "route_exhaustive_max_stops", 8)),
     route_construction_debug=bool(getattr(opt.env, "route_construction_debug", False)),
+    admission_aware=ADMISSION_AWARE,
     reward_params=reward_params,
     competition_joint=dict(getattr(opt.env, "competition_joint", {}) or {}),
 )
@@ -328,6 +338,8 @@ metrics_log_path = with_instance_and_resolver_alias(
     metrics_log_path,
     SUMO_CFG,
     CONFLICT_RESOLUTION,
+    route_construction=str(getattr(opt.env, "route_construction", "nearest")),
+    admission_aware=ADMISSION_AWARE,
 )
 logit_metrics_log_path = (
     f"training_logit_metrics_v{int(VICINITY_M)}_ms{MAX_STEPS}_mwd{int(MAX_WAIT_DELAY_S)}_"
@@ -351,6 +363,7 @@ callback = RPLoggerCallback(
         sumo_cfg_path=SUMO_CFG,
         conflict_resolution=CONFLICT_RESOLUTION,
         route_construction=str(getattr(opt.env, "route_construction", "nearest")),
+        admission_aware=ADMISSION_AWARE,
         reward_params=reward_params,
         completion_mode=COMPLETION_MODE,
         reassignment_mode=str(getattr(opt.env, "reassignment_mode", "locked_until_pickup")),

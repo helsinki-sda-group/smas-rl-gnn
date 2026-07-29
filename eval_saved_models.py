@@ -169,6 +169,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             route_construction=str(config.get('route_construction', 'nearest')),
             route_exhaustive_max_stops=int(config.get('route_exhaustive_max_stops', 8)),
             route_construction_debug=bool(config.get('route_construction_debug', False)),
+            admission_aware=bool(config.get('admission_aware', False)),
             reward_params=dict(config.get("reward_params", {}) or {}),
             competition_joint=dict(config.get("competition_joint", {}) or {}),
         )
@@ -575,6 +576,12 @@ def main():
         if legacy_sorted is not None:
             return 'pickup_distance' if bool(legacy_sorted) else 'randomized'
         return 'randomized'
+
+    def resolve_admission_aware(opt_obj) -> bool:
+        raw_value = getattr(opt_obj.env, 'admission_aware', False)
+        if isinstance(raw_value, bool):
+            return raw_value
+        raise ValueError("env.admission_aware must be a YAML boolean (true/false)")
     
     # Seeds
     TRAIN_SEEDS = list(opt.seeds.train)
@@ -618,6 +625,7 @@ def main():
     completion_mode = str(getattr(opt.env, "completion_mode", "dropoff"))
     reward_params = dict(getattr(opt.env, "reward_params", {}) or {})
     candidates_sorting = resolve_candidates_sorting(opt)
+    admission_aware = resolve_admission_aware(opt)
 
     config = {
         'sumo_cfg': opt.env.sumo_cfg,
@@ -654,6 +662,7 @@ def main():
         'reward_params': reward_params,
         'decision_dt': int(opt.env.decision_dt),
         'min_episode_steps': int(opt.env.min_episode_steps),
+        'admission_aware': admission_aware,
         'eval_runs': int(getattr(args, "eval_runs", 3)),
         'eval_run_dir': os.path.join(output_dir, 'evaluation_runs'),
         'print_steps': bool(getattr(args, "print_steps", False)),
@@ -687,6 +696,7 @@ def main():
     print(f"Model directory: {model_dir}")
     print(f"Output directory: {output_base}")
     print(f"Completion mode: {completion_mode}")
+    print(f"admission_aware: {admission_aware}")
     print(f"Reward params: {reward_params}")
     print(f"Seeds: {args.seed_set} ({len(seeds_to_eval)} seeds)")
     print(f"Eval runs per seed: {getattr(args, 'eval_runs', 3)}")
@@ -737,6 +747,7 @@ def main():
             sumo_cfg_path=str(config.get("sumo_cfg", "")),
             conflict_resolution=str(config.get("conflict_resolution", "closest_then_capacity")),
             route_construction=str(config.get("route_construction", "nearest")),
+            admission_aware=bool(config.get("admission_aware", False)),
             reward_params=dict(config.get("reward_params", {}) or {}),
             completion_mode=str(config.get("completion_mode", "dropoff")),
             reassignment_mode=str(config.get("reassignment_mode", "locked_until_pickup")),

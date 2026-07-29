@@ -7,6 +7,33 @@ Primary sources:
 - `sumo_rl_rs/environment/rl_controller_adapter.py`
 - `plot_comp_norms.py` (consumer/plotter)
 
+## Centralized matching diagnostics
+
+When `conflict_resolution=hungarian`, task-level conflict buckets are bypassed and the controller writes
+per-decision centralized diagnostics to:
+
+- `runs/<run>/episode_xxxx/centralized_matching.csv`
+
+Columns:
+
+- `time`
+- `proposer`
+- `resolver`
+- `active_robot_count`
+- `unique_candidate_task_count`
+- `feasible_edge_count`
+- `multi_robot_task_count`
+- `matching_cardinality`
+- `unmatched_with_candidates`
+- `total_selected_score`
+- `matrix_build_ms`
+- `solver_ms`
+- `total_assignment_ms`
+- `nonfinite_edge_scores`
+- `fallback_used`
+
+Timing fields are measured with `time.perf_counter()` and reported in milliseconds.
+
 ## What this log is
 
 `conflicts.log` is an **episode-level summary** of assignment conflicts (one row per episode).

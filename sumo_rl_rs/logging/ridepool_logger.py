@@ -243,6 +243,24 @@ class RidepoolLogger:
             "competition_tie_rate",
             "competition_single_owner_rate",
         ])
+        self._open_csv(self._get_csv_filename("centralized_matching"), [
+            "time",
+            "proposer",
+            "resolver",
+            "admission_aware",
+            "active_robot_count",
+            "unique_candidate_task_count",
+            "feasible_edge_count",
+            "multi_robot_task_count",
+            "matching_cardinality",
+            "unmatched_with_candidates",
+            "total_selected_score",
+            "matrix_build_ms",
+            "solver_ms",
+            "total_assignment_ms",
+            "nonfinite_edge_scores",
+            "fallback_used",
+        ])
 
         self._open_csv(self._get_csv_filename("task_lifecycle"), [
             "task_id", "reservation_time", "pickup_deadline", "estimated_travel_time",
@@ -570,6 +588,65 @@ class RidepoolLogger:
             else:
                 row[key] = int(value)
         self._write(fname, row)
+
+    def log_centralized_matching(
+        self,
+        *,
+        time: float,
+        proposer: str,
+        resolver: str,
+        active_robot_count: int,
+        unique_candidate_task_count: int,
+        feasible_edge_count: int,
+        multi_robot_task_count: int,
+        matching_cardinality: int,
+        unmatched_with_candidates: int,
+        total_selected_score: float,
+        matrix_build_ms: float,
+        solver_ms: float,
+        total_assignment_ms: float,
+        nonfinite_edge_scores: int,
+        admission_aware: bool = False,
+        fallback_used: bool = False,
+    ) -> None:
+        fname = self._get_csv_filename("centralized_matching")
+        header = [
+            "time",
+            "proposer",
+            "resolver",
+            "admission_aware",
+            "active_robot_count",
+            "unique_candidate_task_count",
+            "feasible_edge_count",
+            "multi_robot_task_count",
+            "matching_cardinality",
+            "unmatched_with_candidates",
+            "total_selected_score",
+            "matrix_build_ms",
+            "solver_ms",
+            "total_assignment_ms",
+            "nonfinite_edge_scores",
+            "fallback_used",
+        ]
+        self._ensure_csv(fname, header)
+        self._write(fname, {
+            "time": float(time),
+            "proposer": str(proposer),
+            "resolver": str(resolver),
+            "admission_aware": int(bool(admission_aware)),
+            "active_robot_count": int(active_robot_count),
+            "unique_candidate_task_count": int(unique_candidate_task_count),
+            "feasible_edge_count": int(feasible_edge_count),
+            "multi_robot_task_count": int(multi_robot_task_count),
+            "matching_cardinality": int(matching_cardinality),
+            "unmatched_with_candidates": int(unmatched_with_candidates),
+            "total_selected_score": float(total_selected_score),
+            "matrix_build_ms": float(matrix_build_ms),
+            "solver_ms": float(solver_ms),
+            "total_assignment_ms": float(total_assignment_ms),
+            "nonfinite_edge_scores": int(nonfinite_edge_scores),
+            "fallback_used": int(bool(fallback_used)),
+        })
 
     def log_fleet_counts(self, t: float, idle: int, en_route: int, occupied: int, pickup_occupied: int):
         fname = self._get_csv_filename("fleet_counts")

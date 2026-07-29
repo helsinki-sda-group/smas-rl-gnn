@@ -3,8 +3,8 @@
 <configuration>
     <input>
         <net-file value="randgrid.net.xml"/>
-        <route-files value="coordination_medium_rand_dest.xml"/>
-		<additional-files value="parkingareas.add.xml"/>
+        <route-files value="corridor_asymmetric_cap2_taxis6.rou.xml"/>
+		<additional-files value="parkingareas.add.xml,clusters_corridor_viz.add.xml"/>
     </input>
     <time>
         <begin value="0"/>

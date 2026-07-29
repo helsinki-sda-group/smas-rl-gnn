@@ -22,6 +22,20 @@ SUPPORTED_BASELINE_POLICIES: List[str] = [
     "proposal_joint_competition",
 ]
 
+# Canonical "all policies" set used when --policies is omitted.
+# Keep aliases in SUPPORTED_BASELINE_POLICIES for explicit user input,
+# but do not duplicate equivalent proposer behavior in default sweeps.
+DEFAULT_BASELINE_POLICIES: List[str] = [
+    "random",
+    "unique",
+    "pickup_distance",
+    "pickup_deadline",
+    "pickup_deadline_distance",
+    "predicted_reward",
+    "predicted_reward_joint",
+    "proposal_joint_competition",
+]
+
 SCENARIO_ROUTE_MAP: Dict[str, str] = {
     "randdest": "coordination_medium_rand_dest_cap2.xml",
     "corridor_asymmetric": "corridor_asymmetric_cap2_taxis6.rou.xml",
@@ -55,6 +69,19 @@ RESOLVER_ALIASES: Dict[str, str] = {
     "logit_diff": "logit_diff",
     "logitdiff": "logit_diff",
     "random": "random",
+    "predicted_reward": "predicted_reward",
+    "reward_single": "predicted_reward",
+    "predicted_reward_joint": "predicted_reward_joint",
+    "reward_joint": "predicted_reward_joint",
+    "hungarian": "hungarian",
+    "proposer_score_hungarian": "hungarian",
+}
+
+ROUTE_CONSTRUCTION_ALIASES: Dict[str, str] = {
+    "nearest": "nearest",
+    "reward_aligned": "reward_aligned",
+    "reward-aligned": "reward_aligned",
+    "ra": "reward_aligned",
 }
 
 
@@ -94,9 +121,19 @@ def _resolver_filename_alias(resolver: str) -> str:
     return "closest" if resolver == "closest_then_capacity" else resolver
 
 
+def _normalize_route_construction(value: str) -> str:
+    key = str(value).strip().lower()
+    if key not in ROUTE_CONSTRUCTION_ALIASES:
+        raise ValueError(
+            "Unsupported route_construction "
+            f"'{value}'. Supported: {sorted(set(ROUTE_CONSTRUCTION_ALIASES.keys()))}."
+        )
+    return ROUTE_CONSTRUCTION_ALIASES[key]
+
+
 def _resolve_policies(raw_policies: List[str] | None) -> List[str]:
     if not raw_policies:
-        return list(SUPPORTED_BASELINE_POLICIES)
+        return list(DEFAULT_BASELINE_POLICIES)
 
     policies = [p.strip() for p in raw_policies if p.strip()]
     invalid = sorted(set(p for p in policies if p not in SUPPORTED_BASELINE_POLICIES))
@@ -105,6 +142,15 @@ def _resolve_policies(raw_policies: List[str] | None) -> List[str]:
             f"Unsupported policy names: {invalid}. Supported: {SUPPORTED_BASELINE_POLICIES}."
         )
     return policies
+
+
+def _parse_yaml_bool(value: str) -> bool:
+    lowered = str(value).strip().lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    raise ValueError("admission-aware must be 'true' or 'false'")
 
 
 def _load_and_patch_sumocfg(base_sumocfg: Path, route_file_name: str) -> ET.ElementTree:
@@ -125,10 +171,13 @@ def generate_configs(
     base_sumocfg: Path,
     output_dir: Path,
     policies: List[str] | None,
-) -> tuple[Path, Path, str, str]:
+    admission_aware: bool,
+    route_construction: str,
+) -> tuple[Path, Path, str, str, bool, str]:
     scenario_alias = _normalize_scenario(scenario)
     resolver = _normalize_resolver(resolver_input)
     resolver_alias = _resolver_filename_alias(resolver)
+    route_mode = _normalize_route_construction(route_construction)
 
     if scenario_alias not in SCENARIO_ROUTE_MAP:
         raise ValueError(
@@ -158,11 +207,20 @@ def generate_configs(
     cfg = OmegaConf.load(base_yaml)
     cfg.env.sumo_cfg = str(Path(configs_dir.name) / generated_sumocfg_name).replace("\\", "/")
     cfg.env.conflict_resolution = resolver
+    cfg.env.admission_aware = bool(admission_aware)
+    cfg.env.route_construction = route_mode
     cfg.baselines.policies = selected_policies
 
     OmegaConf.save(cfg, generated_yaml_path)
 
-    return generated_yaml_path, generated_sumocfg_path, scenario_alias, resolver_alias
+    return (
+        generated_yaml_path,
+        generated_sumocfg_path,
+        scenario_alias,
+        resolver_alias,
+        bool(admission_aware),
+        route_mode,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -196,6 +254,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="configs",
         help="Directory for generated files. Default: configs",
     )
+    parser.add_argument(
+        "--admission-aware",
+        default="false",
+        choices=["false", "true"],
+        help="Set env.admission_aware in generated YAML (default: false)",
+    )
+    parser.add_argument(
+        "--route-construction",
+        default="nearest",
+        choices=["nearest", "reward_aligned", "reward-aligned", "ra"],
+        help="Set env.route_construction in generated YAML (default: nearest)",
+    )
     return parser
 
 
@@ -204,13 +274,15 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        yaml_path, sumocfg_path, scenario_alias, resolver_alias = generate_configs(
+        yaml_path, sumocfg_path, scenario_alias, resolver_alias, admission_aware, route_mode = generate_configs(
             scenario=args.scenario,
             resolver_input=args.resolver,
             base_yaml=Path(args.base_yaml),
             base_sumocfg=Path(args.base_sumocfg),
             output_dir=Path(args.output_dir),
             policies=args.policies,
+            admission_aware=_parse_yaml_bool(args.admission_aware),
+            route_construction=args.route_construction,
         )
     except Exception as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
@@ -218,7 +290,10 @@ def main() -> int:
 
     print(f"[OK] Generated YAML: {yaml_path}")
     print(f"[OK] Generated SUMO cfg: {sumocfg_path}")
-    print(f"[INFO] scenario={scenario_alias} resolver={resolver_alias}")
+    print(
+        f"[INFO] scenario={scenario_alias} resolver={resolver_alias} "
+        f"admission_aware={admission_aware} route_construction={route_mode}"
+    )
     return 0
 
 

@@ -85,15 +85,33 @@ def resolver_alias_from_name(conflict_resolution: str) -> str:
     return resolver or "unknown"
 
 
-def with_instance_and_resolver_alias(log_path: str, sumo_cfg_path: str, conflict_resolution: str) -> str:
+def route_construction_alias_from_name(route_construction: Optional[str]) -> str:
+    """Normalize route-construction names for concise filename suffixes."""
+    mode = str(route_construction or "").strip().lower()
+    if mode == "nearest":
+        return "nr"
+    if mode == "reward_aligned":
+        return "ra"
+    return "unknown"
+
+
+def with_instance_and_resolver_alias(
+    log_path: str,
+    sumo_cfg_path: str,
+    conflict_resolution: str,
+    route_construction: Optional[str] = None,
+    admission_aware: bool = False,
+) -> str:
     """Append instance and resolver aliases to a metrics log filename."""
     root, ext = os.path.splitext(str(log_path))
     instance_name = extract_route_files_from_sumocfg(sumo_cfg_path)
     instance_alias = instance_alias_from_name(instance_name)
     resolver_alias = resolver_alias_from_name(conflict_resolution)
+    route_alias = route_construction_alias_from_name(route_construction)
+    aa_suffix = "_aa" if bool(admission_aware) else ""
     if instance_alias == "unknown":
-        return f"{root}_{resolver_alias}{ext}"
-    return f"{root}_{instance_alias}_{resolver_alias}{ext}"
+        return f"{root}_{resolver_alias}_{route_alias}{aa_suffix}{ext}"
+    return f"{root}_{instance_alias}_{resolver_alias}_{route_alias}{aa_suffix}{ext}"
 
 
 def build_metrics_metadata_lines(
@@ -101,6 +119,7 @@ def build_metrics_metadata_lines(
     sumo_cfg_path: str,
     conflict_resolution: str,
     route_construction: Optional[str] = None,
+    admission_aware: Optional[bool] = None,
     reward_params: Optional[Dict],
     completion_mode: Optional[str] = None,
     reassignment_mode: Optional[str] = None,
@@ -115,6 +134,8 @@ def build_metrics_metadata_lines(
     ]
     if route_construction is not None:
         line_parts.append(f"route_construction={str(route_construction)}")
+    if admission_aware is not None:
+        line_parts.append(f"admission_aware={bool(admission_aware)}")
     if completion_mode is not None:
         line_parts.append(f"completion_mode={str(completion_mode)}")
     if reassignment_mode is not None:

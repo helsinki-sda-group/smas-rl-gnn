@@ -16,7 +16,8 @@
   route_construction: reward_aligned
   route_exhaustive_max_stops: 8
   route_construction_debug: false
-  conflict_resolution: random
+  admission_aware: true
+  conflict_resolution: capacity
   candidates_sorting: pickup_distance
   two_hop: true
   two_hop_directed: true
@@ -32,6 +33,9 @@
     travel_cap: 240.0
     deadline_cap: 600.0
   completion_mode: valid_dropoff
+  competition_joint:
+    tie_tolerance: 1.0e-8
+    competitors: two_hop
 
 features:
   use_xy_pickup: false
@@ -120,10 +124,9 @@ baselines:
   - random
   - unique
   - pickup_distance
-  - pickup_deadline
-  - pickup_deadline_distance
   - predicted_reward
   - predicted_reward_joint
+  - proposal_joint_competition
   num_seeds: 10
 
 sorted: false

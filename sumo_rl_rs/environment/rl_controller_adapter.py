@@ -4,9 +4,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, Set, Callable
+import time
 
 import numpy as np
 from sumo_rl_rs.logging.ridepool_logger import RidepoolLogger  
+
+try:
+    from scipy.optimize import linear_sum_assignment
+except Exception:
+    linear_sum_assignment = None
 
 @dataclass
 class Task:
@@ -53,6 +59,18 @@ class InsertionEvaluation:
     marginal_score: float
     candidate_pickup_time: float
     pickup_distance: float
+
+
+@dataclass(frozen=True)
+class ScoredCandidate:
+    robot_id: str
+    task_id: str
+    task_index: int
+    feasible: bool
+    utility: float
+    raw_score: Any
+    proposed_plan: Optional[List[str]]
+    metadata: Dict[str, Any]
 
 
 def compute_coordination_step_counters(
@@ -181,6 +199,36 @@ class RLControllerAdapter:
     STATE_PICKED_UP = 8
     STATE_COMPLETED = 16
 
+    _ALLOWED_CONFLICT_RESOLUTION_MODES = {
+        "capacity",
+        "closest",
+        "closest_then_capacity",
+        "logit_diff",
+        "random",
+        "predicted_reward",
+        "predicted_reward_joint",
+        "hungarian",
+    }
+
+    _CONFLICT_RESOLUTION_ALIASES = {
+        "reward_single": "predicted_reward",
+        "reward_joint": "predicted_reward_joint",
+        "proposer_score_hungarian": "hungarian",
+    }
+
+    _REWARD_ALIGNED_PROPOSER_MODES = {
+        "predicted_reward",
+        "predicted_reward_joint",
+        "predicted_reward_joint_competition",
+        "proposal_joint_competition",
+        "proposal_joint_best_owner",
+    }
+
+    _REWARD_ALIGNED_RESOLVER_MODES = {
+        "predicted_reward",
+        "predicted_reward_joint",
+    }
+
     def __init__(
         self,
         sumo: Any,
@@ -201,11 +249,12 @@ class RLControllerAdapter:
         max_travel_delay_s: float = 900.0,      # how late the robot is allowed to deliever to dropoff
         max_robot_capacity: int = 5,
         logger: Optional["RidepoolLogger"]=None,
-        conflict_resolution: str = "closest_then_capacity", # "capacity" | "closest" | "closest_then_capacity" | "logit_diff" | "random"
+        conflict_resolution: str = "closest_then_capacity", # "capacity" | "closest" | "closest_then_capacity" | "logit_diff" | "random" | "predicted_reward" | "predicted_reward_joint" | "hungarian"
         reassignment_mode: str = "locked_until_pickup",
         route_construction: str = "nearest",
         route_exhaustive_max_stops: int = 8,
         route_construction_debug: bool = False,
+        admission_aware: bool = False,
         reward_params: Optional[Dict[str, Any]] = None,
         competition_joint: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -236,7 +285,7 @@ class RLControllerAdapter:
             max_travel_delay_s: how late the robot is allowed to deliever to dropoff. No explicit penalty for that in the current implementation. 
             max_robot_capacity:
             logger: RidepoolLogger instance.
-            conflict_resolution: how the assignment conflicts are resolved ("capacity" | "closest" | "closest_then_capacity" | "logit_diff" | "random")
+            conflict_resolution: how assignments are resolved (task-level resolver or centralized matching)
             reassignment_mode: ownership policy for assigned-but-not-picked reservations.
                 "locked_until_pickup" keeps a reservation bound to its current taxi until pickup.
                 "free" preserves the legacy behavior where assigned reservations may be re-bid.
@@ -247,6 +296,8 @@ class RLControllerAdapter:
             route_exhaustive_max_stops: maximum remaining stop count for exhaustive search.
                 If exceeded, fallback to "nearest".
             route_construction_debug: emit lightweight debug diagnostics for route reconstruction.
+            admission_aware: when True, reward-aligned non-learned baselines may reject
+                non-positive marginal predicted-reward assignments via explicit NOOP.
             reward_params: reward configuration (reward_type, weights, caps)
             competition_joint: optional config for competition-aware joint proposer.
                 Supported keys:
@@ -264,15 +315,16 @@ class RLControllerAdapter:
         self.max_steps = max_steps
         self.completion_mode = completion_mode.lower().strip()
         assert self.completion_mode in {"pickup", "dropoff", "valid_dropoff"}, "completion_mode must be 'pickup', 'dropoff', or 'valid_dropoff'"
-        self.conflict_resolution = str(conflict_resolution).lower().strip()
-        assert self.conflict_resolution in {"capacity", "closest", "closest_then_capacity", "logit_diff", "random"}, "conflict resolution must be 'capacity', 'closest', 'closest_then_capacity', 'logit_diff', or 'random'"
+        self.conflict_resolution = self._resolve_conflict_resolution_mode(conflict_resolution)
         self.reassignment_mode = str(reassignment_mode).lower().strip()
         assert self.reassignment_mode in {"locked_until_pickup", "free"}, "reassignment_mode must be 'locked_until_pickup' or 'free'"
         self.route_construction = self._resolve_route_construction_mode(route_construction)
         self.route_exhaustive_max_stops = max(0, int(route_exhaustive_max_stops))
         self.route_construction_debug = bool(route_construction_debug)
+        self.admission_aware = bool(admission_aware)
         self._last_route_construction_diag_by_robot: Dict[str, Dict[str, Any]] = {}
         self._warned_missing_logit_diff = False
+        self._last_resolver_selected_plans: Dict[str, List[str]] = {}
         competition_joint_cfg = dict(competition_joint or {})
         self.competition_joint_tie_tolerance = float(competition_joint_cfg.get("tie_tolerance", 1e-8))
         self.competition_joint_competitors = str(competition_joint_cfg.get("competitors", "two_hop")).strip().lower()
@@ -428,6 +480,31 @@ class RLControllerAdapter:
         if value not in allowed:
             allowed_list = ", ".join(sorted(allowed))
             raise ValueError(f"Unknown route_construction='{mode}'. Expected one of: {allowed_list}")
+        return value
+
+    @classmethod
+    def _is_reward_aligned_proposer_mode(cls, mode: str) -> bool:
+        return str(mode).strip().lower() in cls._REWARD_ALIGNED_PROPOSER_MODES
+
+    @classmethod
+    def _is_reward_aligned_resolver_mode(cls, mode: str) -> bool:
+        return str(mode).strip().lower() in cls._REWARD_ALIGNED_RESOLVER_MODES
+
+    def _is_admission_aware_enabled(self) -> bool:
+        return bool(getattr(self, "admission_aware", False))
+
+    def _is_admission_aware_for_hungarian(self, proposer_mode: str) -> bool:
+        return self._is_admission_aware_enabled() and self._is_reward_aligned_proposer_mode(proposer_mode)
+
+    @classmethod
+    def _resolve_conflict_resolution_mode(cls, mode: str) -> str:
+        value = str(mode).strip().lower()
+        value = cls._CONFLICT_RESOLUTION_ALIASES.get(value, value)
+        if value not in cls._ALLOWED_CONFLICT_RESOLUTION_MODES:
+            allowed_list = ", ".join(sorted(cls._ALLOWED_CONFLICT_RESOLUTION_MODES))
+            raise ValueError(
+                f"Unknown conflict_resolution='{mode}'. Expected one of: {allowed_list}"
+            )
         return value
 
     @staticmethod
@@ -1194,7 +1271,8 @@ class RLControllerAdapter:
         res_index: dict[str, object],
         current_edge: Optional[str] = None,
         current_customer_ids: Optional[Sequence[str]] = None,
-    ) -> tuple[float, float, float]:
+        return_sequence: bool = False,
+    ) -> Union[tuple[float, float, float], tuple[float, float, float, List[str]]]:
         """Estimate (score, pickup_time, pickup_distance) using configured PD sequencing.
 
         Route order is built through _build_pd_sequence, so it follows route_construction
@@ -1288,6 +1366,8 @@ class RLControllerAdapter:
             - w_travel * normalized_excess_ride_time
         )
         pickup_distance = float(self._road_distance(current_edge, candidate.fromEdge)) if candidate.fromEdge else float("inf")
+        if return_sequence:
+            return float(score), float(pickup_time), float(pickup_distance), list(seq)
         return float(score), float(pickup_time), float(pickup_distance)
 
     def _task_from_reservation(self, res_id: str, res_obj: object) -> Task:
@@ -1843,6 +1923,13 @@ class RLControllerAdapter:
                     feasible.append((float(d), j, t))
             feasible_by_robot[rid] = feasible
 
+        # For coordination metrics, keep pre-admission candidate availability.
+        # Admission-aware reward proposers may filter these to NOOP later, which
+        # should still count as unforced NOOP when feasible real candidates existed.
+        self._last_pre_admission_has_candidate_by_robot = {
+            str(rid): bool(len(feasible_by_robot.get(rid, [])) > 0) for rid in self._last_robot_ids
+        }
+
         # reset per-decision diagnostics; non-competition modes stay at zeros.
         self._last_competition_joint_diag = {
             "competition_tasks_evaluated": 0.0,
@@ -1957,6 +2044,11 @@ class RLControllerAdapter:
                         self._last_competition_joint_diag["competition_suppressed_count"] += 1.0
 
                 scored_joint.sort(key=lambda x: (-x[0], -x[1], x[2], x[3], x[4]))
+                if self._is_admission_aware_enabled():
+                    finite_scored = [row for row in scored_joint if np.isfinite(float(row[0]))]
+                    if finite_scored and float(finite_scored[0][0]) <= 0.0:
+                        cand_lists.append([])
+                        continue
                 cand_lists.append([j for _, _, _, _, _, j, _ in scored_joint[:K]])
         else:
             for rid in self._last_robot_ids:
@@ -1999,7 +2091,14 @@ class RLControllerAdapter:
 
                             scored.append((float(score), float(pickup_time), float(pickup_distance), str(t.id), float(_dist), j, t))
                         scored.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
-                        feasible = [(_dist, j, t) for _, _, _, _, _dist, j, t in scored]
+                        if self._is_admission_aware_enabled():
+                            finite_scored = [row for row in scored if np.isfinite(float(row[0]))]
+                            if finite_scored and float(finite_scored[0][0]) <= 0.0:
+                                feasible = []
+                            else:
+                                feasible = [(_dist, j, t) for _, _, _, _, _dist, j, t in scored]
+                        else:
+                            feasible = [(_dist, j, t) for _, _, _, _, _dist, j, t in scored]
                     elif mode == "predicted_reward_joint":
                         scored_joint: List[Tuple[float, float, float, float, str, float, int, Task]] = []
                         current_customer_ids = current_customer_ids_by_robot.get(rid, [])
@@ -2027,7 +2126,14 @@ class RLControllerAdapter:
                                 )
                             )
                         scored_joint.sort(key=lambda x: (-x[0], -x[1], x[2], x[3], x[4]))
-                        feasible = [(_dist, j, t) for _, _, _, _, _, _dist, j, t in scored_joint]
+                        if self._is_admission_aware_enabled():
+                            finite_scored = [row for row in scored_joint if np.isfinite(float(row[0]))]
+                            if finite_scored and float(finite_scored[0][0]) <= 0.0:
+                                feasible = []
+                            else:
+                                feasible = [(_dist, j, t) for _, _, _, _, _, _dist, j, t in scored_joint]
+                        else:
+                            feasible = [(_dist, j, t) for _, _, _, _, _, _dist, j, t in scored_joint]
                     else:
                         raise ValueError(f"Unsupported candidates_sorting mode: {mode}")
                 cand_lists.append([j for _, j, _ in feasible[:K]])
@@ -2068,6 +2174,595 @@ class RLControllerAdapter:
 
         return tasks_viable, cand_lists
 
+    def _build_assignment_plan_for_candidate(
+        self,
+        *,
+        rid: str,
+        task_id: str,
+        res_index: dict[str, object],
+        current_edge: Optional[str],
+        current_customer_ids: Sequence[str],
+    ) -> Optional[List[str]]:
+        """Build the exact PD sequence used to evaluate assigning task_id to rid."""
+        if task_id not in res_index:
+            return None
+        if not current_edge:
+            return None
+
+        prev_seq = list(self._shadow_plan_by_robot.get(rid, []))
+        prev_ids = list(dict.fromkeys(prev_seq))
+        base_ids = list(dict.fromkeys(prev_ids + list(current_customer_ids) + [str(task_id)]))
+        base_ids = [r for r in base_ids if r in res_index and not self._is_completed(res_index[r])]
+        base_ids = self._cap_base_ids_to_capacity(rid, base_ids, res_index)
+        if not base_ids:
+            return None
+
+        already_picked = {r for r in base_ids if (r in res_index) and self._is_picked(res_index[r])}
+        seq = self._build_pd_sequence(
+            rid=rid,
+            base_ids=base_ids,
+            res_index=res_index,
+            already_picked=already_picked,
+            current_edge=str(current_edge),
+            start_time=float(self._now()),
+        )
+        return list(seq) if seq else None
+
+    @staticmethod
+    def _ranked_utility_from_sorted_keys(keys_by_task: Dict[str, Any]) -> Dict[str, float]:
+        """Convert ascending sort keys to descending utility ranks (larger is better)."""
+        ordered_task_ids = [tid for tid, _ in sorted(keys_by_task.items(), key=lambda kv: kv[1])]
+        n = len(ordered_task_ids)
+        return {tid: float(n - idx) for idx, tid in enumerate(ordered_task_ids)}
+
+    def _score_feasible_candidates_for_mode(
+        self,
+        *,
+        mode: str,
+        rid: str,
+        feasible: List[Tuple[float, int, Task]],
+        res_index: dict[str, object],
+        current_edge: Optional[str],
+        current_customer_ids: Sequence[str],
+        base_score_cache: Optional[Dict[str, float]] = None,
+    ) -> List[ScoredCandidate]:
+        """Score all feasible edges for one robot with proposer-consistent utilities."""
+        if not feasible:
+            return []
+
+        scored: List[ScoredCandidate] = []
+        if mode == "randomized":
+            order = list(self._rng.permutation(len(feasible)))
+            tie_rank = {int(ix): rank for rank, ix in enumerate(order)}
+            for ix, (dist, j, task) in enumerate(feasible):
+                plan = self._build_assignment_plan_for_candidate(
+                    rid=rid,
+                    task_id=str(task.id),
+                    res_index=res_index,
+                    current_edge=current_edge,
+                    current_customer_ids=current_customer_ids,
+                )
+                scored.append(
+                    ScoredCandidate(
+                        robot_id=str(rid),
+                        task_id=str(task.id),
+                        task_index=int(j),
+                        feasible=True,
+                        utility=0.0,
+                        raw_score=0.0,
+                        proposed_plan=plan,
+                        metadata={"pickup_distance": float(dist), "tie_rank": int(tie_rank[ix])},
+                    )
+                )
+            return scored
+
+        if mode == "pickup_distance":
+            for dist, j, task in feasible:
+                plan = self._build_assignment_plan_for_candidate(
+                    rid=rid,
+                    task_id=str(task.id),
+                    res_index=res_index,
+                    current_edge=current_edge,
+                    current_customer_ids=current_customer_ids,
+                )
+                scored.append(
+                    ScoredCandidate(
+                        robot_id=str(rid),
+                        task_id=str(task.id),
+                        task_index=int(j),
+                        feasible=True,
+                        utility=float(-dist),
+                        raw_score=float(dist),
+                        proposed_plan=plan,
+                        metadata={"pickup_distance": float(dist)},
+                    )
+                )
+            return scored
+
+        if mode == "pickup_deadline":
+            keys: Dict[str, Tuple[float, float, str]] = {}
+            for dist, _j, task in feasible:
+                keys[str(task.id)] = (float(task.pickupDeadline), float(dist), str(task.id))
+            ranked_utility = self._ranked_utility_from_sorted_keys(keys)
+            for dist, j, task in feasible:
+                key = keys[str(task.id)]
+                plan = self._build_assignment_plan_for_candidate(
+                    rid=rid,
+                    task_id=str(task.id),
+                    res_index=res_index,
+                    current_edge=current_edge,
+                    current_customer_ids=current_customer_ids,
+                )
+                scored.append(
+                    ScoredCandidate(
+                        robot_id=str(rid),
+                        task_id=str(task.id),
+                        task_index=int(j),
+                        feasible=True,
+                        utility=float(ranked_utility[str(task.id)]),
+                        raw_score=key,
+                        proposed_plan=plan,
+                        metadata={"pickup_distance": float(dist), "rank_mode": "pickup_deadline"},
+                    )
+                )
+            return scored
+
+        if mode == "pickup_deadline_distance":
+            dist_rank = self._dense_ranks([x[0] for x in feasible])
+            deadline_rank = self._dense_ranks([x[2].pickupDeadline for x in feasible])
+            keys: Dict[str, Tuple[float, float, float, str]] = {}
+            for dist, _j, task in feasible:
+                key = (
+                    float(dist_rank[dist] + deadline_rank[task.pickupDeadline]),
+                    float(task.pickupDeadline),
+                    float(dist),
+                    str(task.id),
+                )
+                keys[str(task.id)] = key
+            ranked_utility = self._ranked_utility_from_sorted_keys(keys)
+            for dist, j, task in feasible:
+                key = keys[str(task.id)]
+                plan = self._build_assignment_plan_for_candidate(
+                    rid=rid,
+                    task_id=str(task.id),
+                    res_index=res_index,
+                    current_edge=current_edge,
+                    current_customer_ids=current_customer_ids,
+                )
+                scored.append(
+                    ScoredCandidate(
+                        robot_id=str(rid),
+                        task_id=str(task.id),
+                        task_index=int(j),
+                        feasible=True,
+                        utility=float(ranked_utility[str(task.id)]),
+                        raw_score=key,
+                        proposed_plan=plan,
+                        metadata={"pickup_distance": float(dist), "rank_mode": "pickup_deadline_distance"},
+                    )
+                )
+            return scored
+
+        if mode == "predicted_reward":
+            for dist, j, task in feasible:
+                try:
+                    score, pickup_time, pickup_distance, seq = self._estimate_sequence_candidate_prediction(
+                        rid=rid,
+                        candidate=task,
+                        res_index=res_index,
+                        current_edge=current_edge,
+                        current_customer_ids=current_customer_ids,
+                        return_sequence=True,
+                    )
+                    utility = float(score)
+                    plan = list(seq)
+                except Exception:
+                    score = float("-inf")
+                    pickup_time = float("inf")
+                    pickup_distance = float("inf")
+                    utility = float("-inf")
+                    plan = None
+
+                scored.append(
+                    ScoredCandidate(
+                        robot_id=str(rid),
+                        task_id=str(task.id),
+                        task_index=int(j),
+                        feasible=np.isfinite(float(utility)),
+                        utility=float(utility),
+                        raw_score=(float(score), float(pickup_time), float(pickup_distance), str(task.id)),
+                        proposed_plan=plan,
+                        metadata={
+                            "pickup_distance": float(dist),
+                            "pickup_time": float(pickup_time),
+                            "score": float(score),
+                        },
+                    )
+                )
+            return scored
+
+        if mode in {"predicted_reward_joint", "predicted_reward_joint_competition", "proposal_joint_competition", "proposal_joint_best_owner"}:
+            cache = base_score_cache if base_score_cache is not None else {}
+            for dist, j, task in feasible:
+                eval_result = self.evaluate_marginal_insertion(
+                    robot_id=rid,
+                    task=task,
+                    res_index=res_index,
+                    current_edge=str(current_edge),
+                    current_customer_ids=current_customer_ids,
+                    base_score_cache=cache,
+                )
+                plan = self._build_assignment_plan_for_candidate(
+                    rid=rid,
+                    task_id=str(task.id),
+                    res_index=res_index,
+                    current_edge=current_edge,
+                    current_customer_ids=current_customer_ids,
+                )
+                scored.append(
+                    ScoredCandidate(
+                        robot_id=str(rid),
+                        task_id=str(task.id),
+                        task_index=int(j),
+                        feasible=bool(eval_result.feasible),
+                        utility=float(eval_result.marginal_score),
+                        raw_score=(
+                            float(eval_result.marginal_score),
+                            float(eval_result.inserted_route_score),
+                            float(eval_result.candidate_pickup_time),
+                            float(eval_result.pickup_distance),
+                            str(task.id),
+                        ),
+                        proposed_plan=plan,
+                        metadata={
+                            "pickup_distance": float(dist),
+                            "inserted_route_score": float(eval_result.inserted_route_score),
+                            "candidate_pickup_time": float(eval_result.candidate_pickup_time),
+                        },
+                    )
+                )
+            return scored
+
+        raise ValueError(f"Unsupported candidates_sorting mode for scoring: {mode}")
+
+    def _resolve_assignments_hungarian(
+        self,
+        *,
+        robots: List[str],
+        tasks_list: List[Task],
+    ) -> tuple[List[Optional[str]], Dict[str, str], Dict[str, List[str]]]:
+        """Centralized one-to-one assignment on the full proposer score matrix."""
+        if linear_sum_assignment is None:
+            raise RuntimeError(
+                "resolver='hungarian' requires scipy.optimize.linear_sum_assignment (SciPy not available)"
+            )
+
+        t_all_start = time.perf_counter()
+        t_build_start = time.perf_counter()
+
+        mode = self.candidates_sorting
+        admission_hungarian = self._is_admission_aware_for_hungarian(mode)
+        res_index = self._reservation_index()
+        p2r = self._person_to_res_index(res_index)
+
+        tasks_viable: List[Task] = [t for t in tasks_list if str(t.id) in res_index and not t.is_obsolete]
+        task_ids_sorted: List[str] = sorted({str(t.id) for t in tasks_viable})
+
+        robot_ids_sorted: List[str] = sorted([str(r) for r in robots])
+        robot_to_row = {rid: i for i, rid in enumerate(robot_ids_sorted)}
+        task_to_col = {tid: j for j, tid in enumerate(task_ids_sorted)}
+
+        robot_first_edge: Dict[str, str] = {}
+        for rid in robot_ids_sorted:
+            try:
+                route = self.sumo.vehicle.getRoute(rid)
+                if route:
+                    robot_first_edge[rid] = route[0]
+            except Exception:
+                pass
+
+        locked_owner_by_task = {
+            t.id: self._locked_owner_for_reservation(t.id, task=t)
+            for t in tasks_viable
+        }
+        current_customer_ids_by_robot: Dict[str, List[str]] = {
+            rid: self._current_reservation_ids_onboard(rid, p2r) for rid in robot_ids_sorted
+        }
+
+        feasible_by_robot: Dict[str, List[Tuple[float, int, Task]]] = {}
+        for rid in robot_ids_sorted:
+            remaining_capacity = self._remaining_capacity(rid)
+            r_edge = robot_first_edge.get(rid)
+            if remaining_capacity <= 0 or r_edge is None:
+                feasible_by_robot[rid] = []
+                continue
+
+            feasible: List[Tuple[float, int, Task]] = []
+            for j, t in enumerate(tasks_viable):
+                locked_owner = locked_owner_by_task.get(t.id)
+                if locked_owner is not None and locked_owner != rid:
+                    continue
+                if not t.fromEdge:
+                    continue
+                d = self._road_distance(r_edge, t.fromEdge)
+                if np.isfinite(d) and d <= self.vicinity_m:
+                    feasible.append((float(d), j, t))
+            feasible_by_robot[rid] = feasible
+
+        base_score_cache: Dict[str, float] = {}
+        scored_edges_by_robot: Dict[str, List[ScoredCandidate]] = {}
+        nonfinite_edge_scores = 0
+        fallback_used = False
+
+        for rid in robot_ids_sorted:
+            scored = self._score_feasible_candidates_for_mode(
+                mode=mode,
+                rid=rid,
+                feasible=feasible_by_robot.get(rid, []),
+                res_index=res_index,
+                current_edge=robot_first_edge.get(rid),
+                current_customer_ids=current_customer_ids_by_robot.get(rid, []),
+                base_score_cache=base_score_cache,
+            )
+            finite_count = sum(1 for edge in scored if np.isfinite(float(edge.utility)))
+            nonfinite_edge_scores += sum(1 for edge in scored if not np.isfinite(float(edge.utility)))
+
+            if scored and finite_count == 0 and not admission_hungarian:
+                fallback_used = True
+                order = list(self._rng.permutation(len(scored)))
+                rank_by_ix = {int(ix): rank for rank, ix in enumerate(order)}
+                repaired: List[ScoredCandidate] = []
+                for ix, edge in enumerate(scored):
+                    rank = rank_by_ix[ix]
+                    repaired.append(
+                        ScoredCandidate(
+                            robot_id=edge.robot_id,
+                            task_id=edge.task_id,
+                            task_index=edge.task_index,
+                            feasible=True,
+                            utility=float(1e-6 * (len(scored) - rank)),
+                            raw_score=edge.raw_score,
+                            proposed_plan=edge.proposed_plan,
+                            metadata={**edge.metadata, "fallback_random_rank": int(rank)},
+                        )
+                    )
+                scored = repaired
+
+            scored_edges_by_robot[rid] = scored
+
+        if mode in {"predicted_reward_joint_competition", "proposal_joint_competition", "proposal_joint_best_owner"}:
+            tol = float(max(0.0, self.competition_joint_tie_tolerance))
+            per_task_best: Dict[str, float] = {}
+            for rid in robot_ids_sorted:
+                for edge in scored_edges_by_robot.get(rid, []):
+                    if not edge.feasible or not np.isfinite(float(edge.utility)):
+                        continue
+                    best = per_task_best.get(edge.task_id)
+                    if best is None or float(edge.utility) > float(best):
+                        per_task_best[edge.task_id] = float(edge.utility)
+
+            for rid in robot_ids_sorted:
+                filtered: List[ScoredCandidate] = []
+                for edge in scored_edges_by_robot.get(rid, []):
+                    best = per_task_best.get(edge.task_id)
+                    if best is None or not np.isfinite(float(edge.utility)):
+                        filtered.append(edge)
+                        continue
+                    if float(edge.utility) >= float(best) - tol:
+                        filtered.append(edge)
+                    else:
+                        filtered.append(
+                            ScoredCandidate(
+                                robot_id=edge.robot_id,
+                                task_id=edge.task_id,
+                                task_index=edge.task_index,
+                                feasible=False,
+                                utility=float("-inf"),
+                                raw_score=edge.raw_score,
+                                proposed_plan=edge.proposed_plan,
+                                metadata={**edge.metadata, "suppressed_by_competition": True},
+                            )
+                        )
+                scored_edges_by_robot[rid] = filtered
+
+        R = len(robot_ids_sorted)
+        T = len(task_ids_sorted)
+        n_cols = T + R
+        if R == 0:
+            return [None for _ in robots], {}, {}
+
+        edge_by_pair: Dict[Tuple[str, str], ScoredCandidate] = {}
+        utilities: List[float] = []
+        feasible_edge_count = 0
+        tasks_with_multiple_claimants = 0
+
+        def _json_finite_or_none(v: Any) -> Optional[float]:
+            try:
+                f = float(v)
+            except Exception:
+                return None
+            return f if np.isfinite(f) else None
+
+        task_claimants: Dict[str, int] = defaultdict(int)
+        for rid in robot_ids_sorted:
+            for edge in scored_edges_by_robot.get(rid, []):
+                if not edge.feasible or not np.isfinite(float(edge.utility)):
+                    continue
+                edge_by_pair[(rid, edge.task_id)] = edge
+                utilities.append(float(edge.utility))
+                feasible_edge_count += 1
+                task_claimants[edge.task_id] += 1
+        tasks_with_multiple_claimants = int(sum(1 for cnt in task_claimants.values() if cnt >= 2))
+
+        scaled_by_pair: Dict[Tuple[str, str], float] = {}
+        if utilities:
+            u_min = float(min(utilities))
+            u_max = float(max(utilities))
+            denom = u_max - u_min
+            for key, edge in edge_by_pair.items():
+                u = float(edge.utility)
+                if denom <= 1e-12:
+                    scaled = 0.5
+                else:
+                    scaled = (u - u_min) / denom
+                scaled_by_pair[key] = float(scaled)
+
+        bad_cost = 1e9
+        costs = np.full((R, n_cols), bad_cost, dtype=np.float64)
+        feasible_mask = np.zeros((R, T), dtype=np.int8)
+        raw_utility = np.full((R, T), np.nan, dtype=np.float64)
+        transformed_utility_matrix = np.full((R, T), np.nan, dtype=np.float64)
+        pickup_distance_raw = np.full((R, T), np.nan, dtype=np.float64)
+        raw_score_obj_matrix: List[List[Optional[Any]]] = [[None for _ in range(T)] for _ in range(R)]
+
+        for rid in robot_ids_sorted:
+            row = robot_to_row[rid]
+            for tid in task_ids_sorted:
+                col = task_to_col[tid]
+                pair = (rid, tid)
+                if pair not in edge_by_pair:
+                    continue
+                edge = edge_by_pair[pair]
+                feasible_mask[row, col] = 1
+                raw_utility[row, col] = float(edge.utility)
+                raw_score_obj_matrix[row][col] = edge.raw_score
+                if "pickup_distance" in edge.metadata:
+                    pickup_distance_raw[row, col] = float(edge.metadata["pickup_distance"])
+                if admission_hungarian:
+                    transformed_u = float(edge.utility)
+                else:
+                    real_bonus = float(R + 1.0)
+                    transformed_u = real_bonus + float(scaled_by_pair.get(pair, 0.0))
+                transformed_utility_matrix[row, col] = float(transformed_u)
+                costs[row, col] = -float(transformed_u)
+
+            for d in range(R):
+                dummy_col = T + d
+                costs[row, dummy_col] = 0.0
+
+        build_ms = (time.perf_counter() - t_build_start) * 1000.0
+
+        t_solver_start = time.perf_counter()
+        row_ind, col_ind = linear_sum_assignment(costs)
+        solver_ms = (time.perf_counter() - t_solver_start) * 1000.0
+
+        chosen_by_robot: Dict[str, Optional[str]] = {rid: None for rid in robot_ids_sorted}
+        winners: Dict[str, str] = {}
+        selected_plan_by_robot: Dict[str, List[str]] = {}
+        selected_score_sum = 0.0
+
+        for row, col in zip(row_ind.tolist(), col_ind.tolist()):
+            rid = robot_ids_sorted[row]
+            if col >= T:
+                continue
+            tid = task_ids_sorted[col]
+            edge = edge_by_pair.get((rid, tid))
+            if edge is None:
+                continue
+            chosen_by_robot[rid] = tid
+            winners[tid] = rid
+            selected_score_sum += float(edge.utility)
+            if edge.proposed_plan:
+                selected_plan_by_robot[rid] = list(edge.proposed_plan)
+
+        chosen: List[Optional[str]] = [chosen_by_robot.get(str(rid)) for rid in robots]
+        unmatched_with_candidates = 0
+        for rid in robot_ids_sorted:
+            if chosen_by_robot.get(rid) is not None:
+                continue
+            if len(feasible_by_robot.get(rid, [])) > 0:
+                unmatched_with_candidates += 1
+
+        total_ms = (time.perf_counter() - t_all_start) * 1000.0
+
+        if self.logger:
+            try:
+                selected_indices = [[int(r), int(c)] for r, c in zip(row_ind.tolist(), col_ind.tolist())]
+                selected_pairs = []
+                for rid in robot_ids_sorted:
+                    tid = chosen_by_robot.get(rid)
+                    if tid is None:
+                        continue
+                    edge = edge_by_pair.get((rid, tid))
+                    selected_pairs.append(
+                        {
+                            "robot_id": str(rid),
+                            "task_id": str(tid),
+                            "raw_utility": _json_finite_or_none(edge.utility if edge is not None else None),
+                            "raw_score": (edge.raw_score if edge is not None else None),
+                            "pickup_distance": _json_finite_or_none(
+                                (edge.metadata.get("pickup_distance") if edge is not None else None)
+                            ),
+                            "plan_len": int(len(edge.proposed_plan)) if edge is not None and edge.proposed_plan else 0,
+                        }
+                    )
+
+                raw_utility_rows = [
+                    [(_json_finite_or_none(v) if feasible_mask[i, j] else None) for j, v in enumerate(raw_utility[i, :].tolist())]
+                    for i in range(R)
+                ]
+                pickup_distance_rows = [
+                    [(_json_finite_or_none(v) if feasible_mask[i, j] else None) for j, v in enumerate(pickup_distance_raw[i, :].tolist())]
+                    for i in range(R)
+                ]
+                transformed_rows = [
+                    [(_json_finite_or_none(v) if feasible_mask[i, j] else None) for j, v in enumerate(transformed_utility_matrix[i, :].tolist())]
+                    for i in range(R)
+                ]
+                cost_rows = [
+                    [_json_finite_or_none(v) for v in costs[i, :].tolist()]
+                    for i in range(R)
+                ]
+
+                self.logger.log_debug(
+                    self._now(),
+                    "hungarian-step",
+                    {
+                        "resolver": "hungarian",
+                        "proposer": str(self.candidates_sorting),
+                        "admission_aware": bool(admission_hungarian),
+                        "robot_ids_sorted": list(robot_ids_sorted),
+                        "task_ids_sorted": list(task_ids_sorted),
+                        "feasible_edge_mask": feasible_mask.astype(int).tolist(),
+                        "raw_utility_matrix": raw_utility_rows,
+                        "raw_score_matrix": raw_score_obj_matrix,
+                        "pickup_distance_matrix": pickup_distance_rows,
+                        "transformed_utility_matrix": transformed_rows,
+                        "hungarian_cost_matrix": cost_rows,
+                        "selected_matrix_indices": selected_indices,
+                        "selected_pairs": selected_pairs,
+                        "raw_total_selected_score": float(selected_score_sum),
+                        "matching_cardinality": int(len(winners)),
+                    },
+                )
+            except Exception:
+                pass
+
+        if self.logger:
+            try:
+                self.logger.log_centralized_matching(
+                    time=float(self._now()),
+                    proposer=str(self.candidates_sorting),
+                    resolver="hungarian",
+                    active_robot_count=int(R),
+                    unique_candidate_task_count=int(T),
+                    feasible_edge_count=int(feasible_edge_count),
+                    multi_robot_task_count=int(tasks_with_multiple_claimants),
+                    matching_cardinality=int(len(winners)),
+                    unmatched_with_candidates=int(unmatched_with_candidates),
+                    total_selected_score=float(selected_score_sum),
+                    matrix_build_ms=float(build_ms),
+                    solver_ms=float(solver_ms),
+                    total_assignment_ms=float(total_ms),
+                    nonfinite_edge_scores=int(nonfinite_edge_scores),
+                    admission_aware=bool(admission_hungarian),
+                    fallback_used=bool(fallback_used),
+                )
+            except Exception:
+                pass
+
+        return chosen, winners, selected_plan_by_robot
+
     def _resolve_assignment_conflicts(
         self,
         robots: List[str], # list of robot IDs ["t0", "t1", "t2"]
@@ -2085,6 +2780,8 @@ class RLControllerAdapter:
         - "closest_then_capacity": closest, then capacity.
         - "logit_diff": largest selected-task logit margin wins.
         - "random": winner sampled uniformly at random among claimants.
+        - "predicted_reward": resolver score from predicted_reward proposer for contested task.
+        - "predicted_reward_joint": resolver score from predicted_reward_joint proposer for contested task.
         Returns:
         (resolved_assignments, winners_map) where winners_map is {res_id: rid_winner}.
         """
@@ -2112,9 +2809,30 @@ class RLControllerAdapter:
 
         winners: Dict[str, str] = {}
 
+        self._last_resolver_selected_plans = {}
+        res_index = self._reservation_index()
+        p2r = self._person_to_res_index(res_index)
+        current_customer_ids_by_robot: Dict[str, List[str]] = {
+            rid: self._current_reservation_ids_onboard(rid, p2r) for rid in robots
+        }
+        current_edge_by_robot: Dict[str, Optional[str]] = {}
+        for rid in robots:
+            edge = None
+            try:
+                route = self.sumo.vehicle.getRoute(rid)
+                if route:
+                    edge = route[0]
+            except Exception:
+                edge = None
+            current_edge_by_robot[rid] = edge
+        reward_score_cache: Dict[str, float] = {}
+
 
         for res_id, rids in buckets.items():
-            if len(rids) == 1:
+            mode = self.conflict_resolution
+            admission_resolver = self._is_admission_aware_enabled() and self._is_reward_aligned_resolver_mode(mode)
+
+            if len(rids) == 1 and not admission_resolver:
                 winners[res_id] = rids[0]
                 continue
 
@@ -2163,7 +2881,6 @@ class RLControllerAdapter:
             else:
                 raw_logit_winners = []
 
-            mode = self.conflict_resolution
             if mode == "logit_diff":
                 if len(margin_pairs) == len(rids):
                     best = [rid for rid, m in margin_pairs if m >= max_margin - 1e-6]
@@ -2173,7 +2890,73 @@ class RLControllerAdapter:
                         self._warned_missing_logit_diff = True
                     mode = "closest_then_capacity"
 
-            if mode == "capacity":
+            resolver_fallback_used = False
+            resolver_scores: Dict[str, float] = {}
+            resolver_tie_count = 0
+            resolver_scoring_ms = 0.0
+            best: List[str] = []
+
+            if mode in {"predicted_reward", "predicted_reward_joint"}:
+                t_score_start = time.perf_counter()
+                scored_edges: List[ScoredCandidate] = []
+                for rid in rids:
+                    if t is None:
+                        continue
+                    candidate_scored = self._score_feasible_candidates_for_mode(
+                        mode=mode,
+                        rid=rid,
+                        feasible=[(
+                            float(self._road_distance(current_edge_by_robot.get(rid), t.fromEdge)) if (current_edge_by_robot.get(rid) and t.fromEdge) else float("inf"),
+                            0,
+                            t,
+                        )],
+                        res_index=res_index,
+                        current_edge=current_edge_by_robot.get(rid),
+                        current_customer_ids=current_customer_ids_by_robot.get(rid, []),
+                        base_score_cache=reward_score_cache,
+                    )
+                    if candidate_scored:
+                        scored_edges.append(candidate_scored[0])
+
+                resolver_scoring_ms = (time.perf_counter() - t_score_start) * 1000.0
+                for edge in scored_edges:
+                    resolver_scores[edge.robot_id] = float(edge.utility)
+
+                finite_edges = [edge for edge in scored_edges if np.isfinite(float(edge.utility))]
+                if finite_edges:
+                    best_score = max(float(edge.utility) for edge in finite_edges)
+                    if admission_resolver and best_score <= 0.0:
+                        best_edges = []
+                    else:
+                        best_edges = [edge for edge in finite_edges if float(edge.utility) >= best_score - 1e-12]
+                        resolver_tie_count = len(best_edges)
+                        best = [edge.robot_id for edge in best_edges]
+                else:
+                    resolver_fallback_used = True
+                    if not admission_resolver:
+                        best = list(rids)
+
+                if self.logger:
+                    try:
+                        self.logger.log_debug(
+                            self._now(),
+                            "conflict-resolver-score",
+                            {
+                                "resolver": mode,
+                                "task_id": str(res_id),
+                                "competing_robot_ids": list(map(str, rids)),
+                                "score_by_robot": {str(k): float(v) for k, v in resolver_scores.items()},
+                                "winner_score": float(max(resolver_scores.values())) if resolver_scores else float("-inf"),
+                                "admission_aware": bool(admission_resolver),
+                                "tied_best_count": int(max(1, resolver_tie_count)),
+                                "fallback_used": bool(resolver_fallback_used),
+                                "scoring_time_ms": float(resolver_scoring_ms),
+                            },
+                        )
+                    except Exception:
+                        pass
+
+            elif mode == "capacity":
                 # Pick taxis with max remaining capacity
                 caps = [(rid, rem_cap.get(rid, 0)) for rid in rids]
                 max_cap = max(c for _, c in caps)
@@ -2191,6 +2974,9 @@ class RLControllerAdapter:
                     max_cap = max(c for _, c in caps)
                     best = [rid for rid, c in caps if c == max_cap]
 
+            if not best:
+                continue
+
             # Tie-break at random using controller RNG
             if len(best) == 1:
                 winners[res_id] = best[0]
@@ -2199,6 +2985,23 @@ class RLControllerAdapter:
                 winners[res_id] = best[idx]
 
             winner_rid = winners[res_id]
+            if mode in {"predicted_reward", "predicted_reward_joint"} and t is not None:
+                winner_scored = self._score_feasible_candidates_for_mode(
+                    mode=mode,
+                    rid=winner_rid,
+                    feasible=[(
+                        float(self._road_distance(current_edge_by_robot.get(winner_rid), t.fromEdge)) if (current_edge_by_robot.get(winner_rid) and t.fromEdge) else float("inf"),
+                        0,
+                        t,
+                    )],
+                    res_index=res_index,
+                    current_edge=current_edge_by_robot.get(winner_rid),
+                    current_customer_ids=current_customer_ids_by_robot.get(winner_rid, []),
+                    base_score_cache=reward_score_cache,
+                )
+                if winner_scored and winner_scored[0].proposed_plan:
+                    self._last_resolver_selected_plans[winner_rid] = list(winner_scored[0].proposed_plan)
+
             winner_margin = margin_map.get(winner_rid)
             loser_margins = [m for rid, m in margin_map.items() if rid != winner_rid]
             if self.logger:
@@ -2381,14 +3184,23 @@ class RLControllerAdapter:
                             print("task_idx", task_idx, "idx_to_res_id[task_idx]", idx_to_res_id[task_idx])
                             break
 
-            # 1b) resolve conflicts so only one taxi wins each reservation
-            chosen, winners = self._resolve_assignment_conflicts(
-                list(robots),
-                chosen,
-                tasks,
-                selection_margins=selection_margins,
-                selection_raw_logits=selection_raw_logits,
-            )
+            # 1b) resolve assignments.
+            # - Task-level resolvers consume top-1 proposals.
+            # - Hungarian builds a full feasible robot-task score matrix.
+            if self.conflict_resolution == "hungarian":
+                chosen, winners, selected_plans = self._resolve_assignments_hungarian(
+                    robots=list(robots),
+                    tasks_list=tasks,
+                )
+                self._last_resolver_selected_plans = dict(selected_plans)
+            else:
+                chosen, winners = self._resolve_assignment_conflicts(
+                    list(robots),
+                    chosen,
+                    tasks,
+                    selection_margins=selection_margins,
+                    selection_raw_logits=selection_raw_logits,
+                )
 
             # Per-step robot-level coordination counters, based on current policy decisions
             # and the resolver output of this exact call.
@@ -2418,6 +3230,11 @@ class RLControllerAdapter:
             else:
                 for ridx, _ in enumerate(robots):
                     has_candidate_by_robot.append(bool(ridx < len(cand_lists) and len(cand_lists[ridx]) > 0))
+
+            pre_admission_map = dict(getattr(self, "_last_pre_admission_has_candidate_by_robot", {}) or {})
+            for ridx, rid in enumerate(robots):
+                if str(rid) in pre_admission_map:
+                    has_candidate_by_robot[ridx] = bool(pre_admission_map[str(rid)])
 
             for ridx, _ in enumerate(robots):
                 sel_noop = False
@@ -2570,15 +3387,28 @@ class RLControllerAdapter:
 
                 # FULL RESET strategy: every active reservation appears twice
                 # seq = self._build_sequence_reset_twice(base_ids)
-                already_picked = {r for r in base_ids if (r in res_index) and self._is_picked(res_index[r])}
-                seq = self._build_pd_sequence(
-                    rid=rid,
-                    base_ids=base_ids,
-                    res_index=res_index,
-                    already_picked=already_picked,
-                    current_edge=str(self._get_taxi_current_edge(rid)),
-                    start_time=float(self._now()),
+                override_seq = list(self._last_resolver_selected_plans.get(rid, []))
+                override_uniq = list(dict.fromkeys(override_seq))
+                current_customer_set = set(current_customer_ids)
+                can_use_override = bool(
+                    override_seq
+                    and set(override_uniq) == set(base_ids)
+                    and current_customer_set.issubset(set(override_uniq))
+                    and (res_id is None or str(res_id) in set(override_uniq))
                 )
+
+                if can_use_override:
+                    seq = list(override_seq)
+                else:
+                    already_picked = {r for r in base_ids if (r in res_index) and self._is_picked(res_index[r])}
+                    seq = self._build_pd_sequence(
+                        rid=rid,
+                        base_ids=base_ids,
+                        res_index=res_index,
+                        already_picked=already_picked,
+                        current_edge=str(self._get_taxi_current_edge(rid)),
+                        start_time=float(self._now()),
+                    )
 
                 # log pre-dispatch
                 try:

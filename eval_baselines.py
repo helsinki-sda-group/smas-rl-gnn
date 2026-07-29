@@ -102,6 +102,13 @@ def resolve_candidates_sorting(opt_obj) -> str:
     return "pickup_distance"
 
 
+def resolve_admission_aware(opt_obj) -> bool:
+    raw_value = getattr(opt_obj.env, "admission_aware", False)
+    if isinstance(raw_value, bool):
+        return raw_value
+    raise ValueError("env.admission_aware must be a YAML boolean (true/false)")
+
+
 def resolve_policies(opt_obj) -> List[str]:
     cli_policies = getattr(opt_obj, "policies", None)
     if cli_policies not in (None, ""):
@@ -118,6 +125,8 @@ def resolve_policies(opt_obj) -> List[str]:
 
 def policy_candidates_sorting(policy_name: str, default_sorting: str) -> str:
     """Map policy name to controller candidates_sorting mode."""
+    if str(policy_name).strip().lower() == "random":
+        return "randomized"
     return SLOT0_SORTING_POLICY_MAP.get(policy_name, default_sorting)
 
 # 1) SUMO/controller setup (example; adapt to your config)
@@ -161,6 +170,7 @@ CONFLICT_RESOLUTION = str(getattr(opt.env, "conflict_resolution", "closest_then_
 reward_params = dict(getattr(opt.env, "reward_params", {}) or {})
 COMPLETION_MODE = str(getattr(opt.env, "completion_mode", "dropoff"))
 CANDIDATES_SORTING = resolve_candidates_sorting(opt)
+ADMISSION_AWARE = resolve_admission_aware(opt)
 
 NUM_SEEDS = int(opt.baselines.num_seeds)
 SEEDS = list(opt.seeds.eval)
@@ -178,6 +188,8 @@ metrics_log_path = with_instance_and_resolver_alias(
     metrics_log_path,
     SUMO_CFG,
     CONFLICT_RESOLUTION,
+    route_construction=str(getattr(opt.env, "route_construction", "nearest")),
+    admission_aware=ADMISSION_AWARE,
 )
 with open(metrics_log_path, "w", encoding="utf-8") as f:
     f.write(f"vicinity_m={VICINITY_M}, max_steps={MAX_STEPS}, max_wait_delay_s={MAX_WAIT_DELAY_S}, "
@@ -186,6 +198,7 @@ with open(metrics_log_path, "w", encoding="utf-8") as f:
         sumo_cfg_path=SUMO_CFG,
         conflict_resolution=CONFLICT_RESOLUTION,
         route_construction=str(getattr(opt.env, "route_construction", "nearest")),
+        admission_aware=ADMISSION_AWARE,
         reward_params=reward_params,
         completion_mode=COMPLETION_MODE,
         reassignment_mode=str(getattr(opt.env, "reassignment_mode", "locked_until_pickup")),
@@ -194,6 +207,8 @@ with open(metrics_log_path, "w", encoding="utf-8") as f:
     f.write(get_metrics_header() + "\n")
 
 all_metrics_by_policy: Dict[str, List[EpisodeMetrics]] = {p: [] for p in POLICIES}
+
+print(f"admission_aware={ADMISSION_AWARE}")
 
 # Run evaluations for first NUM_SEEDS seeds
 for seed in SEEDS[:NUM_SEEDS]:
@@ -246,6 +261,7 @@ for seed in SEEDS[:NUM_SEEDS]:
                 route_construction=str(getattr(opt.env, "route_construction", "nearest")),
                 route_exhaustive_max_stops=int(getattr(opt.env, "route_exhaustive_max_stops", 8)),
                 route_construction_debug=bool(getattr(opt.env, "route_construction_debug", False)),
+                admission_aware=ADMISSION_AWARE,
                 reward_params=reward_params,
                 competition_joint=dict(getattr(opt.env, "competition_joint", {}) or {}),
             )

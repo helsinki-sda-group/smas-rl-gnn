@@ -48,7 +48,31 @@ Notes:
 - If `--policies` is provided, it overrides `baselines.policies` from YAML.
 
 ## Supported conflict resolution mechanisms
-"capacity" | "closest" | "closest_then_capacity" | "logit_diff" | "random"
+"capacity" | "closest" | "closest_then_capacity" | "logit_diff" | "random" | "predicted_reward" | "predicted_reward_joint" | "hungarian"
+
+## Admission-aware protocol switch
+
+YAML flag:
+
+```yaml
+env:
+	admission_aware: false
+```
+
+Meaning:
+- `false` (default): forced-assignment protocol (legacy behavior).
+	Reward-aligned proposers and resolvers still pick real tasks when feasible, and Hungarian remains cardinality-first.
+- `true`: predicted-reward mechanisms may choose `NOOP` when every available marginal insertion score is non-positive.
+
+Scope:
+- Affected proposer modes: `predicted_reward`, `predicted_reward_joint`, `proposal_joint_competition`.
+- Affected task-level resolvers: `predicted_reward`, `predicted_reward_joint`.
+- Affected Hungarian mode: when proposer sorting is reward-aligned, Hungarian uses zero-valued per-robot dummy assignments and maximizes total utility (not cardinality first).
+- Unaffected forced heuristics: `distance`, `deadline`, `capacity`, `closest`, `random`, `unique` remain forced-assignment baselines.
+
+Filename convention:
+- Forced mode keeps existing filenames.
+- Admission-aware mode appends `_aa` before `.log` (example: `metrics_v..._cap2_randdest_hungarian_aa.log`).
 
 ## Action space convention used by baselines
 
@@ -317,7 +341,61 @@ These do not break baseline evaluation, but they are useful to know when interpr
 python eval_baselines.py --config configs/rp_gnn.yaml
 ```
 
+Forced protocol example:
+
+```bash
+python scripts/generate_baseline_eval_configs.py \
+	--scenario randdest \
+	--resolver hungarian \
+	--admission-aware false
+python eval_baselines.py --config configs/rp_baseline_randdest_hungarian.yaml
+```
+
+Admission-aware example:
+
+```bash
+python scripts/generate_baseline_eval_configs.py \
+	--scenario randdest \
+	--resolver hungarian \
+	--admission-aware true
+python eval_baselines.py --config configs/rp_baseline_randdest_hungarian.yaml
+```
+
 Optional:
 - `--sumoport <port>` to select SUMO remote port.
 - `--policies <names...>` to override policy list for one run.
 - `--candidates-sorting <mode>` to set default sorting mode for policies that do not override it.
+
+## Batch evaluation 
+
+For batch evaluation, `scripts\run_eval_baselines_matrix.sh` is available. It generates `yaml` and `sumocfg` files for the selected scenarios, resolvers, policies.
+
+Example:
+```bash
+bash scripts\run_eval_baselines_matrix.sh \ 
+	--scenarios "randdest,corridor_asymmetric"
+	--resolvers "capacity,ctc"
+```
+
+It uses script `scripts\generate_baseline_eval_configs.py` which generates `yaml` and `sumocfg` file for a single scenario.
+
+Scenario alias mapping used:
+
+randdest, rand_dest -> coordination_medium_rand_dest_cap2.xml
+corridor_asymmetric, asymmetric -> corridor_asymmetric_cap2_taxis6.rou.xml
+wave -> wave_demand_cap2_taxis6.rou.xml
+corridor_wave -> corridor_wave_cap2_taxis6.rou.xml
+corridor_mixed, mixed -> corridor_mixed_cap2_taxis6.rou.xml
+corridor_noisy, noisy -> corridor_noisy_cap2_taxis6.rou.xml
+corridor_hard, hard -> corridor_hard_cap2_taxis6.rou.xml
+Resolver aliases:
+
+ctc -> closest_then_capacity
+closest_then_capacity -> closest_then_capacity
+closest -> closest
+capacity -> capacity
+logitdiff, logit_diff -> logit_diff
+random -> random
+Filename resolver aliasing:
+
+closest_then_capacity is shortened to closest in output filenames.
