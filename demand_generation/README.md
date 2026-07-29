@@ -116,17 +116,19 @@ Full extraction and visualization:
 ```bash
 python demand_generation/extract_cluster_edges.py \
   --net configs/randgrid.net.xml \
-  --clusters demand_generation/clusters.txt \
-  --out-json demand_generation/clusters_edges.json \
+  --clusters demand_generation/clusters_corridor.txt \
+  --out-json demand_generation/clusters_corridor_edges.json \
   --out-dir demand_generation/clusters_edges \
   --summary-csv demand_generation/clusters_summary.csv \
-  --viz-add demand_generation/clusters_viz.add.xml \
+  --viz-add demand_generation/clusters_corridor_viz.add.xml \
   --viz-format add \
   --membership any-point \
   --exclude-internal \
   --min-length 10 \
   --allow-vclass passenger \
-  --allow-vclass taxi
+  --allow-vclass taxi \
+  --viz-line-width 9 \
+  --viz-layer 140
 ```
 
 Higher-visibility overlays:
@@ -160,6 +162,17 @@ python demand_generation/extract_cluster_edges.py \
 - `demand_generation/clusters_viz.add.xml`
 
 These edge lists can be reused by downstream OD or passenger-wave generators.
+
+## od_pair_stats.py
+
+Samples trips between clusters and prints statistics on trip distance and duration.
+
+### Example commands
+```bash
+python demand_generation/od_pair_stats.py \
+  --net configs/randgrid.net.xml \
+  --clusters-json demand_generation/clusters_corridor_edges.json
+```
 
 ## generate_wave_demand.py
 
@@ -291,6 +304,98 @@ python demand_generation/generate_wave_demand.py \
   --wave-size-min 4 --wave-size-max 5 \
   --wave-interval-min 160 --wave-interval-max 230 \
   --random-trip-share 0.05
+```
+
+Generate corridor scenario (wave AB,BC,CB,BA):
+```bash
+python demand_generation/generate_wave_demand.py \
+  --clusters-json demand_generation/clusters_corridor_edges.json \
+  --out-xml demand_generation/corridor_wave_passengers.xml \
+  --out-csv demand_generation/corridor_wave_passengers.csv \
+  --start-time 0 \
+  --end-time 2400 \
+  --num-waves 8 \
+  --wave-size-min 6 \
+  --wave-size-max 6 \
+  --wave-interval-min 180 \
+  --wave-interval-max 240 \
+  --random-trip-share 0.0 \
+  --template-cycle AB_BC,CB_BA \
+  --seed 42 \
+  --include-parking-area
+```
+
+Generate corridor mixed scenario:
+```bash
+python demand_generation/generate_wave_demand.py \
+  --clusters-json demand_generation/clusters_corridor_edges.json \
+  --out-xml demand_generation/corridor_mixed_passengers.xml \
+  --out-csv demand_generation/corridor_mixed_passengers.csv \
+  --start-time 0 \
+  --end-time 2400 \
+  --num-waves 8 \
+  --wave-size-min 6 \
+  --wave-size-max 6 \
+  --wave-interval-min 280 \
+  --wave-interval-max 340 \
+  --random-trip-share 0.0 \
+  --template-cycle CORRIDOR_MIX_1,CORRIDOR_MIX_2 \
+  --seed 42 \
+  --include-parking-area
+```
+
+Generate corridor hard scenario:
+```bash
+python demand_generation/generate_wave_demand.py \
+  --clusters-json demand_generation/clusters_corridor_edges.json \
+  --out-xml demand_generation/corridor_hard_passengers.xml \
+  --out-csv demand_generation/corridor_hard_passengers.csv \
+  --start-time 0 \
+  --end-time 1800 \
+  --num-waves 6 \
+  --wave-size-min 8 \
+  --wave-size-max 8 \
+  --wave-interval-min 180 \
+  --wave-interval-max 240 \
+  --random-trip-share 0.0 \
+  --template-cycle CORRIDOR_HARD \
+  --seed 42
+```
+
+Generate corridor hard scenario:
+```bash
+python demand_generation/generate_wave_demand.py \
+  --clusters-json demand_generation/clusters_corridor_edges.json \
+  --out-xml demand_generation/corridor_asymmetric_passengers.xml \
+  --out-csv demand_generation/corridor_asymmetric_passengers.csv \
+  --start-time 0 \
+  --end-time 1800 \
+  --num-waves 6 \
+  --wave-size-min 8 \
+  --wave-size-max 8 \
+  --wave-interval-min 240 \
+  --wave-interval-max 300 \
+  --random-trip-share 0.0 \
+  --template-cycle CORRIDOR_LEFT,CORRIDOR_RIGHT \
+  --seed 42
+```
+
+Generate corridor noisy scenario:
+```bash
+python demand_generation/generate_wave_demand.py \
+  --clusters-json demand_generation/clusters_corridor_edges.json \
+  --out-xml demand_generation/corridor_noisy_passengers.xml \
+  --out-csv demand_generation/corridor_noisy_passengers.csv \
+  --start-time 0 \
+  --end-time 2400 \
+  --num-waves 8 \
+  --wave-size-min 6 \
+  --wave-size-max 6 \
+  --wave-interval-min 180 \
+  --wave-interval-max 240 \
+  --random-trip-share 0.0 \
+  --template-cycle CORRIDOR_NOISY \
+  --seed 42
 ```
 
 ## generate_taxi_route_file.py
@@ -434,3 +539,79 @@ python demand_generation/generate_taxi_route_file.py \
   --repair-parking-areas \
   --strict
 ```
+
+Corridor scenario:
+```bash
+python demand_generation/generate_taxi_route_file.py \
+  --clusters-json demand_generation/clusters_corridor_edges.json \
+  --passengers-xml demand_generation/corridor_wave_passengers.xml \
+  --out-rou configs/corridor_wave_cap2_taxis6.rou.xml \
+  --num-taxis 6 \
+  --taxi-capacity 2 \
+  --taxi-init-mode edge-list \
+  --taxi-from-edges-file demand_generation/corridor_taxi_starts.txt \
+  --taxi-dest-mode random-valid \
+  --seed 42 \
+  --out-taxi-csv demand_generation/corridor_wave_taxis.csv
+```
+
+Corridor mixed scenario:
+```bash
+python demand_generation/generate_taxi_route_file.py \
+  --clusters-json demand_generation/clusters_corridor_edges.json \
+  --passengers-xml demand_generation/corridor_mixed_passengers.xml \
+  --out-rou configs/corridor_mixed_cap2_taxis6.rou.xml \
+  --num-taxis 6 \
+  --taxi-capacity 2 \
+  --taxi-init-mode edge-list \
+  --taxi-from-edges-file demand_generation/corridor_taxi_starts.txt \
+  --taxi-dest-mode random-valid \
+  --seed 42 \
+  --out-taxi-csv demand_generation/corridor_mixed_taxis.csv
+```
+
+Corridor hard scenario:
+```bash
+python demand_generation/generate_taxi_route_file.py \
+  --clusters-json demand_generation/clusters_corridor_edges.json \
+  --passengers-xml demand_generation/corridor_hard_passengers.xml \
+  --out-rou configs/corridor_hard_cap2_taxis6.rou.xml \
+  --num-taxis 6 \
+  --taxi-capacity 2 \
+  --taxi-init-mode edge-list \
+  --taxi-from-edges-file demand_generation/corridor_taxi_starts.txt \
+  --taxi-dest-mode random-valid \
+  --seed 42 \
+  --out-taxi-csv demand_generation/corridor_hard_taxis.csv
+```
+
+Corridor asymmetric scenario:
+```bash
+python demand_generation/generate_taxi_route_file.py \
+  --clusters-json demand_generation/clusters_corridor_edges.json \
+  --passengers-xml demand_generation/corridor_asymmetric_passengers.xml \
+  --out-rou configs/corridor_asymmetric_cap2_taxis6.rou.xml \
+  --num-taxis 6 \
+  --taxi-capacity 2 \
+  --taxi-init-mode edge-list \
+  --taxi-from-edges-file demand_generation/corridor_taxi_starts.txt \
+  --taxi-dest-mode random-valid \
+  --seed 42 \
+  --out-taxi-csv demand_generation/corridor_asymmetric_taxis.csv
+```
+
+Corridor noisy scenario:
+```bash
+python demand_generation/generate_taxi_route_file.py \
+  --clusters-json demand_generation/clusters_corridor_edges.json \
+  --passengers-xml demand_generation/corridor_noisy_passengers.xml \
+  --out-rou configs/corridor_noisy_cap2_taxis6.rou.xml \
+  --num-taxis 6 \
+  --taxi-capacity 2 \
+  --taxi-init-mode edge-list \
+  --taxi-from-edges-file demand_generation/corridor_taxi_starts.txt \
+  --taxi-dest-mode random-valid \
+  --seed 42 \
+  --out-taxi-csv demand_generation/corridor_noisy_taxis.csv
+```
+
