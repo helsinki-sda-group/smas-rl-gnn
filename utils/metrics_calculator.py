@@ -57,6 +57,45 @@ def extract_route_files_from_sumocfg(sumo_cfg_path: str) -> str:
     return "unknown"
 
 
+def instance_alias_from_name(instance_name: str) -> str:
+    """Map an instance descriptor to a short alias used in metrics filenames."""
+    name = str(instance_name or "").strip().lower()
+    if "rand_dest" in name:
+        return "randdest"
+    if "asymmetric" in name:
+        return "corridor_asymmetric"
+    if "wave" in name and "corridor" not in name:
+        return "wave"
+    if "corridor_wave" in name:
+        return "corridor_wave"
+    if "mixed" in name:
+        return "corridor_mixed"
+    if "noisy" in name:
+        return "corridor_noisy"
+    if "hard" in name:
+        return "corridor_hard"
+    return "unknown"
+
+
+def resolver_alias_from_name(conflict_resolution: str) -> str:
+    """Normalize resolver names for concise filename suffixes."""
+    resolver = str(conflict_resolution or "").strip()
+    if resolver == "closest_then_capacity":
+        return "closest"
+    return resolver or "unknown"
+
+
+def with_instance_and_resolver_alias(log_path: str, sumo_cfg_path: str, conflict_resolution: str) -> str:
+    """Append instance and resolver aliases to a metrics log filename."""
+    root, ext = os.path.splitext(str(log_path))
+    instance_name = extract_route_files_from_sumocfg(sumo_cfg_path)
+    instance_alias = instance_alias_from_name(instance_name)
+    resolver_alias = resolver_alias_from_name(conflict_resolution)
+    if instance_alias == "unknown":
+        return f"{root}_{resolver_alias}{ext}"
+    return f"{root}_{instance_alias}_{resolver_alias}{ext}"
+
+
 def build_metrics_metadata_lines(
     *,
     sumo_cfg_path: str,

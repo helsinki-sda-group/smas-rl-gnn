@@ -13,7 +13,7 @@ from sumo_rl_rs.logging.rp_logger_callback import RPLoggerCallback
 from utils.sumo_bootstrap import start_sumo, make_reset_fn
 import numpy as np
 from utils.feature_fns import make_feature_fn, compute_feature_dim, expand_edge_features
-from utils.metrics_calculator import build_metrics_metadata_lines
+from utils.metrics_calculator import build_metrics_metadata_lines, with_instance_and_resolver_alias
 
 # to write PPO output to txt file
 import sys
@@ -323,6 +323,11 @@ else:
 metrics_log_path = (
     f"training_metrics_v{int(VICINITY_M)}_ms{MAX_STEPS}_mwd{int(MAX_WAIT_DELAY_S)}_"
     f"mtd{int(MAX_TRAVEL_DELAY_S)}_cap{MAX_ROBOT_CAPACITY}.log"
+)
+metrics_log_path = with_instance_and_resolver_alias(
+    metrics_log_path,
+    SUMO_CFG,
+    CONFLICT_RESOLUTION,
 )
 logit_metrics_log_path = (
     f"training_logit_metrics_v{int(VICINITY_M)}_ms{MAX_STEPS}_mwd{int(MAX_WAIT_DELAY_S)}_"

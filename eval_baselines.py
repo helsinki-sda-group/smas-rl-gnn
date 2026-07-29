@@ -17,6 +17,7 @@ from utils.metrics_calculator import (
     metrics_to_string,
     get_metrics_header,
     build_metrics_metadata_lines,
+    with_instance_and_resolver_alias,
 )
 
 
@@ -172,6 +173,11 @@ POLICIES = resolve_policies(opt)
 metrics_log_path = (
     f"metrics_v{int(VICINITY_M)}_ms{MAX_STEPS}_mwd{int(MAX_WAIT_DELAY_S)}_"
     f"mtd{int(MAX_TRAVEL_DELAY_S)}_cap{MAX_ROBOT_CAPACITY}.log"
+)
+metrics_log_path = with_instance_and_resolver_alias(
+    metrics_log_path,
+    SUMO_CFG,
+    CONFLICT_RESOLUTION,
 )
 with open(metrics_log_path, "w", encoding="utf-8") as f:
     f.write(f"vicinity_m={VICINITY_M}, max_steps={MAX_STEPS}, max_wait_delay_s={MAX_WAIT_DELAY_S}, "
