@@ -176,6 +176,12 @@ class EpisodeMetrics:
     nonconflicting_proposal_rate: float = 0.0
     proposal_survival_rate: float = 0.0
     off_proposal_assignment_rate: float = 0.0
+    best_owner_margin: float = 0.0
+    ego_best_owner_rate: float = 0.0
+    competition_suppression_rate: float = 0.0
+    competitors_evaluated_mean: float = 0.0
+    competition_tie_rate: float = 0.0
+    competition_single_owner_rate: float = 0.0
 
     # conflict-level metrics (from conflicts.csv + coordination.csv)
     conflicts_total: int = 0
@@ -269,6 +275,25 @@ def compute_episode_metrics_from_logs(
                 metrics.nonconflicting_proposal_rate = (q1 / p) if p > 0 else 0.0
                 metrics.proposal_survival_rate = (s / p) if p > 0 else 0.0
                 metrics.off_proposal_assignment_rate = (o / f) if f > 0 else 0.0
+
+                if "best_owner_margin" in df_coord.columns:
+                    vals = pd.to_numeric(df_coord["best_owner_margin"], errors="coerce").fillna(0.0)
+                    metrics.best_owner_margin = float(vals.mean()) if len(vals) > 0 else 0.0
+                if "ego_best_owner_rate" in df_coord.columns:
+                    vals = pd.to_numeric(df_coord["ego_best_owner_rate"], errors="coerce").fillna(0.0)
+                    metrics.ego_best_owner_rate = float(vals.mean()) if len(vals) > 0 else 0.0
+                if "competition_suppression_rate" in df_coord.columns:
+                    vals = pd.to_numeric(df_coord["competition_suppression_rate"], errors="coerce").fillna(0.0)
+                    metrics.competition_suppression_rate = float(vals.mean()) if len(vals) > 0 else 0.0
+                if "competitors_evaluated_mean" in df_coord.columns:
+                    vals = pd.to_numeric(df_coord["competitors_evaluated_mean"], errors="coerce").fillna(0.0)
+                    metrics.competitors_evaluated_mean = float(vals.mean()) if len(vals) > 0 else 0.0
+                if "competition_tie_rate" in df_coord.columns:
+                    vals = pd.to_numeric(df_coord["competition_tie_rate"], errors="coerce").fillna(0.0)
+                    metrics.competition_tie_rate = float(vals.mean()) if len(vals) > 0 else 0.0
+                if "competition_single_owner_rate" in df_coord.columns:
+                    vals = pd.to_numeric(df_coord["competition_single_owner_rate"], errors="coerce").fillna(0.0)
+                    metrics.competition_single_owner_rate = float(vals.mean()) if len(vals) > 0 else 0.0
 
                 counters = {
                     "robot_decisions": int(metrics.robot_decisions),
@@ -614,6 +639,9 @@ def metrics_to_string(metrics: EpisodeMetrics) -> str:
         f" {metrics.empty_candidate_rate:>6.3f} {metrics.unforced_noop_rate:>6.3f}"
         f" {metrics.nonconflicting_proposal_rate:>6.3f} {metrics.proposal_survival_rate:>6.3f}"
         f" {metrics.off_proposal_assignment_rate:>6.3f}"
+        f" {metrics.best_owner_margin:>6.3f} {metrics.ego_best_owner_rate:>6.3f}"
+        f" {metrics.competition_suppression_rate:>6.3f} {metrics.competitors_evaluated_mean:>6.3f}"
+        f" {metrics.competition_tie_rate:>6.3f} {metrics.competition_single_owner_rate:>6.3f}"
     )
     conflict_block = (
         f" {metrics.conflicts_total:>6d} {metrics.conflict_ratio:>6.3f}"
@@ -637,7 +665,10 @@ def get_metrics_header() -> str:
         f" {'noop':>6} {'overld':>6} {'mcand':>6} {'cne_fr':>6} {'cne_mn':>6} {'dstep':>6}"
         f" {'macmr':>8} {'msd':>6} {'ovrlap':>8} {'shared':>8}"
     )
-    coordination_header = f" {'ecr':>6} {'unop':>6} {'ncpr':>6} {'psur':>6} {'offpr':>6}"
+    coordination_header = (
+        f" {'ecr':>6} {'unop':>6} {'ncpr':>6} {'psur':>6} {'offpr':>6}"
+        f" {'bomr':>6} {'ebor':>6} {'cssr':>6} {'cemn':>6} {'ctrr':>6} {'csor':>6}"
+    )
     conflict_header = f" {'ctot':>6} {'crat':>6} {'catx':>6}"
     return f"{identity_header} |{reward_header} |{ridepool_header} |{candidate_header} |{coordination_header} |{conflict_header}"
 

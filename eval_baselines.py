@@ -29,6 +29,8 @@ SUPPORTED_BASELINE_POLICIES = {
     "pickup_deadline_distance",
     "predicted_reward",
     "predicted_reward_joint",
+    "predicted_reward_joint_competition",
+    "proposal_joint_competition",
 }
 
 # Shared slot-0 candidate baseline family.
@@ -39,6 +41,8 @@ SLOT0_SORTING_POLICY_MAP = {
     "pickup_deadline_distance": "pickup_deadline_distance",
     "predicted_reward": "predicted_reward",
     "predicted_reward_joint": "predicted_reward_joint",
+    "predicted_reward_joint_competition": "predicted_reward_joint_competition",
+    "proposal_joint_competition": "predicted_reward_joint_competition",
 }
 
 parser = argparse.ArgumentParser(description="Evaluate baseline policies")
@@ -48,10 +52,20 @@ parser.add_argument(
     "--candidates-sorting",
     type=str,
     default=None,
-    choices=["pickup_distance", "pickup_deadline", "pickup_deadline_distance", "randomized", "predicted_reward", "predicted_reward_joint"],
+    choices=[
+        "pickup_distance",
+        "pickup_deadline",
+        "pickup_deadline_distance",
+        "randomized",
+        "predicted_reward",
+        "predicted_reward_joint",
+        "predicted_reward_joint_competition",
+        "proposal_joint_competition",
+    ],
     help=(
         "Candidate sorting mode: pickup_distance | pickup_deadline | "
-        "pickup_deadline_distance | randomized | predicted_reward | predicted_reward_joint"
+        "pickup_deadline_distance | randomized | predicted_reward | predicted_reward_joint | "
+        "predicted_reward_joint_competition"
     ),
 )
 parser.add_argument(
@@ -227,6 +241,7 @@ for seed in SEEDS[:NUM_SEEDS]:
                 route_exhaustive_max_stops=int(getattr(opt.env, "route_exhaustive_max_stops", 8)),
                 route_construction_debug=bool(getattr(opt.env, "route_construction_debug", False)),
                 reward_params=reward_params,
+                competition_joint=dict(getattr(opt.env, "competition_joint", {}) or {}),
             )
         except NotImplementedError as e:
             print(f"\n  Policy: {policy_name} (sorting={policy_sorting})")
@@ -381,6 +396,7 @@ with open(summary_path, "a", encoding="utf-8") as f:
         f"     pkr±std       obsr±std      pkvr±std      mwt±std       cmr±std       anpr±std      pncr±std |"
         f"  noop±std   overld±std   mcand±std  cne_fr±std cne_mn±std  dstep±std    macmr±std     msd±std  |"
         f" drp_ev±std  vcmr±std    invdr±std   ddvr±std |"
+        f" ecr±std   unop±std  ncpr±std  psur±std  offpr±std  bomr±std  ebor±std  cssr±std  cemn±std  ctrr±std  csor±std |"
         f"   ctot±std    crat±std    catx±std"
     )
     f.write(summary_header + "\n")
@@ -417,6 +433,17 @@ with open(summary_path, "a", encoding="utf-8") as f:
         valid_completion_rates = [m.valid_completion_rate for m in metrics_list]
         invalid_dropoff_rates = [m.invalid_dropoff_rate for m in metrics_list]
         ddv_rates = [m.dropoff_deadline_violation_rate for m in metrics_list]
+        empty_candidate_rates = [m.empty_candidate_rate for m in metrics_list]
+        unforced_noop_rates = [m.unforced_noop_rate for m in metrics_list]
+        nonconflicting_rates = [m.nonconflicting_proposal_rate for m in metrics_list]
+        proposal_survival_rates = [m.proposal_survival_rate for m in metrics_list]
+        off_proposal_rates = [m.off_proposal_assignment_rate for m in metrics_list]
+        best_owner_margins = [m.best_owner_margin for m in metrics_list]
+        ego_best_owner_rates = [m.ego_best_owner_rate for m in metrics_list]
+        competition_suppression_rates = [m.competition_suppression_rate for m in metrics_list]
+        competitors_evaluated_means = [m.competitors_evaluated_mean for m in metrics_list]
+        competition_tie_rates = [m.competition_tie_rate for m in metrics_list]
+        competition_single_owner_rates = [m.competition_single_owner_rate for m in metrics_list]
         conflict_totals = [m.conflicts_total for m in metrics_list]
         conflict_ratios = [m.conflict_ratio for m in metrics_list]
         conflict_avg_taxis = [m.conflict_avg_taxis_per_conflict for m in metrics_list]
@@ -450,6 +477,17 @@ with open(summary_path, "a", encoding="utf-8") as f:
             f"  {np.mean(valid_completion_rates):>6.3f}±{np.std(valid_completion_rates):<5.3f}"
             f"  {np.mean(invalid_dropoff_rates):>6.3f}±{np.std(invalid_dropoff_rates):<5.3f}"
             f"  {np.mean(ddv_rates):>6.3f}±{np.std(ddv_rates):<5.3f}"
+            f" |  {np.mean(empty_candidate_rates):>6.3f}±{np.std(empty_candidate_rates):<5.3f}"
+            f"  {np.mean(unforced_noop_rates):>6.3f}±{np.std(unforced_noop_rates):<5.3f}"
+            f"  {np.mean(nonconflicting_rates):>6.3f}±{np.std(nonconflicting_rates):<5.3f}"
+            f"  {np.mean(proposal_survival_rates):>6.3f}±{np.std(proposal_survival_rates):<5.3f}"
+            f"  {np.mean(off_proposal_rates):>6.3f}±{np.std(off_proposal_rates):<5.3f}"
+            f"  {np.mean(best_owner_margins):>6.3f}±{np.std(best_owner_margins):<5.3f}"
+            f"  {np.mean(ego_best_owner_rates):>6.3f}±{np.std(ego_best_owner_rates):<5.3f}"
+            f"  {np.mean(competition_suppression_rates):>6.3f}±{np.std(competition_suppression_rates):<5.3f}"
+            f"  {np.mean(competitors_evaluated_means):>6.3f}±{np.std(competitors_evaluated_means):<5.3f}"
+            f"  {np.mean(competition_tie_rates):>6.3f}±{np.std(competition_tie_rates):<5.3f}"
+            f"  {np.mean(competition_single_owner_rates):>6.3f}±{np.std(competition_single_owner_rates):<5.3f}"
             f" |  {np.mean(conflict_totals):>6.2f}±{np.std(conflict_totals):<5.2f}"
             f"  {np.mean(conflict_ratios):>6.3f}±{np.std(conflict_ratios):<5.3f}"
             f"  {np.mean(conflict_avg_taxis):>6.3f}±{np.std(conflict_avg_taxis):<5.3f}"
@@ -477,6 +515,10 @@ with open(summary_path, "a", encoding="utf-8") as f:
         print(f"  Valid Completion Rate: {np.mean(valid_completion_rates):.3f} ± {np.std(valid_completion_rates):.3f}")
         print(f"  Invalid Dropoff Rate: {np.mean(invalid_dropoff_rates):.3f} ± {np.std(invalid_dropoff_rates):.3f}")
         print(f"  Dropoff Deadline Violation Rate: {np.mean(ddv_rates):.3f} ± {np.std(ddv_rates):.3f}")
+        print(f"  Best Owner Margin: {np.mean(best_owner_margins):.3f} ± {np.std(best_owner_margins):.3f}")
+        print(f"  Ego Best Owner Rate: {np.mean(ego_best_owner_rates):.3f} ± {np.std(ego_best_owner_rates):.3f}")
+        print(f"  Competition Suppression Rate: {np.mean(competition_suppression_rates):.3f} ± {np.std(competition_suppression_rates):.3f}")
+        print(f"  Competitors Evaluated Mean: {np.mean(competitors_evaluated_means):.3f} ± {np.std(competitors_evaluated_means):.3f}")
         print(f"  Conflicts Total: {np.mean(conflict_totals):.2f} ± {np.std(conflict_totals):.2f}")
         print(f"  Conflict Ratio: {np.mean(conflict_ratios):.3f} ± {np.std(conflict_ratios):.3f}")
         print(f"  Avg Taxis per Conflict: {np.mean(conflict_avg_taxis):.3f} ± {np.std(conflict_avg_taxis):.3f}")
@@ -521,6 +563,12 @@ with open(summary_path, "a", encoding="utf-8") as f:
         ("invdr", "invalid_dropoff_rate (dropoffs failing validity / total tasks)"),
         ("ddvr", "dropoff_deadline_violation_rate (dropped after dropoff_deadline / total tasks)"),
         ("ctot", "conflicts_total (rows in conflicts.csv)"),
+        ("bomr", "best_owner_margin"),
+        ("ebor", "ego_best_owner_rate"),
+        ("cssr", "competition_suppression_rate"),
+        ("cemn", "competitors_evaluated_mean"),
+        ("ctrr", "competition_tie_rate"),
+        ("csor", "competition_single_owner_rate"),
         ("crat", "conflict_ratio (conflicts_total / tasks_total as in 05_conflicts.log)"),
         ("catx", "conflict_avg_taxis_per_conflict (mean taxi_candidates count in conflicts.csv)"),
     ]

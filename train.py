@@ -207,6 +207,7 @@ controller = RLControllerAdapter(
     route_exhaustive_max_stops=int(getattr(opt.env, "route_exhaustive_max_stops", 8)),
     route_construction_debug=bool(getattr(opt.env, "route_construction_debug", False)),
     reward_params=reward_params,
+    competition_joint=dict(getattr(opt.env, "competition_joint", {}) or {}),
 )
 feature_fn = make_feature_fn(
     controller,

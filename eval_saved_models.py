@@ -170,6 +170,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             route_exhaustive_max_stops=int(config.get('route_exhaustive_max_stops', 8)),
             route_construction_debug=bool(config.get('route_construction_debug', False)),
             reward_params=dict(config.get("reward_params", {}) or {}),
+            competition_joint=dict(config.get("competition_joint", {}) or {}),
         )
         
         feature_fn = make_feature_fn(

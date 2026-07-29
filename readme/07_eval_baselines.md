@@ -24,6 +24,7 @@ From `configs/rp_gnn.yaml`:
 	- `pickup_deadline_distance`
 	- `predicted_reward`
 	- `predicted_reward_joint`
+	- `proposal_joint_competition` (alias: `predicted_reward_joint_competition`)
 - `baselines.num_seeds`: number of seeds to use from `seeds.eval`
 - `seeds.eval`: evaluation seed list
 
@@ -40,6 +41,7 @@ Current defaults evaluate all listed policies over the first 10 eval seeds.
 - `pickup_deadline_distance`
 - `predicted_reward`
 - `predicted_reward_joint`
+- `proposal_joint_competition`
 
 Notes:
 - `greedy` is supported by CLI (`--policies greedy ...`) but is not part of the default YAML list in this repo.
@@ -63,7 +65,7 @@ At each decision step, policies use an action mask (`1` = valid, `0` = invalid) 
 
 The script supports two policy families:
 - `random` and `unique`: action-selection policies that compute per-robot actions from the current action mask.
-- Slot-0 policies: `greedy`, `pickup_distance`, `pickup_deadline`, `pickup_deadline_distance`, `predicted_reward`, `predicted_reward_joint`.
+- Slot-0 policies: `greedy`, `pickup_distance`, `pickup_deadline`, `pickup_deadline_distance`, `predicted_reward`, `predicted_reward_joint`, `proposal_joint_competition`.
 
 Slot-0 policies choose candidate slot `0` when valid and rely on controller-side candidate ordering via `candidates_sorting`.
 
@@ -74,6 +76,7 @@ Current policy-to-sorting mapping used by `policy_candidates_sorting(...)`:
 - `pickup_deadline_distance` -> `pickup_deadline_distance`
 - `predicted_reward` -> `predicted_reward`
 - `predicted_reward_joint` -> `predicted_reward_joint`
+- `proposal_joint_competition` -> `predicted_reward_joint_competition`
 
 If a selected sorting mode is not implemented in the controller, the script catches `NotImplementedError`, writes a `# SKIP ...` line in the metrics log, and continues with remaining policies.
 
@@ -162,7 +165,7 @@ Interpretation:
 - Picks the top candidate ranked by single-agent predicted reward.
 
 How the score is computed:
-- For each feasible candidate, the controller simulates a greedy pickup/dropoff sequence for the current taxi plan after inserting that candidate.
+- For each feasible candidate, the controller simulates a pickup/dropoff sequence for the current taxi plan after inserting that candidate.
 - It predicts candidate pickup and dropoff times from route travel-time estimates.
 - It computes:
 
@@ -198,7 +201,7 @@ Interpretation:
 How the score is computed:
 - Let `before` be the taxi's current unfinished plan (shadow plan + onboard unfinished tasks).
 - Let `after` be the same plan with the candidate inserted.
-- For both plans, the controller predicts pickup/dropoff times for all tasks in a greedy pickup/dropoff sequence.
+- For both plans, the controller predicts pickup/dropoff times for all tasks in a pickup/dropoff sequence.
 - It computes per-task predicted scores with the same components as above (completion, normalized wait penalty, normalized excess-travel penalty).
 - It then sums task scores:
 
@@ -224,6 +227,37 @@ Meaning of this sorting:
 - It is a plan-aware objective: "which candidate improves the full current plan the most".
 - It can prefer a candidate with lower standalone score if it interferes less with already onboard/assigned tasks.
 
+## 9) `proposal_joint_competition`
+
+Implementation: `slot0_candidate_action(action_mask)` with `candidates_sorting=predicted_reward_joint_competition`.
+
+Behavior per robot:
+- Start from the exact candidate set used by `predicted_reward_joint`.
+- For every candidate task $t$, compute ego marginal score:
+
+$$
+\Delta J_{\text{ego},t} = J(R_{\text{ego}} \oplus t) - J(R_{\text{ego}})
+$$
+
+- Build competitors from the same 2-hop-compatible candidate relation: robots that also include task $t$ in their feasible candidate list under current vicinity/feasibility/locking constraints.
+- Compute each feasible competitor score:
+
+$$
+\Delta J_{r,t} = J(R_r \oplus t) - J(R_r)
+$$
+
+- Keep $t$ for ego only if ego is best owner within tolerance:
+
+$$
+\Delta J_{\text{ego},t} \ge \max_r \Delta J_{r,t} - \varepsilon,
+\quad \varepsilon = \text{competition\_joint.tie\_tolerance},\; \text{default } 10^{-8}
+$$
+
+- Sort retained candidates with the same deterministic key as `predicted_reward_joint`.
+- If all candidates are suppressed, return `NOOP` through the same slot-0 action logic.
+
+This proposer is a decentralized best-owner filtering heuristic: each robot decides independently; no centralized matching is introduced.
+
 Default reward parameters used by these predicted-reward sortings (unless overridden in config):
 - $w_{comp}=1.0$
 - $w_{wait}=1.5$
@@ -233,7 +267,7 @@ Default reward parameters used by these predicted-reward sortings (unless overri
 
 ## Slot-0 family summary
 
-Slot-0 policies are: `greedy`, `pickup_distance`, `pickup_deadline`, `pickup_deadline_distance`, `predicted_reward`, `predicted_reward_joint`.
+Slot-0 policies are: `greedy`, `pickup_distance`, `pickup_deadline`, `pickup_deadline_distance`, `predicted_reward`, `predicted_reward_joint`, `proposal_joint_competition`.
 
 All slot-0 policies share the same action-selection function (`slot0_candidate_action`). They differ only in how candidate slot `0` is produced by controller-side sorting (`candidates_sorting`).
 

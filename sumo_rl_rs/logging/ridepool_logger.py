@@ -236,6 +236,12 @@ class RidepoolLogger:
             "rejected_proposals",
             "final_assignments",
             "off_proposal_assignments",
+            "best_owner_margin",
+            "ego_best_owner_rate",
+            "competition_suppression_rate",
+            "competitors_evaluated_mean",
+            "competition_tie_rate",
+            "competition_single_owner_rate",
         ])
 
         self._open_csv(self._get_csv_filename("task_lifecycle"), [
@@ -522,7 +528,7 @@ class RidepoolLogger:
                 nonserved_avg = info["macro_nonserved"],
         ))
 
-    def log_coordination(self, t: float, counters: Dict[str, int]) -> None:
+    def log_coordination(self, t: float, counters: Dict[str, Any]) -> None:
         """Log per-decision coordination counters."""
         fname = self._get_csv_filename("coordination")
         header = [
@@ -540,11 +546,29 @@ class RidepoolLogger:
             "rejected_proposals",
             "final_assignments",
             "off_proposal_assignments",
+            "best_owner_margin",
+            "ego_best_owner_rate",
+            "competition_suppression_rate",
+            "competitors_evaluated_mean",
+            "competition_tie_rate",
+            "competition_single_owner_rate",
         ]
         self._ensure_csv(fname, header)
+        float_fields = {
+            "best_owner_margin",
+            "ego_best_owner_rate",
+            "competition_suppression_rate",
+            "competitors_evaluated_mean",
+            "competition_tie_rate",
+            "competition_single_owner_rate",
+        }
         row = {"time": float(t)}
         for key in header[1:]:
-            row[key] = int(counters.get(key, 0))
+            value = counters.get(key, 0)
+            if key in float_fields:
+                row[key] = float(value)
+            else:
+                row[key] = int(value)
         self._write(fname, row)
 
     def log_fleet_counts(self, t: float, idle: int, en_route: int, occupied: int, pickup_occupied: int):

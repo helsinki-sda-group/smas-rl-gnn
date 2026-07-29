@@ -45,6 +45,16 @@ class RouteScore:
     total_weighted_travel_penalty: float
 
 
+@dataclass(frozen=True)
+class InsertionEvaluation:
+    feasible: bool
+    base_route_score: float
+    inserted_route_score: float
+    marginal_score: float
+    candidate_pickup_time: float
+    pickup_distance: float
+
+
 def compute_coordination_step_counters(
     *,
     robots: Sequence[str],
@@ -197,6 +207,7 @@ class RLControllerAdapter:
         route_exhaustive_max_stops: int = 8,
         route_construction_debug: bool = False,
         reward_params: Optional[Dict[str, Any]] = None,
+        competition_joint: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Args:
@@ -208,7 +219,9 @@ class RLControllerAdapter:
                 "pickup_deadline": sort by pickup deadline ascending.
                 "pickup_deadline_distance": sort by dense-rank sum of (deadline, distance).
                 "randomized" (default): keep feasible candidates in random order.
-                "predicted_reward": reserved for future use (raises NotImplementedError).
+                "predicted_reward": local predicted task score ordering.
+                "predicted_reward_joint": marginal predicted joint-score ordering.
+                "predicted_reward_joint_competition": same joint marginal score, filtered by best-owner competition.
             sorted_candidates: deprecated bool alias. If candidates_sorting is not provided,
                 True maps to "pickup_distance", False maps to "randomized".
             max_steps: hard episode max length.
@@ -235,6 +248,10 @@ class RLControllerAdapter:
                 If exceeded, fallback to "nearest".
             route_construction_debug: emit lightweight debug diagnostics for route reconstruction.
             reward_params: reward configuration (reward_type, weights, caps)
+            competition_joint: optional config for competition-aware joint proposer.
+                Supported keys:
+                    tie_tolerance: allow ego ownership when scores are tied within tolerance.
+                    competitors: competitor relation mode (currently "two_hop" only).
         """
         self.sumo = sumo
         self.k_max = int(k_max)
@@ -256,6 +273,23 @@ class RLControllerAdapter:
         self.route_construction_debug = bool(route_construction_debug)
         self._last_route_construction_diag_by_robot: Dict[str, Dict[str, Any]] = {}
         self._warned_missing_logit_diff = False
+        competition_joint_cfg = dict(competition_joint or {})
+        self.competition_joint_tie_tolerance = float(competition_joint_cfg.get("tie_tolerance", 1e-8))
+        self.competition_joint_competitors = str(competition_joint_cfg.get("competitors", "two_hop")).strip().lower()
+        if self.competition_joint_competitors not in {"two_hop"}:
+            raise ValueError(
+                "competition_joint.competitors must be 'two_hop'"
+            )
+        self._last_competition_joint_diag: Dict[str, float] = {
+            "competition_tasks_evaluated": 0.0,
+            "competition_tasks_two_owner": 0.0,
+            "best_owner_margin_sum": 0.0,
+            "ego_best_owner_count": 0.0,
+            "competition_suppressed_count": 0.0,
+            "competitors_evaluated_total": 0.0,
+            "competition_tie_count": 0.0,
+            "competition_single_owner_count": 0.0,
+        }
 
         self.reset_fn = reset_fn
         self._shadow_assigned_by_robot = defaultdict(list)  # rid -> [reservation 1, reservation 2, ...]
@@ -374,6 +408,9 @@ class RLControllerAdapter:
             "randomized",
             "predicted_reward",
             "predicted_reward_joint",
+            "predicted_reward_joint_competition",
+            "proposal_joint_competition",
+            "proposal_joint_best_owner",
         }
         if mode not in allowed:
             allowed_list = ", ".join(sorted(allowed))
@@ -1377,6 +1414,143 @@ class RLControllerAdapter:
             - w_travel * normalized_excess_ride_time
         )
 
+    def _score_joint_plan_from_times(
+        self,
+        *,
+        task_ids: Sequence[str],
+        times: Dict[str, Dict[str, float]],
+        tasks_by_id: Dict[str, Task],
+        res_index: dict[str, object],
+    ) -> float:
+        """Score a predicted plan with the same objective used by predicted_reward_joint."""
+        total = 0.0
+        for tid in task_ids:
+            task = tasks_by_id.get(tid)
+            res_obj = res_index.get(tid)
+            if task is None or res_obj is None:
+                continue
+            tdict = times.get(tid, {})
+            predicted_pickup = tdict.get("pickup")
+            predicted_dropoff = tdict.get("dropoff")
+
+            picked = self._is_picked(res_obj)
+            actual_pickup_time = None
+            if picked:
+                lc = self._task_lifecycle.get(str(tid), {})
+                raw_pickup_time = lc.get("actual_pickup_time")
+                if raw_pickup_time is not None:
+                    actual_pickup_time = float(raw_pickup_time)
+
+            total += float(
+                self._task_predicted_score_from_times(
+                    task=task,
+                    predicted_pickup_time=predicted_pickup,
+                    predicted_dropoff_time=predicted_dropoff,
+                    actual_pickup_time=actual_pickup_time,
+                    preserve_actual_pickup_validity=bool(picked),
+                )
+            )
+        return float(total)
+
+    def evaluate_marginal_insertion(
+        self,
+        *,
+        robot_id: str,
+        task: Task,
+        res_index: dict[str, object],
+        current_edge: str,
+        current_customer_ids: Sequence[str],
+        base_score_cache: Optional[Dict[str, float]] = None,
+    ) -> InsertionEvaluation:
+        """Evaluate joint predicted reward marginal for inserting task into robot plan."""
+        if task.id not in res_index:
+            return InsertionEvaluation(
+                feasible=False,
+                base_route_score=float("-inf"),
+                inserted_route_score=float("-inf"),
+                marginal_score=float("-inf"),
+                candidate_pickup_time=float("inf"),
+                pickup_distance=float("inf"),
+            )
+
+        try:
+            prev_ids = list(dict.fromkeys(self._shadow_plan_by_robot.get(robot_id, [])))
+            before_ids = list(dict.fromkeys(prev_ids + list(current_customer_ids)))
+            before_ids = [r for r in before_ids if r in res_index and not self._is_completed(res_index[r])]
+            after_ids = list(dict.fromkeys(before_ids + [task.id]))
+
+            tasks_by_id: Dict[str, Task] = {}
+            for res_id in after_ids:
+                res_obj = res_index.get(res_id)
+                if res_obj is None:
+                    continue
+                tasks_by_id[res_id] = self._task_from_reservation(res_id, res_obj)
+
+            cache_key = str(robot_id)
+            if base_score_cache is not None and cache_key in base_score_cache:
+                r_before = float(base_score_cache[cache_key])
+            else:
+                if before_ids:
+                    before_times = self._estimate_plan_event_times(
+                        rid=robot_id,
+                        res_ids=before_ids,
+                        res_index=res_index,
+                        current_edge=current_edge,
+                        current_customer_ids=current_customer_ids,
+                    )
+                    r_before = self._score_joint_plan_from_times(
+                        task_ids=before_ids,
+                        times=before_times,
+                        tasks_by_id=tasks_by_id,
+                        res_index=res_index,
+                    )
+                else:
+                    r_before = 0.0
+                if base_score_cache is not None:
+                    base_score_cache[cache_key] = float(r_before)
+
+            after_times = self._estimate_plan_event_times(
+                rid=robot_id,
+                res_ids=after_ids,
+                res_index=res_index,
+                current_edge=current_edge,
+                current_customer_ids=current_customer_ids,
+            )
+            r_after = self._score_joint_plan_from_times(
+                task_ids=after_ids,
+                times=after_times,
+                tasks_by_id=tasks_by_id,
+                res_index=res_index,
+            )
+
+            candidate_timing = after_times.get(task.id, {})
+            pickup_time = float(candidate_timing.get("pickup", float("inf")))
+            dropoff_time = float(candidate_timing.get("dropoff", float("inf")))
+            pickup_distance = (
+                float(self._road_distance(current_edge, task.fromEdge))
+                if task.fromEdge
+                else float("inf")
+            )
+            feasible = np.isfinite(pickup_time) and np.isfinite(dropoff_time)
+
+            return InsertionEvaluation(
+                feasible=bool(feasible),
+                base_route_score=float(r_before),
+                inserted_route_score=float(r_after),
+                marginal_score=float(r_after - r_before),
+                candidate_pickup_time=float(pickup_time),
+                pickup_distance=float(pickup_distance),
+            )
+        except Exception:
+            return InsertionEvaluation(
+                feasible=False,
+                base_route_score=float("-inf"),
+                inserted_route_score=float("-inf"),
+                marginal_score=float("-inf"),
+                candidate_pickup_time=float("inf"),
+                pickup_distance=float("inf"),
+            )
+
     def _estimate_joint_candidate_marginal_prediction(
         self,
         *,
@@ -1387,74 +1561,19 @@ class RLControllerAdapter:
         current_customer_ids: Sequence[str],
     ) -> tuple[float, float, float, float]:
         """Estimate (marginal_score, after_score, candidate_pickup_time, pickup_distance)."""
-        if candidate.id not in res_index:
-            raise ValueError("candidate reservation not present in current reservation index")
-
-        prev_ids = list(dict.fromkeys(self._shadow_plan_by_robot.get(rid, [])))
-        before_ids = list(dict.fromkeys(prev_ids + list(current_customer_ids)))
-        before_ids = [r for r in before_ids if r in res_index and not self._is_completed(res_index[r])]
-        after_ids = list(dict.fromkeys(before_ids + [candidate.id]))
-
-        # Build task snapshots for all unfinished tasks in the resulting plan.
-        tasks_by_id: Dict[str, Task] = {}
-        for res_id in after_ids:
-            res_obj = res_index.get(res_id)
-            if res_obj is None:
-                continue
-            tasks_by_id[res_id] = self._task_from_reservation(res_id, res_obj)
-
-        before_times: Dict[str, Dict[str, float]] = {}
-        if before_ids:
-            before_times = self._estimate_plan_event_times(
-                rid=rid,
-                res_ids=before_ids,
-                res_index=res_index,
-                current_edge=current_edge,
-                current_customer_ids=current_customer_ids,
-            )
-        after_times = self._estimate_plan_event_times(
-            rid=rid,
-            res_ids=after_ids,
+        result = self.evaluate_marginal_insertion(
+            robot_id=rid,
+            task=candidate,
             res_index=res_index,
             current_edge=current_edge,
             current_customer_ids=current_customer_ids,
         )
-
-        def _score_plan(task_ids: Sequence[str], times: Dict[str, Dict[str, float]]) -> float:
-            total = 0.0
-            for tid in task_ids:
-                task = tasks_by_id.get(tid)
-                res_obj = res_index.get(tid)
-                if task is None or res_obj is None:
-                    continue
-                tdict = times.get(tid, {})
-                predicted_pickup = tdict.get("pickup")
-                predicted_dropoff = tdict.get("dropoff")
-
-                picked = self._is_picked(res_obj)
-                actual_pickup_time = None
-                if picked:
-                    lc = self._task_lifecycle.get(str(tid), {})
-                    raw_pickup_time = lc.get("actual_pickup_time")
-                    if raw_pickup_time is not None:
-                        actual_pickup_time = float(raw_pickup_time)
-
-                total += float(
-                    self._task_predicted_score_from_times(
-                        task=task,
-                        predicted_pickup_time=predicted_pickup,
-                        predicted_dropoff_time=predicted_dropoff,
-                        actual_pickup_time=actual_pickup_time,
-                        preserve_actual_pickup_validity=bool(picked),
-                    )
-                )
-            return float(total)
-
-        r_before = _score_plan(before_ids, before_times) if before_ids else 0.0
-        r_after = _score_plan(after_ids, after_times)
-        candidate_pickup_time = float(after_times.get(candidate.id, {}).get("pickup", float("inf")))
-        pickup_distance = float(self._road_distance(current_edge, candidate.fromEdge)) if candidate.fromEdge else float("inf")
-        return float(r_after - r_before), float(r_after), candidate_pickup_time, pickup_distance
+        return (
+            float(result.marginal_score),
+            float(result.inserted_route_score),
+            float(result.candidate_pickup_time),
+            float(result.pickup_distance),
+        )
 
 
     def taxis_available(self, min_robots: int = 1) -> bool:
@@ -1698,17 +1817,18 @@ class RLControllerAdapter:
             except Exception:
                 pass
 
-        cand_lists: List[List[int]] = []
-        for rid in self._last_robot_ids:
-            # capacity check 
-            remaining_capacity = self._remaining_capacity(rid)
-            if remaining_capacity <=0:
-                cand_lists.append([])
-                continue
+        mode = self.candidates_sorting
+        p2r = self._person_to_res_index(res_index)
+        current_customer_ids_by_robot: Dict[str, List[str]] = {
+            rid: self._current_reservation_ids_onboard(rid, p2r) for rid in self._last_robot_ids
+        }
 
+        feasible_by_robot: Dict[str, List[Tuple[float, int, Task]]] = {}
+        for rid in self._last_robot_ids:
+            remaining_capacity = self._remaining_capacity(rid)
             r_edge = robot_first_edge.get(rid)
-            if r_edge is None or not tasks_viable:
-                cand_lists.append([])
+            if remaining_capacity <= 0 or r_edge is None or not tasks_viable:
+                feasible_by_robot[rid] = []
                 continue
 
             feasible: List[Tuple[float, int, Task]] = []
@@ -1721,80 +1841,196 @@ class RLControllerAdapter:
                 d = self._road_distance(r_edge, t.fromEdge)
                 if np.isfinite(d) and d <= self.vicinity_m:
                     feasible.append((float(d), j, t))
-            if feasible:
-                mode = self.candidates_sorting
-                if mode == "randomized":
-                    self._rng.shuffle(feasible)
-                elif mode == "pickup_distance":
-                    # Keep existing pickup-distance sort behavior.
-                    feasible.sort(key=lambda x: x[0])
-                elif mode == "pickup_deadline":
-                    feasible.sort(key=lambda x: (x[2].pickupDeadline, x[0], str(x[2].id)))
-                elif mode == "pickup_deadline_distance":
-                    dist_rank = self._dense_ranks([x[0] for x in feasible])
-                    deadline_rank = self._dense_ranks([x[2].pickupDeadline for x in feasible])
-                    feasible.sort(
-                        key=lambda x: (
-                            dist_rank[x[0]] + deadline_rank[x[2].pickupDeadline],
-                            x[2].pickupDeadline,
-                            x[0],
-                            str(x[2].id),
-                        )
+            feasible_by_robot[rid] = feasible
+
+        # reset per-decision diagnostics; non-competition modes stay at zeros.
+        self._last_competition_joint_diag = {
+            "competition_tasks_evaluated": 0.0,
+            "competition_tasks_two_owner": 0.0,
+            "best_owner_margin_sum": 0.0,
+            "ego_best_owner_count": 0.0,
+            "competition_suppressed_count": 0.0,
+            "competitors_evaluated_total": 0.0,
+            "competition_tie_count": 0.0,
+            "competition_single_owner_count": 0.0,
+        }
+
+        cand_lists: List[List[int]] = []
+        if mode in {"predicted_reward_joint_competition", "proposal_joint_competition", "proposal_joint_best_owner"}:
+            task_to_competitors: Dict[str, List[str]] = defaultdict(list)
+            for rid, feasible in feasible_by_robot.items():
+                for _dist, _j, task in feasible:
+                    task_to_competitors[str(task.id)].append(str(rid))
+
+            base_score_cache: Dict[str, float] = {}
+            insertion_cache: Dict[Tuple[str, str], InsertionEvaluation] = {}
+            tol = float(max(0.0, self.competition_joint_tie_tolerance))
+
+            def _cached_eval(robot_id: str, task_obj: Task) -> InsertionEvaluation:
+                key = (str(robot_id), str(task_obj.id))
+                cached = insertion_cache.get(key)
+                if cached is not None:
+                    return cached
+
+                edge = robot_first_edge.get(robot_id)
+                if edge is None:
+                    result = InsertionEvaluation(
+                        feasible=False,
+                        base_route_score=float("-inf"),
+                        inserted_route_score=float("-inf"),
+                        marginal_score=float("-inf"),
+                        candidate_pickup_time=float("inf"),
+                        pickup_distance=float("inf"),
                     )
-                elif mode == "predicted_reward":
-                    scored: List[Tuple[float, float, float, str, int, Task]] = []
-                    current_customer_ids = self._current_reservation_ids_onboard(rid, self._person_to_res_index(res_index))
-                    for dist, j, t in feasible:
-                        try:
-                            score, pickup_time, pickup_distance = self._estimate_sequence_candidate_prediction(
-                                rid=rid,
-                                candidate=t,
-                                res_index=res_index,
-                                current_edge=r_edge,
-                                current_customer_ids=current_customer_ids,
-                            )
-                        except Exception:
-                            score = float("-inf")
-                            pickup_time = float("inf")
-                            pickup_distance = float("inf")
+                else:
+                    result = self.evaluate_marginal_insertion(
+                        robot_id=robot_id,
+                        task=task_obj,
+                        res_index=res_index,
+                        current_edge=edge,
+                        current_customer_ids=current_customer_ids_by_robot.get(robot_id, []),
+                        base_score_cache=base_score_cache,
+                    )
+                insertion_cache[key] = result
+                return result
 
-                        scored.append((float(score), float(pickup_time), float(pickup_distance), str(t.id), j, t))
-                    scored.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
-                    feasible = [(dist, j, t) for _, _, _, _, j, t in scored]
-                elif mode == "predicted_reward_joint":
-                    scored_joint: List[Tuple[float, float, float, float, str, int, Task]] = []
-                    current_customer_ids = self._current_reservation_ids_onboard(rid, self._person_to_res_index(res_index))
-                    for dist, j, t in feasible:
-                        try:
-                            marginal_score, r_after, pickup_time, pickup_distance = self._estimate_joint_candidate_marginal_prediction(
-                                rid=rid,
-                                candidate=t,
-                                res_index=res_index,
-                                current_edge=r_edge,
-                                current_customer_ids=current_customer_ids,
-                            )
-                        except Exception:
-                            marginal_score = float("-inf")
-                            r_after = float("-inf")
-                            pickup_time = float("inf")
-                            pickup_distance = float("inf")
+            for rid in self._last_robot_ids:
+                feasible = list(feasible_by_robot.get(rid, []))
+                if not feasible:
+                    cand_lists.append([])
+                    continue
 
+                scored_joint: List[Tuple[float, float, float, float, str, int, Task]] = []
+                for dist, j, task in feasible:
+                    ego_eval = _cached_eval(rid, task)
+                    if not ego_eval.feasible:
+                        # Keep compatibility with baseline by leaving infeasible entries worst-ranked.
                         scored_joint.append(
                             (
-                                float(marginal_score),
-                                float(r_after),
-                                float(pickup_time),
-                                float(pickup_distance),
-                                str(t.id),
+                                float("-inf"),
+                                float("-inf"),
+                                float("inf"),
+                                float("inf"),
+                                str(task.id),
                                 j,
-                                t,
+                                task,
                             )
                         )
-                    scored_joint.sort(key=lambda x: (-x[0], -x[1], x[2], x[3], x[4]))
-                    feasible = [(dist, j, t) for _, _, _, _, _, j, t in scored_joint]
-                else:
-                    raise ValueError(f"Unsupported candidates_sorting mode: {mode}")
-            cand_lists.append([j for _, j, _ in feasible[:K]])
+                        continue
+
+                    owner_scores: List[float] = [float(ego_eval.marginal_score)]
+                    competitor_ids = [cid for cid in task_to_competitors.get(str(task.id), []) if cid != rid]
+                    for comp_rid in competitor_ids:
+                        comp_eval = _cached_eval(comp_rid, task)
+                        if comp_eval.feasible:
+                            owner_scores.append(float(comp_eval.marginal_score))
+
+                    owner_scores.sort(reverse=True)
+                    best_score = owner_scores[0]
+                    second_best = owner_scores[1] if len(owner_scores) >= 2 else owner_scores[0]
+                    ego_is_best_owner = float(ego_eval.marginal_score) >= (best_score - tol)
+
+                    self._last_competition_joint_diag["competition_tasks_evaluated"] += 1.0
+                    self._last_competition_joint_diag["competitors_evaluated_total"] += float(len(owner_scores))
+                    if len(owner_scores) >= 2:
+                        self._last_competition_joint_diag["competition_tasks_two_owner"] += 1.0
+                        self._last_competition_joint_diag["best_owner_margin_sum"] += float(best_score - second_best)
+                        if abs(float(ego_eval.marginal_score) - best_score) <= tol:
+                            self._last_competition_joint_diag["competition_tie_count"] += 1.0
+                    else:
+                        self._last_competition_joint_diag["competition_single_owner_count"] += 1.0
+
+                    if ego_is_best_owner:
+                        self._last_competition_joint_diag["ego_best_owner_count"] += 1.0
+                        scored_joint.append(
+                            (
+                                float(ego_eval.marginal_score),
+                                float(ego_eval.inserted_route_score),
+                                float(ego_eval.candidate_pickup_time),
+                                float(ego_eval.pickup_distance),
+                                str(task.id),
+                                j,
+                                task,
+                            )
+                        )
+                    else:
+                        self._last_competition_joint_diag["competition_suppressed_count"] += 1.0
+
+                scored_joint.sort(key=lambda x: (-x[0], -x[1], x[2], x[3], x[4]))
+                cand_lists.append([j for _, _, _, _, _, j, _ in scored_joint[:K]])
+        else:
+            for rid in self._last_robot_ids:
+                feasible = list(feasible_by_robot.get(rid, []))
+                if feasible:
+                    if mode == "randomized":
+                        self._rng.shuffle(feasible)
+                    elif mode == "pickup_distance":
+                        feasible.sort(key=lambda x: x[0])
+                    elif mode == "pickup_deadline":
+                        feasible.sort(key=lambda x: (x[2].pickupDeadline, x[0], str(x[2].id)))
+                    elif mode == "pickup_deadline_distance":
+                        dist_rank = self._dense_ranks([x[0] for x in feasible])
+                        deadline_rank = self._dense_ranks([x[2].pickupDeadline for x in feasible])
+                        feasible.sort(
+                            key=lambda x: (
+                                dist_rank[x[0]] + deadline_rank[x[2].pickupDeadline],
+                                x[2].pickupDeadline,
+                                x[0],
+                                str(x[2].id),
+                            )
+                        )
+                    elif mode == "predicted_reward":
+                        scored: List[Tuple[float, float, float, str, float, int, Task]] = []
+                        current_customer_ids = current_customer_ids_by_robot.get(rid, [])
+                        r_edge = robot_first_edge.get(rid)
+                        for _dist, j, t in feasible:
+                            try:
+                                score, pickup_time, pickup_distance = self._estimate_sequence_candidate_prediction(
+                                    rid=rid,
+                                    candidate=t,
+                                    res_index=res_index,
+                                    current_edge=r_edge,
+                                    current_customer_ids=current_customer_ids,
+                                )
+                            except Exception:
+                                score = float("-inf")
+                                pickup_time = float("inf")
+                                pickup_distance = float("inf")
+
+                            scored.append((float(score), float(pickup_time), float(pickup_distance), str(t.id), float(_dist), j, t))
+                        scored.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
+                        feasible = [(_dist, j, t) for _, _, _, _, _dist, j, t in scored]
+                    elif mode == "predicted_reward_joint":
+                        scored_joint: List[Tuple[float, float, float, float, str, float, int, Task]] = []
+                        current_customer_ids = current_customer_ids_by_robot.get(rid, [])
+                        r_edge = robot_first_edge.get(rid)
+                        base_score_cache: Dict[str, float] = {}
+                        for _dist, j, t in feasible:
+                            eval_result = self.evaluate_marginal_insertion(
+                                robot_id=rid,
+                                task=t,
+                                res_index=res_index,
+                                current_edge=str(r_edge),
+                                current_customer_ids=current_customer_ids,
+                                base_score_cache=base_score_cache,
+                            )
+                            scored_joint.append(
+                                (
+                                    float(eval_result.marginal_score),
+                                    float(eval_result.inserted_route_score),
+                                    float(eval_result.candidate_pickup_time),
+                                    float(eval_result.pickup_distance),
+                                    str(t.id),
+                                    float(_dist),
+                                    j,
+                                    t,
+                                )
+                            )
+                        scored_joint.sort(key=lambda x: (-x[0], -x[1], x[2], x[3], x[4]))
+                        feasible = [(_dist, j, t) for _, _, _, _, _, _dist, j, t in scored_joint]
+                    else:
+                        raise ValueError(f"Unsupported candidates_sorting mode: {mode}")
+                cand_lists.append([j for _, j, _ in feasible[:K]])
         
    
         if self.logger:
@@ -2202,6 +2438,23 @@ class RLControllerAdapter:
                 final_assignments=chosen,
                 assume_single_winner_per_bucket=True,
             )
+
+            comp_diag = dict(getattr(self, "_last_competition_joint_diag", {}) or {})
+            comp_eval = float(comp_diag.get("competition_tasks_evaluated", 0.0))
+            comp_two_owner = float(comp_diag.get("competition_tasks_two_owner", 0.0))
+            comp_ego_best = float(comp_diag.get("ego_best_owner_count", 0.0))
+            comp_suppressed = float(comp_diag.get("competition_suppressed_count", 0.0))
+            comp_owners_total = float(comp_diag.get("competitors_evaluated_total", 0.0))
+            comp_margin_sum = float(comp_diag.get("best_owner_margin_sum", 0.0))
+            comp_tie_count = float(comp_diag.get("competition_tie_count", 0.0))
+            comp_single_owner = float(comp_diag.get("competition_single_owner_count", 0.0))
+
+            counters["best_owner_margin"] = (comp_margin_sum / comp_two_owner) if comp_two_owner > 0.0 else 0.0
+            counters["ego_best_owner_rate"] = (comp_ego_best / comp_eval) if comp_eval > 0.0 else 0.0
+            counters["competition_suppression_rate"] = (comp_suppressed / comp_eval) if comp_eval > 0.0 else 0.0
+            counters["competitors_evaluated_mean"] = (comp_owners_total / comp_eval) if comp_eval > 0.0 else 0.0
+            counters["competition_tie_rate"] = (comp_tie_count / comp_two_owner) if comp_two_owner > 0.0 else 0.0
+            counters["competition_single_owner_rate"] = (comp_single_owner / comp_eval) if comp_eval > 0.0 else 0.0
 
             if self.logger:
                 try:
