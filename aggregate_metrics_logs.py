@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import statistics
 import sys
 from dataclasses import dataclass
@@ -25,6 +26,14 @@ DEFAULT_METRICS = [
     "odvr", # only dropoff violations
     "pdvr", # pickup and dropoff violations
     "shared",
+    "noop",
+    "mcand",
+    "cne_fr",
+    "cne_mn",
+    "dstep",
+    "msd",
+    "ovrlap",
+    "cemn",
     "ect",
     "unop",
     "ncpr",
@@ -44,6 +53,25 @@ METRIC_ALIASES = {
 DERIVED_METRICS = {"opvr", "odvr", "pdvr"}
 SUMMARY_SUFFIX = "±std"
 ROUNDING_EPS = 1e-12
+
+
+def _scenario_alias_from_instance(instance: str) -> str:
+    name = str(instance or "").strip().lower()
+    if "rand_dest" in name:
+        return "randdest"
+    if "corridor_wave" in name:
+        return "corridor_wave"
+    if "asymmetric" in name:
+        return "corridor_asymmetric"
+    if "mixed" in name:
+        return "corridor_mixed"
+    if "noisy" in name:
+        return "corridor_noisy"
+    if "hard" in name:
+        return "corridor_hard"
+    if "wave" in name:
+        return "wave"
+    return "unknown"
 
 
 @dataclass(frozen=True)
@@ -68,6 +96,37 @@ class ParsedLog:
         return self.metadata.get("instance", "unknown")
 
     @property
+    def num_robots(self) -> int | str:
+        instance = str(self.instance or "")
+        match = re.search(r"taxis(\d+)", instance, flags=re.IGNORECASE)
+        if not match:
+            return ""
+        return int(match.group(1))
+
+    @property
+    def max_robot_capacity(self) -> int | str:
+        metadata_value = str(self.metadata.get("max_robot_capacity", "")).strip()
+        if metadata_value:
+            match = re.search(r"(\d+)", metadata_value)
+            if match:
+                return int(match.group(1))
+
+        source_candidates = [self.instance, self.path.name]
+        for candidate in source_candidates:
+            match = re.search(r"cap(\d+)", str(candidate or ""), flags=re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+        return ""
+
+    @property
+    def scenario(self) -> str:
+        value = self.metadata.get("scenario", "")
+        text = str(value).strip().lower()
+        if text:
+            return text
+        return _scenario_alias_from_instance(self.instance)
+
+    @property
     def route_construction(self) -> str:
         value = self.metadata.get("route_construction", "nearest")
         text = str(value).strip()
@@ -79,10 +138,22 @@ class ParsedLog:
         text = str(value).strip().lower()
         return text if text in {"true", "false"} else "false"
 
+    @property
+    def protocol(self) -> str:
+        value = self.metadata.get("protocol", "")
+        text = str(value).strip().lower()
+        if text in {"forced", "admission"}:
+            return text
+        return "admission" if self.admission_aware == "true" else "forced"
+
     def policies(self) -> list[str]:
         names = {row["pol"] for row in self.per_seed_rows if "pol" in row}
         names.update(self.summary_by_policy.keys())
         return sorted(names)
+
+
+class IncompleteMetricsLogError(ValueError):
+    pass
 
 
 def _parse_args() -> argparse.Namespace:
@@ -221,13 +292,14 @@ def parse_metrics_log(path: Path, *, default_route_construction: str = "nearest"
         raise ValueError(f"Could not find per-seed header in {path}")
 
     summary_header_index = _find_header_index(lines, require_marker=SUMMARY_SUFFIX)
+    if summary_header_index is None:
+        raise IncompleteMetricsLogError(f"Skipping incomplete metrics log without summary statistics: {path.name}")
+
     metadata = _parse_metadata(lines[:per_seed_header_index])
     if not str(metadata.get("route_construction", "")).strip():
         metadata["route_construction"] = str(default_route_construction)
     per_seed_rows = _parse_per_seed_rows(lines, per_seed_header_index, summary_header_index)
-    summary_by_policy = {}
-    if summary_header_index is not None:
-        summary_by_policy = _parse_summary_rows(lines, summary_header_index)
+    summary_by_policy = _parse_summary_rows(lines, summary_header_index)
 
     return ParsedLog(
         path=path,
@@ -372,7 +444,11 @@ def build_output_rows(parsed_logs: list[ParsedLog], metric_names: list[str], inc
         for policy in parsed_log.policies():
             out_row: dict[str, Any] = {
                 "source_file": parsed_log.path.name,
+                "scenario": parsed_log.scenario,
                 "instance": parsed_log.instance,
+                "num_robots": parsed_log.num_robots,
+                "max_robot_capacity": parsed_log.max_robot_capacity,
+                "protocol": parsed_log.protocol,
                 "resolver": parsed_log.resolver,
                 "route_construction": parsed_log.route_construction,
                 "admission_aware": parsed_log.admission_aware,
@@ -423,7 +499,25 @@ def main() -> int:
         return 1
 
     default_route_construction = str(getattr(args, "route_construction", "nearest") or "nearest").strip() or "nearest"
-    parsed_logs = [parse_metrics_log(path, default_route_construction=default_route_construction) for path in log_paths]
+    skipped_paths: list[Path] = []
+    parsed_logs = []
+    for path in log_paths:
+        try:
+            parsed_logs.append(parse_metrics_log(path, default_route_construction=default_route_construction))
+        except IncompleteMetricsLogError:
+            skipped_paths.append(path)
+
+    if skipped_paths:
+        print(
+            "Skipped incomplete metrics log(s) without summary statistics: "
+            + ", ".join(path.name for path in skipped_paths),
+            file=sys.stderr,
+        )
+
+    if not parsed_logs:
+        print("No complete metrics logs with summary statistics found in the input folder.", file=sys.stderr)
+        return 1
+
     known_metrics = set(available_metrics(parsed_logs))
     unknown_metrics = [metric for metric in metric_names if metric not in known_metrics]
     if unknown_metrics:
@@ -437,7 +531,18 @@ def main() -> int:
         return 1
 
     rows = build_output_rows(parsed_logs, metric_names, include_std)
-    fieldnames = ["source_file", "instance", "resolver", "route_construction", "admission_aware", "pol"]
+    fieldnames = [
+        "source_file",
+        "scenario",
+        "instance",
+        "num_robots",
+        "max_robot_capacity",
+        "protocol",
+        "resolver",
+        "route_construction",
+        "admission_aware",
+        "pol",
+    ]
     for metric_name in metric_names:
         fieldnames.append(metric_name)
         if include_std:
