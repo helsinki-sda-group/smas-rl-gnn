@@ -5,10 +5,12 @@ Plot evaluation results from evaluation_metrics.log
 
 import sys
 import os
+import glob
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from matplotlib import colors as mcolors
 import re
 
 
@@ -52,6 +54,92 @@ CONFLICT_METRICS = {
         "ylim": None,
     },
 }
+
+REWARD_METRICS = {
+    "rew": {"label": "Mean Evaluation Reward", "filename": "reward_vs_timesteps.png"},
+    "trav": {"label": "Travel Reward", "filename": "reward_trav_vs_timesteps.png"},
+    "dln": {"label": "Deadline Reward", "filename": "reward_dln_vs_timesteps.png"},
+    "wait": {"label": "Wait Reward", "filename": "reward_wait_vs_timesteps.png"},
+    "comp": {"label": "Completion Reward", "filename": "reward_comp_vs_timesteps.png"},
+}
+
+BASELINE_COLOR_OVERRIDES = {
+    "random": "#D62728",
+    "unique": "#8C564B",
+    "greedy": "#FF7F0E",
+    "pickup_distance": "#1F77B4",
+    "pickup_deadline": "#2CA02C",
+    "pickup_deadline_distance": "#17BECF",
+    "predicted_reward": "#9467BD",
+    "predicted_reward_joint": "#E377C2",
+    "predicted_reward_joint_competition": "#BCBD22",
+    "proposal_joint_competition": "#7F7F7F",
+    "capacity": "#0072B2",
+    "closest": "#56B4E9",
+    "closest_then_capacity": "#009E73",
+    "hungarian": "#D55E00",
+}
+
+BASELINE_LABEL_OVERRIDES = {
+    "random": "Random",
+    "unique": "Greedy-Unique",
+    "greedy": "Greedy",
+    "pickup_distance": "Pickup-Distance",
+    "pickup_deadline": "Pickup-Deadline",
+    "pickup_deadline_distance": "Pickup-Deadline-Distance",
+    "predicted_reward": "Predicted-Reward",
+    "predicted_reward_joint": "Predicted-Reward-Joint",
+    "predicted_reward_joint_competition": "Predicted-Reward-Joint-Competition",
+    "proposal_joint_competition": "Proposal-Joint-Competition",
+    "closest_then_capacity": "Closest-Then-Capacity",
+    "hungarian": "Hungarian",
+}
+
+BASELINE_ALIAS_MAP = {
+    "ctc": "closest_then_capacity",
+    "closest_than_capacity": "closest_then_capacity",
+    "reward_joint": "predicted_reward_joint",
+}
+
+
+def normalize_baseline_policy_name(policy_name):
+    raw = str(policy_name).strip().lower()
+    return BASELINE_ALIAS_MAP.get(raw, raw)
+
+
+def build_baseline_styles(policy_names):
+    """Build deterministic color/label styles for baseline policies."""
+    styles = {}
+    fallback_palette = [mcolors.to_hex(c) for c in plt.get_cmap('tab20').colors]
+    used_colors = set(BASELINE_COLOR_OVERRIDES.values())
+    fallback_idx = 0
+
+    for policy_name in sorted(policy_names, key=lambda x: str(x).lower()):
+        canonical = normalize_baseline_policy_name(policy_name)
+        color = BASELINE_COLOR_OVERRIDES.get(canonical)
+        if color is None:
+            while fallback_palette[fallback_idx % len(fallback_palette)] in used_colors:
+                fallback_idx += 1
+            color = fallback_palette[fallback_idx % len(fallback_palette)]
+            fallback_idx += 1
+        used_colors.add(color)
+        label = BASELINE_LABEL_OVERRIDES.get(canonical, canonical.replace('_', '-').title())
+        styles[str(policy_name)] = {"color": color, "label": label}
+    return styles
+
+
+def metric_plot_spec(metric_key):
+    """Return display metadata for a metric key."""
+    if metric_key in REWARD_METRICS:
+        spec = REWARD_METRICS[metric_key]
+        return spec['label'], spec['filename'], None
+    if metric_key in COORDINATION_METRICS:
+        spec = COORDINATION_METRICS[metric_key]
+        return spec['label'], spec['filename'], (-0.02, 1.02)
+    if metric_key in CONFLICT_METRICS:
+        spec = CONFLICT_METRICS[metric_key]
+        return spec['label'], spec['filename'], spec.get('ylim')
+    return metric_key, f'{metric_key}_vs_timesteps.png', None
 
 
 def parse_metrics_log(filepath):
@@ -243,13 +331,196 @@ def group_metric_by_ts(df, metric_key):
     return grouped
 
 
+def infer_metric_key_from_csv_path(csv_path):
+    """Infer metric key from exported *_data.csv filename."""
+    stem = os.path.splitext(os.path.basename(csv_path))[0].lower()
+    base = stem[:-5] if stem.endswith('_data') else stem
+
+    if base in {'reward_vs_timesteps', 'rew_vs_timesteps'}:
+        return 'rew'
+
+    m = re.match(r'^(?:reward_)?(rew|trav|dln|wait|comp)_vs_timesteps$', base)
+    if m:
+        return m.group(1)
+
+    coord_stems = {os.path.splitext(v['filename'])[0]: k for k, v in COORDINATION_METRICS.items()}
+    if base in coord_stems:
+        return coord_stems[base]
+
+    conflict_stems = {os.path.splitext(v['filename'])[0]: k for k, v in CONFLICT_METRICS.items()}
+    if base in conflict_stems:
+        return conflict_stems[base]
+
+    return None
+
+
+def load_metric_series_from_csv(csv_path):
+    """Load one metric CSV as series dicts with keys: label, mean, std."""
+    df = pd.read_csv(csv_path)
+    if df.empty:
+        return []
+
+    if 'ts' not in df.columns:
+        for alt in ('timestep', 'step'):
+            if alt in df.columns:
+                df = df.rename(columns={alt: 'ts'})
+                break
+    if 'ts' not in df.columns:
+        return []
+
+    df['ts'] = pd.to_numeric(df['ts'], errors='coerce')
+    df = df.dropna(subset=['ts'])
+    if df.empty:
+        return []
+
+    # Long format: ts + mean (+ optional label/std/count)
+    if 'mean' in df.columns:
+        df['mean'] = pd.to_numeric(df['mean'], errors='coerce')
+        df = df.dropna(subset=['mean'])
+        if df.empty:
+            return []
+        if 'label' in df.columns:
+            out = []
+            for label, group in df.groupby('label'):
+                mean_series = group.groupby('ts')['mean'].mean().sort_index()
+                std_series = None
+                if 'std' in group.columns:
+                    group_std = pd.to_numeric(group['std'], errors='coerce')
+                    group_with_std = group.assign(_std=group_std)
+                    std_series = group_with_std.groupby('ts')['_std'].mean().sort_index()
+                    std_series = std_series.reindex(mean_series.index)
+                if not mean_series.empty:
+                    out.append({'label': str(label), 'mean': mean_series, 'std': std_series})
+            return out
+        mean_series = df.groupby('ts')['mean'].mean().sort_index()
+        std_series = None
+        if 'std' in df.columns:
+            df_std = pd.to_numeric(df['std'], errors='coerce')
+            df_with_std = df.assign(_std=df_std)
+            std_series = df_with_std.groupby('ts')['_std'].mean().sort_index()
+            std_series = std_series.reindex(mean_series.index)
+        return [{'label': 'Mean', 'mean': mean_series, 'std': std_series}] if not mean_series.empty else []
+
+    # Wide format: ts + one column per run/label.
+    candidate_cols = []
+    excluded = {'ts', 'std', 'count', 'count_runs'}
+    for col in df.columns:
+        if col in excluded:
+            continue
+        num_vals = pd.to_numeric(df[col], errors='coerce')
+        if num_vals.notna().any():
+            candidate_cols.append(col)
+
+    out = []
+    for col in candidate_cols:
+        vals = pd.to_numeric(df[col], errors='coerce')
+        tmp = pd.DataFrame({'ts': df['ts'], 'val': vals}).dropna(subset=['val'])
+        if tmp.empty:
+            continue
+        series = tmp.groupby('ts')['val'].mean().sort_index()
+        if not series.empty:
+                out.append({'label': str(col), 'mean': series, 'std': None})
+    return out
+
+
+def plot_metric_from_csv(csv_path, metric_key, output_png, baselines, baseline_std, mean_run):
+    """Plot one metric from an exported *_data.csv file."""
+    series_items = load_metric_series_from_csv(csv_path)
+    if not series_items:
+        print(f"[INFO] No usable series in {csv_path} — skipping")
+        return False
+
+    ylabel, _, y_limits = metric_plot_spec(metric_key)
+    fig, ax = plt.subplots(figsize=(12, 6), facecolor='#fafafa')
+    ax.set_facecolor('#fafafa')
+
+    if mean_run and len(series_items) > 1:
+        frames = [pd.DataFrame({entry['label']: entry['mean']}).sort_index() for entry in series_items]
+        merged = pd.concat(frames, axis=1, sort=True).sort_index()
+        run_mean = merged.mean(axis=1, skipna=True)
+        run_std = merged.std(axis=1, skipna=True).fillna(0.0)
+        ts = run_mean.index.to_numpy(dtype=float)
+        ax.plot(ts, run_mean.values, color='#3498db', linewidth=2.5, alpha=0.95, label='Mean Across Runs')
+        ax.fill_between(ts, (run_mean - run_std).values, (run_mean + run_std).values,
+                        color='#3498db', alpha=0.2, label='Run Std')
+    else:
+        cmap = plt.get_cmap('tab10')
+        for idx, entry in enumerate(series_items):
+            label = str(entry['label'])
+            mean_series = entry['mean']
+            ts = mean_series.index.to_numpy(dtype=float)
+            vals = mean_series.to_numpy(dtype=float)
+            color = cmap(idx % 10)
+            ax.plot(ts, vals, linewidth=2.0, alpha=0.9, color=color, label=label)
+
+            std_series = entry.get('std')
+            if std_series is not None:
+                std_vals = pd.to_numeric(std_series, errors='coerce').to_numpy(dtype=float)
+                std_vals = np.nan_to_num(std_vals, nan=0.0)
+                if np.any(std_vals > 0):
+                    ax.fill_between(ts, vals - std_vals, vals + std_vals, color=color, alpha=0.18, label=f'{label} Std')
+
+    add_baseline_lines(ax, baselines, metric_key, baseline_std)
+
+    if y_limits is not None:
+        ax.set_ylim(*y_limits)
+
+    ax.set_xlabel('Training Steps', fontsize=11, fontweight='bold')
+    ax.set_ylabel(ylabel, fontsize=11, fontweight='bold')
+    if mean_run and len(series_items) > 1:
+        mode_label = 'Mean ± Std Across Runs'
+    elif any(item.get('std') is not None for item in series_items):
+        mode_label = 'Series from CSV (with Std)'
+    else:
+        mode_label = 'Series from CSV'
+    ax.set_title(f'{ylabel} vs Training Steps ({mode_label})', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=9, loc='best')
+    ax.grid(alpha=0.25)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    os.makedirs(os.path.dirname(output_png), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(output_png, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"[OK] Saved {output_png}")
+    return True
+
+
+def plot_from_csv_directory(csv_dir, output_dir, baselines, baseline_std, mean_run):
+    """Regenerate plots from existing *_data.csv files in a directory tree."""
+    csv_files = sorted(glob.glob(os.path.join(csv_dir, '**', '*_data.csv'), recursive=True))
+    if not csv_files:
+        raise ValueError(f'No *_data.csv files found under: {csv_dir}')
+
+    plotted = 0
+    for csv_path in csv_files:
+        metric_key = infer_metric_key_from_csv_path(csv_path)
+        if metric_key is None:
+            continue
+
+        rel_path = os.path.relpath(csv_path, csv_dir)
+        rel_dir = os.path.dirname(rel_path)
+        png_name = os.path.basename(csv_path).replace('_data.csv', '.png')
+        output_png = os.path.join(output_dir, rel_dir, png_name)
+        if plot_metric_from_csv(csv_path, metric_key, output_png, baselines, baseline_std, mean_run):
+            plotted += 1
+
+    if plotted == 0:
+        raise ValueError(
+            'No plottable CSV files were recognized. Expected names like '
+            "reward_vs_timesteps_data.csv, reward_wait_vs_timesteps_data.csv, "
+            "coord/*_data.csv, conflict/*_data.csv, or rew_vs_timesteps_data.csv."
+        )
+    print(f"[OK] Generated {plotted} plot(s) from CSV data in {csv_dir}")
+
+
 def add_baseline_lines(ax, baselines, reward_key, baseline_std):
     """Add baseline mean lines and optional std bands for a metric."""
     if not baselines:
         return
 
-    baseline_colors = {'random': '#d62728', 'greedy': '#ff7f0e', 'unique': '#8c564b'}
-    baseline_labels = {'random': 'Random', 'greedy': 'Greedy', 'unique': 'Greedy-Unique'}
+    styles = build_baseline_styles(list(baselines.keys()))
     mean_key = 'mean' if reward_key == 'rew' else f'{reward_key}_mean'
     std_key = 'std' if reward_key == 'rew' else f'{reward_key}_std'
 
@@ -258,8 +529,9 @@ def add_baseline_lines(ax, baselines, reward_key, baseline_std):
         std_val = stats.get(std_key)
         if mean_val is None:
             continue
-        color = baseline_colors.get(pol, '#95a5a6')
-        label = baseline_labels.get(pol, pol.capitalize())
+        style = styles.get(str(pol), {"color": '#95a5a6', "label": str(pol).capitalize()})
+        color = style['color']
+        label = style['label']
         ax.axhline(mean_val, color=color, linestyle='--', linewidth=2.5, alpha=0.9, label=f'{label} Baseline')
         if baseline_std and std_val is not None:
             ax.axhline(mean_val + std_val, color=color, linestyle=':', linewidth=1.5, alpha=0.7)
@@ -639,11 +911,14 @@ def plot_aggregate_runs(compare_logs, output_dir, baselines, baseline_std, mean_
 
 
 def main():
-    if len(sys.argv) < 2:
+    has_help_flag = any(a in ('-h', '--help') for a in sys.argv[1:])
+    if len(sys.argv) < 2 or has_help_flag:
         print("Usage: python plot_eval_results.py <evaluation_metrics.log> [--ma-window WINDOW] [--ma WINDOW] [--baseline-log BASELINE_LOG] [--baseline-std] [--output-dir DIR]")
         print("   or: python plot_eval_results.py --compare-log LABEL=PATH [--compare-log LABEL=PATH ...] [--mean-run] [--baseline-log BASELINE_LOG] [--output-dir DIR]")
+        print("   or: python plot_eval_results.py --csv-dir DIR [--mean-run] [--baseline-log BASELINE_LOG] [--baseline-std] [--output-dir DIR]")
         print("Example: python plot_eval_results.py eval_results/evaluation_20260206_231327/evaluation_metrics.log --baseline-log baseline_train_seeds_v2000_ms1200_mwd240_mtd900_cap2.log")
-        sys.exit(1)
+        print("Example: python plot_eval_results.py --csv-dir ablation_results/eval_comp_plots --baseline-log metrics_v15_ms1200_mwd240_mtd900_cap2.log")
+        sys.exit(0 if has_help_flag else 1)
 
     metrics_log = None
     ma_window = 10
@@ -652,6 +927,7 @@ def main():
     output_dir_arg = None
     compare_logs = []
     mean_run = False
+    csv_dir = None
 
     # Parse arguments
     args = sys.argv[1:]
@@ -661,7 +937,7 @@ def main():
         if arg in ('--ma-window', '--ma') and i + 1 < len(args):
             ma_window = int(args[i + 1])
             i += 2
-        elif arg == '--baseline-log' and i + 1 < len(args):
+        elif arg in ('--baseline-log', '-baseline-log') and i + 1 < len(args):
             baseline_log = args[i + 1]
             i += 2
         elif arg == '--baseline-std':
@@ -676,6 +952,12 @@ def main():
         elif arg in ('--mean-run', '--mean_run'):
             mean_run = True
             i += 1
+        elif arg == '--csv-dir' and i + 1 < len(args):
+            csv_dir = args[i + 1]
+            i += 2
+        elif arg.startswith('--csv-dir='):
+            csv_dir = arg.split('=', 1)[1]
+            i += 1
         elif arg == '--output-dir' and i + 1 < len(args):
             output_dir_arg = args[i + 1]
             i += 2
@@ -686,8 +968,15 @@ def main():
                 metrics_log = arg
             i += 1
 
-    if metrics_log is None and not compare_logs:
-        raise ValueError('Expected an evaluation_metrics.log path or at least one --compare-log LABEL=PATH argument.')
+    mode_count = sum([1 if metrics_log else 0, 1 if compare_logs else 0, 1 if csv_dir else 0])
+    if mode_count == 0:
+        raise ValueError(
+            'Expected one input mode: evaluation_metrics.log, --compare-log LABEL=PATH, or --csv-dir DIR.'
+        )
+    if mode_count > 1:
+        raise ValueError(
+            'Please choose a single input mode: either a metrics log, or --compare-log, or --csv-dir.'
+        )
     
     # Load baseline data if provided
     baselines = {}
@@ -709,7 +998,22 @@ def main():
         output_dir = output_dir_arg
         os.makedirs(output_dir, exist_ok=True)
     else:
-        output_dir = os.path.dirname(metrics_log) if metrics_log else os.getcwd()
+        if metrics_log:
+            output_dir = os.path.dirname(metrics_log)
+        elif compare_logs:
+            output_dir = os.getcwd()
+        else:
+            output_dir = os.path.join(csv_dir, 'replots')
+        os.makedirs(output_dir, exist_ok=True)
+
+    if csv_dir:
+        csv_dir_abs = os.path.abspath(csv_dir)
+        if not os.path.isdir(csv_dir_abs):
+            raise ValueError(f'CSV directory does not exist: {csv_dir}')
+        print(f"Generating plots from existing CSV data in: {csv_dir_abs}")
+        plot_from_csv_directory(csv_dir_abs, output_dir, baselines, baseline_std, mean_run)
+        print(f"\n[OK] CSV-based plots saved to {output_dir}")
+        return
 
     if compare_logs:
         print("Generating aggregate comparison plots...")
@@ -764,24 +1068,14 @@ def main():
     
     # Add baseline horizontal lines
     if baselines:
-        baseline_colors = {'random': '#d62728', 'greedy': '#ff7f0e', 'unique': '#8c564b'}
-        baseline_labels = {'random': 'Random', 'greedy': 'Greedy', 'unique': 'Greedy-Unique'}
         random_baseline_mean = None
         for pol, stats in baselines.items():
-            color = baseline_colors.get(pol, '#95a5a6')
-            label = baseline_labels.get(pol, pol.capitalize())
             mean_val = stats.get('mean', None)
-            std_val = stats.get('std', None)
             if mean_val is None:
                 continue
             if pol == 'random':
                 random_baseline_mean = mean_val
-            # Horizontal line for mean
-            ax.axhline(mean_val, color=color, linestyle='--', linewidth=2.5, alpha=0.9, label=f'{label} Baseline')
-            # Dotted lines for ±1 std only if baseline_std is set
-            if baseline_std and std_val is not None:
-                ax.axhline(mean_val + std_val, color=color, linestyle=':', linewidth=1.5, alpha=0.7)
-                ax.axhline(mean_val - std_val, color=color, linestyle=':', linewidth=1.5, alpha=0.7)
+        add_baseline_lines(ax, baselines, 'rew', baseline_std)
         # Set ylim if no baseline_std and random baseline present
         if not baseline_std and random_baseline_mean is not None:
             ax.set_ylim(bottom=random_baseline_mean - 0.8)
@@ -815,15 +1109,7 @@ def main():
 
     # Add baseline horizontal lines
     if baselines:
-        baseline_colors = {'random': '#d62728', 'greedy': '#ff7f0e', 'unique': '#8c564b'}
-        baseline_labels = {'random': 'Random', 'greedy': 'Greedy', 'unique': 'Greedy-Unique'}
-        for pol, stats in baselines.items():
-            color = baseline_colors.get(pol, '#95a5a6')
-            label = baseline_labels.get(pol, pol.capitalize())
-            mean_val = stats.get('mean', None)
-            if mean_val is None:
-                continue
-            ax.axhline(mean_val, color=color, linestyle='--', linewidth=2.5, alpha=0.9, label=f'{label} Baseline')
+        add_baseline_lines(ax, baselines, 'rew', baseline_std=False)
 
     ax.set_xticks(range(len(seeds)))
     ax.set_xticklabels([f'{int(s)}' for s in seeds], rotation=45, ha='right', fontsize=9)
@@ -857,14 +1143,7 @@ def main():
             ax.plot(ts, ma_rew, 'r-', lw=2.5, alpha=0.7, label=f'Moving Average (w={ma_window})')
         # Add baseline horizontal lines
         if baselines:
-            baseline_colors = {'random': '#d62728', 'greedy': '#ff7f0e', 'unique': '#8c564b'}
-            baseline_labels = {'random': 'Random', 'greedy': 'Greedy', 'unique': 'Greedy-Unique'}
-            for pol, stats in baselines.items():
-                mean_val = stats.get('mean', None)
-                if mean_val is not None:
-                    color = baseline_colors.get(pol, '#95a5a6')
-                    label = baseline_labels.get(pol, pol.capitalize())
-                    ax.axhline(mean_val, color=color, linestyle='--', linewidth=2.5, alpha=0.9, label=f'{label} Baseline')
+            add_baseline_lines(ax, baselines, 'rew', baseline_std=False)
         ax.set_xlabel('Training Steps', fontsize=11, fontweight='bold')
         ax.set_ylabel('Evaluation Reward', fontsize=11, fontweight='bold')
         ax.set_title(f'Model Performance for Seed {int(seed)}', fontsize=12, fontweight='bold')
@@ -981,19 +1260,7 @@ def main():
 
         # Baseline horizontal lines (if available)
         if baselines:
-            ts_range = [ts.min(), ts.max()] if len(ts) else [0, 1]
-            baseline_colors = {'random': '#d62728', 'greedy': '#ff7f0e', 'unique': '#8c564b'}
-            baseline_labels = {'random': 'Random', 'greedy': 'Greedy', 'unique': 'Greedy-Unique'}
-            for pol, stats in baselines.items():
-                mean_val = stats.get(f'{reward_key}_mean', None)
-                std_val = stats.get(f'{reward_key}_std', None)
-                if mean_val is not None:
-                    color2 = baseline_colors.get(pol, '#95a5a6')
-                    label2 = baseline_labels.get(pol, pol.capitalize())
-                    ax.axhline(mean_val, color=color2, linestyle='--', linewidth=2.5, alpha=0.9, label=f'{label2} Baseline')
-                    if baseline_std and std_val is not None:
-                        ax.axhline(mean_val + std_val, color=color2, linestyle=':', linewidth=1.5, alpha=0.7)
-                        ax.axhline(mean_val - std_val, color=color2, linestyle=':', linewidth=1.5, alpha=0.7)
+            add_baseline_lines(ax, baselines, reward_key, baseline_std)
 
         ax.set_xlabel('Training Steps', fontsize=11, fontweight='bold')
         ax.set_ylabel(ylabel, fontsize=11, fontweight='bold')
