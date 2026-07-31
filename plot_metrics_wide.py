@@ -15,6 +15,7 @@ from matplotlib.ticker import LogLocator, NullFormatter
 ID_COLUMNS = {"source_file", "scenario", "instance", "protocol", "resolver", "route_construction", "admission_aware", "pol"}
 DEFAULT_OUTPUT_DIR = "metrics_wide_plots"
 ROUTE_CONSTRUCTION_OUTPUT_SUBDIR = "route_counstruction_cmp"
+PROTOCOL_CMP_OUTPUT_SUBDIR = "protocol_cmp"
 RATIO_METRICS = {"crat", "conf_ratio"}
 GROUPED_BAR_WIDTH = 0.11
 RESOLVER_ORDER_BASE = [
@@ -42,6 +43,16 @@ COLORBLIND_PALETTE = [
     "#000000",
 ]
 POLICY_MARKERS = ["o", "s", "^", "D", "P", "X", "v", "<", ">", "h", "*", "8"]
+PROTOCOL_COMPARE_POLICIES: list[tuple[str, set[str]]] = [
+    ("predicted_reward", {"predicted_reward"}),
+    ("predicted_reward_joint", {"predicted_reward_joint"}),
+    ("proposal_joint_completion", {"proposal_joint_completion", "proposal_joint_competition"}),
+]
+PROTOCOL_COMPARE_ORDER = ["forced", "aa"]
+PROTOCOL_COMPARE_DISPLAY = {
+    "forced": "f",
+    "aa": "aa",
+}
 WORK_COLUMNS = {
     "work_route_stops",
     "work_insertion_pairs",
@@ -64,7 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Plot aggregated metrics from metrics_wide.csv. "
-            "If no plot-type flags are provided, all available plot types are generated."
+            "If no plot-type flags are provided, grouped resolver/policy/protocol comparison plots are generated."
         )
     )
     parser.add_argument(
@@ -89,13 +100,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--resolver-cmp",
         action="store_true",
-        help="Create one bar-chart figure per metric with one subplot per resolver",
+        help=(
+            "Create resolver comparison plots. With --grouped (default), this also creates "
+            "grouped policy and protocol comparison plots."
+        ),
+    )
+    parser.add_argument(
+        "--protocol-cmp",
+        action="store_true",
+        help=(
+            "Create protocol comparison plots (forced vs aa) in protocol_cmp, with "
+            "resolver subplots and grouped bars for supported policies"
+        ),
     )
     parser.add_argument(
         "--grouped",
         type=lambda value: str(value).strip().lower() not in {"false", "0", "no", "off"},
         default=True,
-        help="Generate grouped resolver/policy comparison plots (default: true)",
+        help="Generate grouped resolver/policy/protocol comparison plots (default: true)",
     )
     parser.add_argument(
         "--exclude-resolvers",
@@ -207,7 +229,32 @@ def _rows_for_scenario(rows: list[dict[str, object]], scenario: str) -> list[dic
 
 
 def _normalize_name_set(values: list[str]) -> set[str]:
-    return {str(value).strip().lower() for value in values if str(value).strip()}
+    normalized: set[str] = set()
+    for value in values:
+        for chunk in str(value).split(","):
+            text = chunk.strip().lower()
+            if text:
+                normalized.add(text)
+    return normalized
+
+
+def _normalize_policy_key(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    text = text.replace("-", "_")
+    text = "_".join(part for part in text.split())
+    return text
+
+
+def _normalize_policy_set(values: list[str]) -> set[str]:
+    normalized: set[str] = set()
+    for value in values:
+        for chunk in str(value).split(","):
+            key = _normalize_policy_key(chunk)
+            if key:
+                normalized.add(key)
+    return normalized
 
 
 def _filtered_rows(
@@ -219,7 +266,7 @@ def _filtered_rows(
     filtered_rows: list[dict[str, object]] = []
     for row in rows:
         resolver = str(row.get("resolver", "")).strip().lower()
-        policy = str(row.get("pol", "")).strip().lower()
+        policy = _normalize_policy_key(row.get("pol", ""))
         if resolver in exclude_resolvers:
             continue
         if policy in exclude_policies:
@@ -268,8 +315,12 @@ def resolve_plot_types(args: argparse.Namespace) -> list[str]:
         if args.grouped:
             requested_types.append("resolver_cmp_grouped")
             requested_types.append("policy_cmp_grouped")
+            requested_types.append("protocol_cmp_grouped")
         else:
             requested_types.append("resolver_cmp")
+    if args.protocol_cmp:
+        has_explicit_flags = True
+        requested_types.append("protocol_cmp_grouped")
     if args.work_cmp:
         has_explicit_flags = True
         requested_types.append("work_cmp")
@@ -277,7 +328,7 @@ def resolve_plot_types(args: argparse.Namespace) -> list[str]:
     if has_explicit_flags:
         return requested_types
     if args.grouped:
-        return ["resolver_cmp_grouped", "policy_cmp_grouped"]
+        return ["resolver_cmp_grouped", "policy_cmp_grouped", "protocol_cmp_grouped"]
     return ["resolver_cmp"]
 
 
@@ -369,6 +420,13 @@ def _ordered_resolvers(labels: list[str]) -> list[str]:
     return ordered
 
 
+def _canonical_resolver_name(resolver: object) -> str:
+    text = str(resolver or "").strip().lower()
+    if text in {"closest", "ctc", "closest_then_capacity"}:
+        return "closest_then_capacity"
+    return text
+
+
 def _series_color_map(labels: list[str], preferred: dict[str, str] | None = None) -> dict[str, str]:
     color_map: dict[str, str] = {}
     used_colors: set[str] = set()
@@ -391,6 +449,78 @@ def _series_color_map(labels: list[str], preferred: dict[str, str] | None = None
 
 def _grouped_figure_width(num_groups: int) -> float:
     return max(8.0, 1.1 * max(num_groups, 1) + 4.0)
+
+
+def _metric_limits_from_grouped_series(series_values: dict[str, list[tuple[float | None, float]]]) -> tuple[float, float]:
+    lower = math.inf
+    upper = -math.inf
+
+    for values in series_values.values():
+        for mean, std in values:
+            if mean is None or (isinstance(mean, float) and math.isnan(mean)):
+                continue
+            std_value = float(std or 0.0)
+            lower = min(lower, float(mean) - std_value, 0.0)
+            upper = max(upper, float(mean) + std_value, 0.0)
+
+    if lower is math.inf or upper is -math.inf:
+        return (-1.0, 1.0)
+    if math.isclose(lower, upper):
+        padding = abs(lower) * 0.05 or 1.0
+        return lower - padding, upper + padding
+    padding = (upper - lower) * 0.05
+    return lower - padding, upper + padding
+
+
+def _protocol_cmp_policy_label(policy: str) -> str:
+    if policy == "proposal_joint_completion":
+        return "proposal joint completion"
+    return _display_label(policy)
+
+
+def _protocol_cmp_series_for_resolver(
+    rows: list[dict[str, object]],
+    resolver: str,
+    metric: str,
+) -> tuple[list[str], dict[str, list[tuple[float | None, float]]]]:
+    protocol_display_order = [PROTOCOL_COMPARE_DISPLAY[protocol] for protocol in PROTOCOL_COMPARE_ORDER]
+    series_values: dict[str, list[tuple[float | None, float]]] = {
+        protocol_label: []
+        for protocol_label in protocol_display_order
+    }
+    selected_policy_labels: list[str] = []
+
+    for canonical_policy, aliases in PROTOCOL_COMPARE_POLICIES:
+        per_protocol_values: dict[str, tuple[float | None, float]] = {}
+        for protocol in PROTOCOL_COMPARE_ORDER:
+            matched_rows = [
+                row for row in rows
+                if _canonical_resolver_name(row.get("resolver")) == resolver
+                and str(row.get("pol", "")).strip().lower() in aliases
+                and _protocol_alias_of_row(row) == protocol
+            ]
+            means = [safe_number(row.get(metric)) for row in matched_rows]
+            stds = [safe_number(row.get(f"{metric}_std")) or 0.0 for row in matched_rows]
+            valid = [(mean, std) for mean, std in zip(means, stds) if mean is not None]
+            if not valid:
+                per_protocol_values[protocol] = (None, 0.0)
+                continue
+            valid_means = [float(mean) for mean, _ in valid]
+            valid_stds = [float(std) for _, std in valid]
+            per_protocol_values[protocol] = (
+                sum(valid_means) / len(valid_means),
+                sum(valid_stds) / len(valid_stds) if valid_stds else 0.0,
+            )
+
+        if any(per_protocol_values[protocol][0] is None for protocol in PROTOCOL_COMPARE_ORDER):
+            continue
+
+        selected_policy_labels.append(_protocol_cmp_policy_label(canonical_policy))
+        for protocol in PROTOCOL_COMPARE_ORDER:
+            protocol_label = PROTOCOL_COMPARE_DISPLAY[protocol]
+            series_values[protocol_label].append(per_protocol_values[protocol])
+
+    return selected_policy_labels, series_values
 
 
 def _policy_marker_map(policies: list[str]) -> dict[str, str]:
@@ -777,6 +907,107 @@ def plot_policy_cmp_grouped(rows: list[dict[str, object]], metrics: list[str], o
     return saved_paths
 
 
+def plot_protocol_cmp_grouped(rows: list[dict[str, object]], metrics: list[str], output_dir: Path) -> list[Path]:
+    saved_paths: list[Path] = []
+    resolvers = _ordered_resolvers(
+        [
+            _canonical_resolver_name(row.get("resolver"))
+            for row in rows
+            if _canonical_resolver_name(row.get("resolver"))
+        ]
+    )
+
+    protocol_labels = [PROTOCOL_COMPARE_DISPLAY[protocol] for protocol in PROTOCOL_COMPARE_ORDER]
+    protocol_colors = _series_color_map(protocol_labels, preferred={
+        "f": "#4C78A8",
+        "aa": "#F58518",
+    })
+
+    protocol_dir: Path | None = None
+
+    for metric in metrics:
+        resolver_series: list[tuple[str, list[str], dict[str, list[tuple[float | None, float]]]]] = []
+        for resolver in resolvers:
+            x_labels, series_values = _protocol_cmp_series_for_resolver(rows, resolver, metric)
+            if not x_labels:
+                continue
+            resolver_series.append((resolver, x_labels, series_values))
+
+        if not resolver_series:
+            continue
+
+        if protocol_dir is None:
+            protocol_dir = output_dir / PROTOCOL_CMP_OUTPUT_SUBDIR
+            protocol_dir.mkdir(parents=True, exist_ok=True)
+
+        nrows, ncols = _subplots_layout(len(resolver_series))
+        figure, axes = plt.subplots(
+            nrows=nrows,
+            ncols=ncols,
+            figsize=(max(5 * ncols, 7), 5 * nrows),
+            squeeze=False,
+            sharey=True,
+        )
+        axis_grid = _visible_axis_grid(axes)
+        metric_display = _metric_title(metric)
+        figure.suptitle(f"{metric_display} by resolver and protocol", fontsize=14)
+
+        merged_series_values: dict[str, list[tuple[float | None, float]]] = {label: [] for label in protocol_labels}
+        for _, _, series_values in resolver_series:
+            for protocol_label in protocol_labels:
+                merged_series_values[protocol_label].extend(series_values.get(protocol_label, []))
+        y_min, y_max = _metric_limits_from_grouped_series(merged_series_values)
+
+        for index, (resolver, x_labels, series_values) in enumerate(resolver_series):
+            axis = axis_grid[index]
+            _apply_grouped_bar_plot(
+                axis,
+                x_labels=x_labels,
+                series_labels=protocol_labels,
+                series_values=series_values,
+                series_colors=protocol_colors,
+                y_min=y_min,
+                y_max=y_max,
+            )
+            axis.set_title(_display_label(resolver))
+            if index % ncols == 0:
+                axis.set_ylabel(_metric_ylabel(metric))
+
+        for axis in axis_grid[len(resolver_series):]:
+            axis.set_visible(False)
+
+        legend_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="s",
+                linestyle="",
+                markersize=8,
+                markerfacecolor=protocol_colors.get(protocol_label, "#4C78A8"),
+                markeredgecolor="#2F3E4E",
+                label=protocol_label,
+            )
+            for protocol_label in protocol_labels
+        ]
+        figure.legend(
+            handles=legend_handles,
+            title="protocol",
+            fontsize=10,
+            title_fontsize=10,
+            loc="upper left",
+            bbox_to_anchor=(0.88, 0.98),
+            frameon=False,
+        )
+
+        figure.tight_layout(rect=(0.0, 0.0, 0.86, 0.93))
+        output_path = protocol_dir / f"{metric}_protocol_cmp_grouped.png"
+        figure.savefig(output_path, dpi=200, bbox_inches="tight")
+        plt.close(figure)
+        saved_paths.append(output_path)
+
+    return saved_paths
+
+
 def plot_work_cmp(
     rows: list[dict[str, object]],
     metrics: list[str],
@@ -1044,7 +1275,7 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     exclude_resolvers = _normalize_name_set(args.exclude_resolvers)
-    exclude_policies = _normalize_name_set(args.exclude_policies)
+    exclude_policies = _normalize_policy_set(args.exclude_policies)
 
     saved_paths: list[Path] = []
     scenarios = _selected_scenarios(rows, args.scenario)
@@ -1071,6 +1302,8 @@ def main() -> int:
                 ]
                 saved_paths.extend(plot_resolver_cmp_grouped(combo_rows, metrics, scenario_output_dir))
                 saved_paths.extend(plot_policy_cmp_grouped(combo_rows, metrics, scenario_output_dir))
+        if "protocol_cmp_grouped" in plot_types:
+            saved_paths.extend(plot_protocol_cmp_grouped(scenario_rows, metrics, scenario_output_dir))
         if "resolver_cmp" in plot_types:
             resolver_combos = sorted({_resolver_combo_of_row(row) for row in scenario_rows})
             for route_alias, protocol_alias in resolver_combos:

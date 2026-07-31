@@ -221,6 +221,99 @@ class WorkPlotSmokeTests(unittest.TestCase):
             )
             self.assertTrue(any(path.name == "rew_work_cmp.png" for path in saved))
 
+    def test_protocol_cmp_grouped_writes_rew_plot(self):
+        try:
+            from plot_metrics_wide import plot_protocol_cmp_grouped
+        except ModuleNotFoundError:
+            self.skipTest("matplotlib is not installed in this environment")
+
+        rows = [
+            {
+                "scenario": "wave",
+                "resolver": "predicted_reward",
+                "protocol": "forced",
+                "pol": "predicted_reward",
+                "rew": 10.0,
+                "rew_std": 1.0,
+            },
+            {
+                "scenario": "wave",
+                "resolver": "predicted_reward",
+                "protocol": "admission",
+                "pol": "predicted_reward",
+                "rew": 11.0,
+                "rew_std": 1.0,
+            },
+            {
+                "scenario": "wave",
+                "resolver": "predicted_reward",
+                "protocol": "forced",
+                "pol": "predicted_reward_joint",
+                "rew": 12.0,
+                "rew_std": 1.1,
+            },
+            {
+                "scenario": "wave",
+                "resolver": "predicted_reward",
+                "protocol": "admission",
+                "pol": "predicted_reward_joint",
+                "rew": 13.0,
+                "rew_std": 1.2,
+            },
+            {
+                "scenario": "wave",
+                "resolver": "predicted_reward",
+                "protocol": "forced",
+                "pol": "proposal_joint_competition",
+                "rew": 14.0,
+                "rew_std": 0.8,
+            },
+            {
+                "scenario": "wave",
+                "resolver": "predicted_reward",
+                "protocol": "admission",
+                "pol": "proposal_joint_competition",
+                "rew": 15.0,
+                "rew_std": 0.9,
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as td:
+            output_dir = Path(td)
+            saved = plot_protocol_cmp_grouped(rows, ["rew"], output_dir)
+            self.assertTrue(any(path.name == "rew_protocol_cmp_grouped.png" for path in saved))
+            self.assertTrue((output_dir / "protocol_cmp").exists())
+
+    def test_protocol_cmp_grouped_resolver_alias_match(self):
+        try:
+            from plot_metrics_wide import plot_protocol_cmp_grouped
+        except ModuleNotFoundError:
+            self.skipTest("matplotlib is not installed in this environment")
+
+        rows = [
+            {
+                "scenario": "randdest",
+                "resolver": "closest",
+                "protocol": "forced",
+                "pol": "predicted_reward",
+                "rew": 10.0,
+                "rew_std": 0.5,
+            },
+            {
+                "scenario": "randdest",
+                "resolver": "closest_then_capacity",
+                "protocol": "admission",
+                "pol": "predicted_reward",
+                "rew": 11.0,
+                "rew_std": 0.6,
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as td:
+            output_dir = Path(td)
+            saved = plot_protocol_cmp_grouped(rows, ["rew"], output_dir)
+            self.assertTrue(any(path.name == "rew_protocol_cmp_grouped.png" for path in saved))
+
     def test_tight_log_x_limits_helper(self):
         try:
             import matplotlib.pyplot as plt
@@ -242,6 +335,29 @@ class WorkPlotSmokeTests(unittest.TestCase):
         self.assertTrue(all(lower <= value <= upper for value in x_values))
 
         plt.close(figure)
+
+    def test_exclude_policies_normalization_filters_space_and_comma_inputs(self):
+        try:
+            from plot_metrics_wide import _filtered_rows, _normalize_policy_set
+        except ModuleNotFoundError:
+            self.skipTest("matplotlib is not installed in this environment")
+
+        rows = [
+            {"resolver": "capacity", "pol": "pickup_deadline", "rew": 1.0, "work_total": 10.0},
+            {"resolver": "capacity", "pol": "pickup_deadline_distance", "rew": 2.0, "work_total": 11.0},
+            {"resolver": "capacity", "pol": "unique", "rew": 3.0, "work_total": 12.0},
+            {"resolver": "capacity", "pol": "proposal_joint_competition", "rew": 4.0, "work_total": 13.0},
+            {"resolver": "capacity", "pol": "predicted_reward", "rew": 5.0, "work_total": 14.0},
+        ]
+
+        # Mimics CLI usage where several values are passed as one comma-separated token.
+        exclude_policies = _normalize_policy_set([
+            "pickup deadline, pickup deadline distance, unique, proposal joint competition"
+        ])
+        filtered = _filtered_rows(rows, exclude_resolvers=set(), exclude_policies=exclude_policies)
+
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["pol"], "predicted_reward")
 
 
 if __name__ == "__main__":
