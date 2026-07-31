@@ -2829,6 +2829,7 @@ class RLControllerAdapter:
 
 
         for res_id, rids in buckets.items():
+            is_conflict = len(rids) >= 2
             mode = self.conflict_resolution
             admission_resolver = self._is_admission_aware_enabled() and self._is_reward_aligned_resolver_mode(mode)
 
@@ -3004,7 +3005,7 @@ class RLControllerAdapter:
 
             winner_margin = margin_map.get(winner_rid)
             loser_margins = [m for rid, m in margin_map.items() if rid != winner_rid]
-            if self.logger:
+            if is_conflict and self.logger:
                 try:
                     self.logger.log_conflict_metrics_event(
                         winner=winner_rid,
@@ -3020,7 +3021,7 @@ class RLControllerAdapter:
 
             # Conflict log (the actual winner is used)
             # 116.0,1,t0|t1|t3|t4,2|2|2|1, 31.33, 214.15, 176.13, 222.14, t1
-            if self.logger:
+            if is_conflict and self.logger:
                 if mode in {"capacity", "random"}: 
                     dists_dict = {rid: -1.0 for rid in rids}
                 else:
