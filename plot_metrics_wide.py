@@ -14,7 +14,12 @@ from matplotlib.ticker import LogLocator, NullFormatter
 
 ID_COLUMNS = {"source_file", "scenario", "instance", "protocol", "resolver", "route_construction", "admission_aware", "pol"}
 DEFAULT_OUTPUT_DIR = "metrics_wide_plots"
-ROUTE_CONSTRUCTION_OUTPUT_SUBDIR = "route_counstruction_cmp"
+ROUTE_CONSTRUCTION_OUTPUT_SUBDIR = "route_construction_cmp"
+ROUTE_MODE_ORDER = ["nearest", "reward_aligned"]
+ROUTE_MODE_COLORS = {
+    "nearest": "#4C78A8",
+    "reward_aligned": "#F58518",
+}
 PROTOCOL_CMP_OUTPUT_SUBDIR = "protocol_cmp"
 RATIO_METRICS = {"crat", "conf_ratio"}
 GROUPED_BAR_WIDTH = 0.11
@@ -134,7 +139,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--route-construction",
         action="store_true",
-        help="Compare metrics across route_construction methods (requires same resolver in all rows)",
+        help="Compare metrics across route_construction methods (nearest vs reward_aligned) for each policy/resolver pair",
     )
     parser.add_argument(
         "--scenario",
@@ -685,17 +690,6 @@ def _aggregate_series_for_grouped_plot(
     return x_labels, series_labels, series_values
 
 
-def _validate_single_resolver(rows: list[dict[str, object]]) -> str:
-    resolvers = sorted({str(row.get("resolver", "")).strip() for row in rows if str(row.get("resolver", "")).strip()})
-    if len(resolvers) != 1:
-        joined = ", ".join(resolvers) if resolvers else "<none>"
-        raise ValueError(
-            "--route-construction requires all rows to have the same resolver, "
-            f"but found: {joined}"
-        )
-    return resolvers[0]
-
-
 def safe_number(value: object) -> float | None:
     if value is None or not isinstance(value, (int, float)):
         return None
@@ -1187,66 +1181,128 @@ def plot_work_cmp(
 
 
 def plot_route_construction_cmp(rows: list[dict[str, object]], metrics: list[str], output_dir: Path) -> list[Path]:
-    _validate_single_resolver(rows)
+    policy_labels = sorted({str(row.get("pol", "")).strip() for row in rows if str(row.get("pol", "")).strip()})
+    resolver_labels = _ordered_resolvers([
+        _canonical_resolver_name(row.get("resolver"))
+        for row in rows
+        if _canonical_resolver_name(row.get("resolver"))
+    ])
+
+    # Only create route_construction_cmp when at least one policy/resolver pair has
+    # both nearest and reward_aligned measurements available.
+    has_any_pair = False
+    for policy in policy_labels:
+        for resolver in resolver_labels:
+            modes_present = {
+                _route_construction_of_row(row)
+                for row in rows
+                if str(row.get("pol", "")).strip() == policy
+                and _canonical_resolver_name(row.get("resolver")) == resolver
+            }
+            if "nearest" in modes_present and "reward_aligned" in modes_present:
+                has_any_pair = True
+                break
+        if has_any_pair:
+            break
+
+    if not has_any_pair:
+        return []
+
     route_dir = output_dir / ROUTE_CONSTRUCTION_OUTPUT_SUBDIR
     route_dir.mkdir(parents=True, exist_ok=True)
 
-    route_modes = sorted({_route_construction_of_row(row) for row in rows})
     saved_paths: list[Path] = []
-
     for metric in metrics:
         y_min, y_max = metric_limits(rows, metric)
+        policy_keys = [_normalize_policy_key(policy) for policy in policy_labels]
+        nrows = max(1, len(policy_keys))
+        ncols = max(1, len(resolver_labels))
         figure, axes = plt.subplots(
-            nrows=1,
-            ncols=len(route_modes),
-            figsize=(max(5 * len(route_modes), 6), 5),
+            nrows=nrows,
+            ncols=ncols,
+            figsize=(max(4.6 * ncols, 8.0), max(4.0 * nrows, 4.8)),
             squeeze=False,
             sharey=True,
         )
-        axis_row = axes[0]
-        figure.suptitle(f"{metric}: comparison across route_construction", fontsize=14)
+        figure.suptitle(f"{_metric_title(metric)}: route construction (nearest vs reward aligned)", fontsize=14)
 
-        for axis, route_mode in zip(axis_row, route_modes):
-            route_rows = [row for row in rows if _route_construction_of_row(row) == route_mode]
-            route_rows.sort(key=lambda row: str(row.get("pol", "")))
-
-            policies = [str(row["pol"]) for row in route_rows if row.get("pol") is not None]
-            means = [safe_number(row.get(metric)) for row in route_rows]
-            stds = [(safe_number(row.get(f"{metric}_std")) or 0.0) for row in route_rows]
-
-            filtered = [
-                (policy, mean, std)
-                for policy, mean, std in zip(policies, means, stds)
-                if mean is not None
-            ]
-
-            if not filtered:
-                axis.set_visible(False)
-                continue
-
-            policies = [item[0] for item in filtered]
-            means = [item[1] for item in filtered]
-            stds = [item[2] for item in filtered]
-            positions = list(range(len(policies)))
-
-            axis.bar(
-                positions,
-                means,
-                yerr=stds,
-                capsize=4,
-                color="#4C78A8",
-                edgecolor="#2F3E4E",
-                alpha=0.9,
+        legend_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="s",
+                linestyle="",
+                markersize=8,
+                markerfacecolor=ROUTE_MODE_COLORS[mode],
+                markeredgecolor="#2F3E4E",
+                label=_display_label(mode),
             )
-            axis.set_title(route_mode)
-            axis.set_xticks(positions)
-            axis.set_xticklabels(policies, rotation=45, ha="right")
-            axis.set_ylim(y_min, y_max)
-            axis.grid(axis="y", alpha=0.3, linestyle="--")
-            axis.set_axisbelow(True)
+            for mode in ROUTE_MODE_ORDER
+        ]
 
-        axis_row[0].set_ylabel(metric)
-        figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.93))
+        for row_index, policy_key in enumerate(policy_keys):
+            for col_index, resolver in enumerate(resolver_labels):
+                axis = axes[row_index][col_index]
+                pair_rows = [
+                    row for row in rows
+                    if _normalize_policy_key(row.get("pol", "")) == policy_key
+                    and _canonical_resolver_name(row.get("resolver")) == resolver
+                ]
+
+                means_by_mode: dict[str, float] = {}
+                stds_by_mode: dict[str, float] = {}
+                for mode in ROUTE_MODE_ORDER:
+                    mode_rows = [
+                        row for row in pair_rows
+                        if _route_construction_of_row(row) == mode
+                    ]
+                    mode_means = [safe_number(row.get(metric)) for row in mode_rows]
+                    mode_stds = [safe_number(row.get(f"{metric}_std")) or 0.0 for row in mode_rows]
+                    valid_means = [float(value) for value in mode_means if value is not None]
+                    valid_stds = [float(value) for value in mode_stds]
+
+                    if valid_means:
+                        means_by_mode[mode] = float(sum(valid_means) / len(valid_means))
+                        stds_by_mode[mode] = float(sum(valid_stds) / len(valid_stds)) if valid_stds else 0.0
+                    else:
+                        # Requested behavior: missing measurements are treated as zero.
+                        means_by_mode[mode] = 0.0
+                        stds_by_mode[mode] = 0.0
+
+                positions = list(range(len(ROUTE_MODE_ORDER)))
+                values = [means_by_mode[mode] for mode in ROUTE_MODE_ORDER]
+                errors = [stds_by_mode[mode] for mode in ROUTE_MODE_ORDER]
+                colors = [ROUTE_MODE_COLORS.get(mode, "#4C78A8") for mode in ROUTE_MODE_ORDER]
+
+                axis.bar(
+                    positions,
+                    values,
+                    yerr=errors,
+                    capsize=4,
+                    color=colors,
+                    edgecolor="#2F3E4E",
+                    alpha=0.92,
+                )
+                axis.set_xticks(positions)
+                axis.set_xticklabels([_display_label(mode) for mode in ROUTE_MODE_ORDER], rotation=0, fontsize=8)
+                axis.set_ylim(y_min, y_max)
+                axis.grid(axis="y", alpha=0.25, linestyle="--")
+                axis.set_axisbelow(True)
+
+                if row_index == 0:
+                    axis.set_title(_display_label(resolver), fontsize=10)
+                if col_index == 0:
+                    axis.set_ylabel(f"{_display_label(policy_key)}\n{_metric_ylabel(metric)}", fontsize=9)
+
+        figure.legend(
+            handles=legend_handles,
+            loc="upper center",
+            ncol=2,
+            frameon=False,
+            bbox_to_anchor=(0.5, 0.985),
+            fontsize=9,
+        )
+        figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.95))
         output_path = route_dir / f"{metric}_route_construction_cmp.png"
         figure.savefig(output_path, dpi=200, bbox_inches="tight")
         plt.close(figure)
