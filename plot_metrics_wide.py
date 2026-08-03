@@ -6,10 +6,13 @@ import csv
 import math
 import sys
 from pathlib import Path
+from typing import Any
 
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.ticker import LogLocator, NullFormatter
+
+from estimate_work_metrics import clip, insertion_pairs, normalize_name, resolver_work
 
 
 ID_COLUMNS = {"source_file", "scenario", "instance", "protocol", "resolver", "route_construction", "admission_aware", "pol"}
@@ -173,6 +176,75 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.06,
         help="Log-space padding fraction for --work-cmp x-axis limits (default: 0.06)",
+    )
+    parser.add_argument(
+        "--work-cmp-with-rl",
+        action="store_true",
+        help=(
+            "Create an additional reward-vs-work plot with one RL point overlaid on baselines, "
+            "including baseline and extended Pareto fronts"
+        ),
+    )
+    parser.add_argument(
+        "--eval-file",
+        type=Path,
+        default=Path("evaluation_metrics.log"),
+        help="Evaluation log used to derive the RL point (default: ./evaluation_metrics.log)",
+    )
+    parser.add_argument(
+        "--eval-proposer",
+        type=str,
+        default="1hop",
+        help="RL proposer mode for overlay point (default: 1hop)",
+    )
+    parser.add_argument(
+        "--eval-resolver",
+        type=str,
+        default="closest",
+        help="RL resolver for overlay point (default: closest)",
+    )
+    parser.add_argument(
+        "--eval-num-robots",
+        type=float,
+        default=6.0,
+        help="Robot count used in RL work estimate (default: 6)",
+    )
+    parser.add_argument(
+        "--eval-max-robot-capacity",
+        type=float,
+        default=2.0,
+        help="Max robot capacity used in RL work estimate (default: 2)",
+    )
+    parser.add_argument(
+        "--eval-joint-multiplier",
+        type=float,
+        default=1.5,
+        help="Joint multiplier for RL work estimate (default: 1.5)",
+    )
+    parser.add_argument(
+        "--eval-noop-candidates",
+        type=float,
+        default=1.0,
+        help="Additional NOOP candidate count in actor inference estimate (default: 1)",
+    )
+    parser.add_argument(
+        "--eval-scenario",
+        type=str,
+        default="randdest",
+        help="Scenario where RL overlay plot is generated (default: randdest)",
+    )
+    parser.add_argument(
+        "--eval-route-construction",
+        type=str,
+        default="nearest",
+        help="Route construction for RL overlay plot selection (default: nearest)",
+    )
+    parser.add_argument(
+        "--eval-protocol",
+        type=str,
+        default="aa",
+        choices=["aa", "admission", "forced"],
+        help="Protocol combo for RL overlay plot selection (default: aa)",
     )
     return parser.parse_args()
 
@@ -560,9 +632,24 @@ def _work_xlabel(work_x: str) -> str:
     return "Estimated computational work"
 
 
-def _work_title(metric: str) -> str:
+def _work_measure_label(work_measure: str) -> str:
+    if work_measure == "parallel":
+        return "parallel-time proxy"
+    return "total"
+
+
+def _work_xlabel_for_measure(work_x: str, work_measure: str) -> str:
+    base_label = _work_xlabel(work_x)
+    if work_measure == "parallel":
+        return f"{base_label} (parallel-time proxy)"
+    return base_label
+
+
+def _work_title(metric: str, *, work_measure: str = "total") -> str:
     metric_display = _metric_title(metric)
-    return f"{metric_display} vs estimated computational work"
+    if work_measure == "parallel":
+        return f"{metric_display} vs est. computational work (parallel-time proxy)"
+    return f"{metric_display} vs est. computational work"
 
 
 def _work_footer() -> str:
@@ -570,6 +657,62 @@ def _work_footer() -> str:
         "Analytical operation-count proxy derived from aggregated metrics; "
         "not measured wall-clock runtime."
     )
+
+
+def _parallel_time_proxy(
+    *,
+    work_proposer: float | None,
+    work_resolver: float | None,
+    num_robots: float | None,
+) -> float | None:
+    if work_proposer is None or work_resolver is None or num_robots is None:
+        return None
+    if not math.isfinite(work_proposer) or not math.isfinite(work_resolver) or not math.isfinite(num_robots):
+        return None
+    if num_robots <= 0.0:
+        return None
+    return float(work_resolver) + (float(work_proposer) / float(num_robots))
+
+
+def _resolved_num_robots_for_parallel(row: dict[str, object]) -> float | None:
+    direct_num_robots = safe_number(row.get("num_robots"))
+    if direct_num_robots is not None and direct_num_robots > 0.0:
+        return direct_num_robots
+
+    work_candidate_scan = safe_number(row.get("work_candidate_scan"))
+    msd = safe_number(row.get("msd"))
+    mcand = safe_number(row.get("mcand"))
+    if (
+        work_candidate_scan is not None
+        and msd is not None
+        and mcand is not None
+        and msd > 0.0
+        and mcand > 0.0
+    ):
+        inferred_num_robots = work_candidate_scan / (msd * mcand)
+        if math.isfinite(inferred_num_robots) and inferred_num_robots > 0.0:
+            return inferred_num_robots
+
+    work_active_proposals = safe_number(row.get("work_active_proposals"))
+    noop = safe_number(row.get("noop"))
+    if (
+        work_active_proposals is not None
+        and msd is not None
+        and noop is not None
+        and msd > 0.0
+        and (1.0 - float(noop)) > 0.0
+    ):
+        inferred_num_robots = work_active_proposals / (msd * (1.0 - float(noop)))
+        if math.isfinite(inferred_num_robots) and inferred_num_robots > 0.0:
+            return inferred_num_robots
+
+    return None
+
+
+def _work_output_suffix(work_measure: str) -> str:
+    if work_measure == "parallel":
+        return "_parallel"
+    return ""
 
 
 def set_tight_log_x_limits(
@@ -696,6 +839,221 @@ def safe_number(value: object) -> float | None:
     if math.isnan(value):
         return None
     return float(value)
+
+
+def _route_alias_from_text(value: str) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"nearest", "nr"}:
+        return "nr"
+    if text in {"reward_aligned", "ra", "reward-aligned", "reward aligned"}:
+        return "ra"
+    return text.replace(" ", "_").replace("-", "_") or "unknown"
+
+
+def _protocol_alias_from_text(value: str) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"aa", "admission"}:
+        return "aa"
+    if text == "forced":
+        return "forced"
+    return text
+
+
+def _split_columns_from_header(header_line: str) -> list[str]:
+    columns: list[str] = []
+    for segment in header_line.split("|"):
+        columns.extend(part.strip().lower() for part in segment.strip().split() if part.strip())
+    return columns
+
+
+def _parse_eval_log_rows(log_path: Path) -> list[dict[str, Any]]:
+    lines = [
+        line.rstrip("\n")
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    header_index: int | None = None
+    header_columns: list[str] = []
+    for index, line in enumerate(lines):
+        low = line.lower()
+        if "|" in line and "pol" in low and "seed" in low and "rew" in low and "ts" in low:
+            columns = _split_columns_from_header(line)
+            if columns:
+                header_index = index
+                header_columns = columns
+                break
+
+    if header_index is None:
+        raise ValueError(f"Could not find metrics header in evaluation log: {log_path}")
+
+    parsed_rows: list[dict[str, Any]] = []
+    for line in lines[header_index + 1 :]:
+        if line.lstrip().startswith("#"):
+            continue
+
+        fields: list[str] = []
+        for segment in line.split("|"):
+            fields.extend(part for part in segment.strip().split() if part)
+
+        if len(fields) < len(header_columns):
+            fields.extend([""] * (len(header_columns) - len(fields)))
+        if len(fields) > len(header_columns):
+            fields = fields[: len(header_columns)]
+
+        row: dict[str, Any] = {}
+        for key, raw in zip(header_columns, fields):
+            text = str(raw).strip()
+            if key in {"seed", "ts"}:
+                try:
+                    row[key] = int(text)
+                except ValueError:
+                    row[key] = None
+                continue
+            try:
+                row[key] = float(text)
+            except ValueError:
+                row[key] = text
+
+        if row.get("ts") is None:
+            continue
+        if safe_number(row.get("rew")) is None:
+            continue
+        parsed_rows.append(row)
+
+    if not parsed_rows:
+        raise ValueError(f"No usable evaluation rows in: {log_path}")
+    return parsed_rows
+
+
+def _aggregate_eval_by_ts(eval_rows: list[dict[str, Any]]) -> list[dict[str, float]]:
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for row in eval_rows:
+        grouped.setdefault(int(row["ts"]), []).append(row)
+
+    required_metrics = ["rew", "mcand", "msd", "dstep", "noop", "ovrlap", "shared"]
+    out_rows: list[dict[str, float]] = []
+    for ts, rows in grouped.items():
+        item: dict[str, float] = {"ts": float(ts), "n_seeds": float(len(rows))}
+        for metric in required_metrics:
+            values: list[float] = []
+            for row in rows:
+                value = safe_number(row.get(metric))
+                if value is not None and math.isfinite(value):
+                    values.append(float(value))
+            if not values:
+                raise ValueError(f"Missing numeric metric '{metric}' at ts={ts}")
+            mean_value = sum(values) / float(len(values))
+            if len(values) > 1:
+                variance = sum((value - mean_value) ** 2 for value in values) / float(len(values))
+                std_value = math.sqrt(variance)
+            else:
+                std_value = 0.0
+            item[f"{metric}_mean"] = mean_value
+            item[f"{metric}_std"] = std_value
+        out_rows.append(item)
+
+    out_rows.sort(key=lambda row: row["ts"])
+    return out_rows
+
+
+def _canonical_eval_resolver_name(resolver: str) -> str:
+    normalized = normalize_name(resolver)
+    if normalized in {"closest", "ctc", "closest_than_capacity", "closest_then_capacity"}:
+        return "closest_then_capacity"
+    return normalized
+
+
+def _proposer_actor_work(
+    *,
+    proposer: str,
+    candidate_scan_work: float,
+    insertion_pairs_value: float,
+    competition_factor: float,
+    joint_multiplier: float,
+) -> float:
+    normalized = normalize_name(proposer)
+    if normalized in {"1hop", "gnn_1hop", "one_hop"}:
+        return candidate_scan_work
+    if normalized in {"2hop", "gnn_2hop", "two_hop"}:
+        return 2.0 * candidate_scan_work
+    if normalized in {"random", "unique", "pickup_distance", "pickup_deadline"}:
+        return candidate_scan_work
+    if normalized == "pickup_deadline_distance":
+        return 2.0 * candidate_scan_work
+    if normalized == "predicted_reward":
+        return candidate_scan_work * insertion_pairs_value
+    if normalized == "predicted_reward_joint":
+        return candidate_scan_work * insertion_pairs_value * joint_multiplier
+    if normalized in {"proposal_joint_competition", "predicted_reward_joint_competition"}:
+        return candidate_scan_work * insertion_pairs_value * competition_factor
+    raise ValueError(
+        f"Unsupported eval proposer '{proposer}'. Supported: 1hop/2hop and baseline-like proposer aliases."
+    )
+
+
+def _estimate_rl_point_from_eval(
+    *,
+    eval_file: Path,
+    proposer: str,
+    resolver: str,
+    num_robots: float,
+    max_robot_capacity: float,
+    joint_multiplier: float,
+    noop_candidates: float,
+) -> dict[str, Any]:
+    eval_rows = _parse_eval_log_rows(eval_file)
+    grouped = _aggregate_eval_by_ts(eval_rows)
+    best = max(grouped, key=lambda row: (row["rew_mean"], -row["ts"]))
+
+    R = max(float(num_robots), 0.0)
+    M = max(float(best["msd_mean"]), 0.0)
+    D = max(float(best["dstep_mean"]), 0.0)
+    K = max(float(best["mcand_mean"]), 0.0)
+    noop_fraction = clip(float(best["noop_mean"]), 0.0, 1.0)
+
+    route_stops = 2.0 * max(float(max_robot_capacity), 0.0)
+    insertion_value = insertion_pairs(route_stops)
+    actor_candidate_scan = M * R * (K + max(float(noop_candidates), 0.0))
+    active_proposal_work = M * R * (1.0 - noop_fraction)
+
+    ovrlap = max(float(best["ovrlap_mean"]), 0.0)
+    shared = max(float(best["shared_mean"]), 0.0)
+    competition_factor = 1.0 + (ovrlap * shared)
+
+    actor_work = _proposer_actor_work(
+        proposer=proposer,
+        candidate_scan_work=actor_candidate_scan,
+        insertion_pairs_value=insertion_value,
+        competition_factor=competition_factor,
+        joint_multiplier=float(joint_multiplier),
+    )
+
+    resolver_name = _canonical_eval_resolver_name(resolver)
+    resolver_estimate = resolver_work(
+        resolver_name=resolver_name,
+        active_proposal_work=active_proposal_work,
+        insertion_pairs_value=insertion_value,
+        joint_multiplier=float(joint_multiplier),
+        decisions_per_episode=D,
+        num_robots=R,
+        mean_candidates=K,
+    )
+    if resolver_estimate is None:
+        raise ValueError(f"Unsupported eval resolver '{resolver}' (normalized: {resolver_name})")
+
+    return {
+        "quality": float(best["rew_mean"]),
+        "quality_std": float(best["rew_std"]),
+        "work_proposer": float(actor_work),
+        "work_resolver": float(resolver_estimate),
+        "num_robots": R,
+        "work_total": float(actor_work) + float(resolver_estimate),
+        "resolver": resolver_name,
+        "policy": f"rl_{proposer}",
+        "ts": int(best["ts"]),
+        "n_seeds": int(best["n_seeds"]),
+    }
 
 
 def metric_limits(rows: list[dict[str, object]], metric: str) -> tuple[float, float]:
@@ -1040,11 +1398,20 @@ def plot_work_cmp(
                 continue
 
             metric_std = safe_number(row.get(f"{metric}_std")) or 0.0
+            work_proposer = safe_number(row.get("work_proposer"))
+            work_resolver = safe_number(row.get("work_resolver"))
+            num_robots = _resolved_num_robots_for_parallel(row)
+            work_parallel = _parallel_time_proxy(
+                work_proposer=work_proposer,
+                work_resolver=work_resolver,
+                num_robots=num_robots,
+            )
             metric_points.append(
                 {
                     "quality": float(quality),
                     "quality_std": float(metric_std),
                     "work_total": float(work_total),
+                    "work_parallel": work_parallel,
                     "resolver": str(row.get("resolver", "")).strip(),
                     "policy": str(row.get("pol", "")).strip(),
                 }
@@ -1063,24 +1430,276 @@ def plot_work_cmp(
                 file=sys.stderr,
             )
 
-        min_positive_work = min(point["work_total"] for point in metric_points if point["work_total"] > 0.0)
-        if min_positive_work <= 0.0:
-            print(
-                f"[warn] No positive work_total values for metric '{metric}' in {work_dir}",
-                file=sys.stderr,
+        for work_measure in ["total", "parallel"]:
+            measure_key = "work_total" if work_measure == "total" else "work_parallel"
+            valid_points = [
+                point for point in metric_points
+                if isinstance(point.get(measure_key), (int, float)) and float(point[measure_key]) > 0.0
+            ]
+            if not valid_points:
+                print(
+                    f"[warn] No positive {measure_key} values for metric '{metric}' in {work_dir}",
+                    file=sys.stderr,
+                )
+                continue
+
+            min_positive_work = min(float(point[measure_key]) for point in valid_points)
+            for point in valid_points:
+                if work_x == "relative":
+                    point["x_value"] = float(point[measure_key]) / min_positive_work
+                else:
+                    point["x_value"] = float(point[measure_key])
+
+            figure, axis = plt.subplots(figsize=(8.8, 5.8))
+            axis.set_xscale("log")
+
+            for point in valid_points:
+                resolver = str(point["resolver"])
+                policy = str(point["policy"])
+                x_value = float(point["x_value"])
+                y_value = float(point["quality"])
+                y_std = float(point["quality_std"])
+
+                axis.errorbar(
+                    [x_value],
+                    [y_value],
+                    yerr=[y_std],
+                    fmt="none",
+                    ecolor=resolver_colors.get(resolver, "#4C78A8"),
+                    elinewidth=0.8,
+                    capsize=2.2,
+                    capthick=0.8,
+                    zorder=2,
+                )
+                axis.scatter(
+                    [x_value],
+                    [y_value],
+                    marker=policy_markers.get(policy, "o"),
+                    color=resolver_colors.get(resolver, "#4C78A8"),
+                    edgecolors="#2F3E4E",
+                    linewidths=0.6,
+                    s=52,
+                    alpha=0.95,
+                    zorder=3,
+                )
+                if annotate_work:
+                    axis.annotate(
+                        _display_label(policy),
+                        (x_value, y_value),
+                        textcoords="offset points",
+                        xytext=(3, 3),
+                        fontsize=8,
+                    )
+
+            if pareto:
+                frontier_input = [(float(point["x_value"]), float(point["quality"])) for point in valid_points]
+                frontier = _pareto_frontier(frontier_input)
+                if len(frontier) >= 2:
+                    frontier_x = [point[0] for point in frontier]
+                    frontier_y = [point[1] for point in frontier]
+                    axis.plot(frontier_x, frontier_y, linestyle="--", linewidth=1.0, color="#222222", zorder=1)
+
+            plotted_x_values = [float(point["x_value"]) for point in valid_points]
+            set_tight_log_x_limits(axis, plotted_x_values, padding_fraction=work_x_padding)
+            axis.xaxis.set_major_locator(LogLocator(base=10.0))
+            axis.xaxis.set_minor_locator(LogLocator(base=10.0, subs=tuple(range(2, 10))))
+            axis.xaxis.set_minor_formatter(NullFormatter())
+
+            axis.set_xlabel(_work_xlabel_for_measure(work_x, work_measure))
+            axis.set_ylabel(_metric_ylabel(metric))
+            axis.set_title(_work_title(metric, work_measure=work_measure))
+            axis.grid(axis="y", alpha=0.2, linestyle="-", linewidth=0.8)
+            axis.set_axisbelow(True)
+
+            visible_resolvers = [resolver for resolver in resolver_labels if any(str(point["resolver"]) == resolver for point in valid_points)]
+            resolver_handles = [
+                Line2D([0], [0], marker="o", linestyle="", markersize=7, markerfacecolor=resolver_colors.get(resolver, "#4C78A8"), markeredgecolor="#2F3E4E", label=_display_label(resolver))
+                for resolver in visible_resolvers
+            ]
+            visible_policies = sorted({str(point["policy"]) for point in valid_points})
+            policy_handles = [
+                Line2D([0], [0], marker=policy_markers.get(policy, "o"), linestyle="", markersize=7, markerfacecolor="#FFFFFF", markeredgecolor="#2F3E4E", label=_display_label(policy))
+                for policy in visible_policies
+            ]
+
+            resolver_legend = axis.legend(
+                handles=resolver_handles,
+                title="resolver",
+                fontsize=9,
+                title_fontsize=9,
+                loc="upper left",
+                bbox_to_anchor=(1.01, 1.0),
+                frameon=False,
             )
+            axis.add_artist(resolver_legend)
+            axis.legend(
+                handles=policy_handles,
+                title="policy",
+                fontsize=9,
+                title_fontsize=9,
+                loc="upper left",
+                bbox_to_anchor=(1.01, 0.48),
+                frameon=False,
+            )
+
+            figure.text(0.01, 0.01, _work_footer(), fontsize=8, alpha=0.85)
+            figure.tight_layout(rect=(0.0, 0.03, 0.81, 0.97))
+
+            output_path = work_dir / f"{metric}_work_cmp{_work_output_suffix(work_measure)}.png"
+            figure.savefig(output_path, dpi=200, bbox_inches="tight")
+            plt.close(figure)
+            saved_paths.append(output_path)
+
+    return saved_paths
+
+
+def plot_work_cmp_with_rl(
+    rows: list[dict[str, object]],
+    output_dir: Path,
+    *,
+    work_x: str,
+    work_x_padding: float,
+    annotate_work: bool,
+    rl_point: dict[str, Any],
+) -> list[Path]:
+    work_dir = output_dir / "work_cmp"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    metric = "rew"
+    metric_points: list[dict[str, object]] = []
+    for row in rows:
+        quality = safe_number(row.get(metric))
+        work_total = safe_number(row.get("work_total"))
+        if quality is None or work_total is None or work_total <= 0.0:
+            continue
+        quality_std = safe_number(row.get(f"{metric}_std")) or 0.0
+        work_proposer = safe_number(row.get("work_proposer"))
+        work_resolver = safe_number(row.get("work_resolver"))
+        num_robots = _resolved_num_robots_for_parallel(row)
+        metric_points.append(
+            {
+                "quality": float(quality),
+                "quality_std": float(quality_std),
+                "work_total": float(work_total),
+                "work_parallel": _parallel_time_proxy(
+                    work_proposer=work_proposer,
+                    work_resolver=work_resolver,
+                    num_robots=num_robots,
+                ),
+                "resolver": str(row.get("resolver", "")).strip(),
+                "policy": str(row.get("pol", "")).strip(),
+            }
+        )
+
+    if not metric_points:
+        print("[warn] No valid baseline rows for rew_work_cmp_with_rl", file=sys.stderr)
+        return []
+
+    resolver_labels = _ordered_resolvers([
+        str(point["resolver"]).strip()
+        for point in metric_points
+        if str(point["resolver"]).strip()
+    ])
+    resolver_colors = _series_color_map(resolver_labels, preferred=RESOLVER_COLOR_MAP)
+    policy_markers = _policy_marker_map([
+        str(point["policy"]).strip()
+        for point in metric_points
+        if str(point["policy"]).strip()
+    ])
+
+    visible_resolvers = [resolver for resolver in resolver_labels if any(str(point["resolver"]) == resolver for point in metric_points)]
+    resolver_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="",
+            markersize=7,
+            markerfacecolor=resolver_colors.get(resolver, "#4C78A8"),
+            markeredgecolor="#2F3E4E",
+            label=_display_label(resolver),
+        )
+        for resolver in visible_resolvers
+    ]
+    visible_policies = sorted({str(point["policy"]) for point in metric_points})
+    policy_legend_label_map = {
+        "pickup_deadline": "pickup deadline",
+        "pickup_deadline_distance": "pickup deadline dist.",
+        "pickup_distance": "pickup distance",
+        "predicted_reward": "predicted reward",
+        "predicted_reward_joint": "predicted reward joint",
+        "proposal_joint_competition": "proposal joint comp.",
+        "random": "random",
+        "unique": "unique",
+    }
+    policy_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker=policy_markers.get(policy, "o"),
+            linestyle="",
+            markersize=7,
+            markerfacecolor="#FFFFFF",
+            markeredgecolor="#2F3E4E",
+            label=policy_legend_label_map.get(policy, _display_label(policy)),
+        )
+        for policy in visible_policies
+    ]
+
+    extra_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="*",
+            linestyle="",
+            markersize=10,
+            markerfacecolor="#111111",
+            markeredgecolor="#FFFFFF",
+            label="RL point (inference)",
+        ),
+        Line2D([0], [0], linestyle="--", color="#333333", linewidth=1.1, label="Pareto baseline"),
+        Line2D([0], [0], linestyle="-", color="#C44E52", linewidth=1.2, label="Pareto extended"),
+    ]
+
+    saved_paths: list[Path] = []
+    for work_measure in ["total", "parallel"]:
+        measure_key = "work_total" if work_measure == "total" else "work_parallel"
+        valid_points = [
+            point for point in metric_points
+            if isinstance(point.get(measure_key), (int, float)) and float(point[measure_key]) > 0.0
+        ]
+        rl_measure_value = float(rl_point["work_total"])
+        if work_measure == "parallel":
+            rl_parallel_value = _parallel_time_proxy(
+                work_proposer=safe_number(rl_point.get("work_proposer")),
+                work_resolver=safe_number(rl_point.get("work_resolver")),
+                num_robots=safe_number(rl_point.get("num_robots")),
+            )
+            if rl_parallel_value is None or rl_parallel_value <= 0.0:
+                print("[warn] RL point has no valid parallel-time proxy; skipping RL parallel plot", file=sys.stderr)
+                continue
+            rl_measure_value = float(rl_parallel_value)
+
+        if not valid_points:
+            print(f"[warn] No valid baseline rows for rew_work_cmp_with_rl ({work_measure})", file=sys.stderr)
             continue
 
-        for point in metric_points:
+        min_positive_work = min(float(point[measure_key]) for point in valid_points)
+        for point in valid_points:
             if work_x == "relative":
-                point["x_value"] = float(point["work_total"]) / min_positive_work
+                point["x_value"] = float(point[measure_key]) / min_positive_work
             else:
-                point["x_value"] = float(point["work_total"])
+                point["x_value"] = float(point[measure_key])
+
+        if work_x == "relative":
+            rl_x_value = rl_measure_value / min_positive_work
+        else:
+            rl_x_value = rl_measure_value
 
         figure, axis = plt.subplots(figsize=(8.8, 5.8))
         axis.set_xscale("log")
 
-        for point in metric_points:
+        for point in valid_points:
             resolver = str(point["resolver"])
             policy = str(point["policy"])
             x_value = float(point["x_value"])
@@ -1118,61 +1737,109 @@ def plot_work_cmp(
                     fontsize=8,
                 )
 
-        if pareto:
-            frontier_input = [(float(point["x_value"]), float(point["quality"])) for point in metric_points]
-            frontier = _pareto_frontier(frontier_input)
-            if len(frontier) >= 2:
-                frontier_x = [point[0] for point in frontier]
-                frontier_y = [point[1] for point in frontier]
-                axis.plot(frontier_x, frontier_y, linestyle="--", linewidth=1.0, color="#222222", zorder=1)
+        axis.errorbar(
+            [rl_x_value],
+            [float(rl_point["quality"])],
+            yerr=[float(rl_point["quality_std"])],
+            fmt="none",
+            ecolor="#111111",
+            elinewidth=1.0,
+            capsize=2.8,
+            capthick=1.0,
+            zorder=5,
+        )
+        axis.scatter(
+            [rl_x_value],
+            [float(rl_point["quality"])],
+            marker="*",
+            color="#111111",
+            edgecolors="#FFFFFF",
+            linewidths=0.7,
+            s=170,
+            alpha=0.98,
+            zorder=6,
+        )
+        if annotate_work:
+            axis.annotate(
+                f"RL ({rl_point['policy']}, ts={rl_point['ts']})",
+                (rl_x_value, float(rl_point["quality"])),
+                textcoords="offset points",
+                xytext=(5, 5),
+                fontsize=8,
+            )
 
-        plotted_x_values = [float(point["x_value"]) for point in metric_points]
+        baseline_frontier = _pareto_frontier(
+            [(float(point["x_value"]), float(point["quality"])) for point in valid_points]
+        )
+        if len(baseline_frontier) >= 2:
+            axis.plot(
+                [point[0] for point in baseline_frontier],
+                [point[1] for point in baseline_frontier],
+                linestyle="--",
+                linewidth=1.1,
+                color="#333333",
+                zorder=1,
+            )
+
+        extended_points = [(float(point["x_value"]), float(point["quality"])) for point in valid_points]
+        extended_points.append((float(rl_x_value), float(rl_point["quality"])))
+        extended_frontier = _pareto_frontier(extended_points)
+        if len(extended_frontier) >= 2:
+            axis.plot(
+                [point[0] for point in extended_frontier],
+                [point[1] for point in extended_frontier],
+                linestyle="-",
+                linewidth=1.2,
+                color="#C44E52",
+                zorder=1,
+            )
+
+        plotted_x_values = [float(point["x_value"]) for point in valid_points] + [float(rl_x_value)]
         set_tight_log_x_limits(axis, plotted_x_values, padding_fraction=work_x_padding)
         axis.xaxis.set_major_locator(LogLocator(base=10.0))
         axis.xaxis.set_minor_locator(LogLocator(base=10.0, subs=tuple(range(2, 10))))
         axis.xaxis.set_minor_formatter(NullFormatter())
 
-        axis.set_xlabel(_work_xlabel(work_x))
-        axis.set_ylabel(_metric_ylabel(metric))
-        axis.set_title(_work_title(metric))
+        axis.set_xlabel(_work_xlabel_for_measure(work_x, work_measure))
+        axis.set_ylabel("Reward")
+        axis.set_title(_work_title(metric, work_measure=work_measure) + " (with RL point)")
         axis.grid(axis="y", alpha=0.2, linestyle="-", linewidth=0.8)
         axis.set_axisbelow(True)
-
-        visible_resolvers = [resolver for resolver in resolver_labels if any(str(point["resolver"]) == resolver for point in metric_points)]
-        resolver_handles = [
-            Line2D([0], [0], marker="o", linestyle="", markersize=7, markerfacecolor=resolver_colors.get(resolver, "#4C78A8"), markeredgecolor="#2F3E4E", label=_display_label(resolver))
-            for resolver in visible_resolvers
-        ]
-        visible_policies = sorted({str(point["policy"]) for point in metric_points})
-        policy_handles = [
-            Line2D([0], [0], marker=policy_markers.get(policy, "o"), linestyle="", markersize=7, markerfacecolor="#FFFFFF", markeredgecolor="#2F3E4E", label=_display_label(policy))
-            for policy in visible_policies
-        ]
 
         resolver_legend = axis.legend(
             handles=resolver_handles,
             title="resolver",
-            fontsize=9,
-            title_fontsize=9,
+            fontsize=8,
+            title_fontsize=8,
             loc="upper left",
-            bbox_to_anchor=(1.01, 1.0),
+            bbox_to_anchor=(1.0, 1.0),
             frameon=False,
         )
         axis.add_artist(resolver_legend)
-        axis.legend(
+
+        policy_legend = axis.legend(
             handles=policy_handles,
             title="policy",
-            fontsize=9,
-            title_fontsize=9,
+            fontsize=8,
+            title_fontsize=8,
             loc="upper left",
-            bbox_to_anchor=(1.01, 0.48),
+            bbox_to_anchor=(0.99, 0.52),
+            frameon=False,
+        )
+        axis.add_artist(policy_legend)
+
+        axis.legend(
+            handles=extra_handles,
+            fontsize=9,
+            loc="upper left",
+            bbox_to_anchor=(0.99, 0.16),
             frameon=False,
         )
 
         figure.text(0.01, 0.01, _work_footer(), fontsize=8, alpha=0.85)
-        figure.tight_layout(rect=(0.0, 0.03, 0.81, 0.97))
+        figure.tight_layout(rect=(0.0, 0.03, 0.82, 0.97))
 
-        output_path = work_dir / f"{metric}_work_cmp.png"
+        output_path = work_dir / f"rew_work_cmp{_work_output_suffix(work_measure)}_with_rl.png"
         figure.savefig(output_path, dpi=200, bbox_inches="tight")
         plt.close(figure)
         saved_paths.append(output_path)
@@ -1335,6 +2002,13 @@ def main() -> int:
 
     saved_paths: list[Path] = []
     scenarios = _selected_scenarios(rows, args.scenario)
+
+    eval_target_scenario = str(args.eval_scenario or "").strip().lower()
+    eval_target_route_alias = _route_alias_from_text(str(args.eval_route_construction or "nearest"))
+    eval_target_protocol_alias = _protocol_alias_from_text(str(args.eval_protocol or "aa"))
+    rl_plot_requested = bool(args.work_cmp_with_rl)
+    rl_plot_emitted = False
+
     for scenario in scenarios:
         scenario_rows = _rows_for_scenario(rows, scenario)
         scenario_rows = _filtered_rows(
@@ -1394,6 +2068,42 @@ def main() -> int:
                         annotate_work=bool(args.annotate_work),
                     )
                 )
+
+                if (
+                    rl_plot_requested
+                    and not rl_plot_emitted
+                    and scenario == eval_target_scenario
+                    and route_alias == eval_target_route_alias
+                    and protocol_alias == eval_target_protocol_alias
+                ):
+                    eval_file_path = Path(args.eval_file).expanduser().resolve()
+                    rl_point = _estimate_rl_point_from_eval(
+                        eval_file=eval_file_path,
+                        proposer=str(args.eval_proposer),
+                        resolver=str(args.eval_resolver),
+                        num_robots=float(args.eval_num_robots),
+                        max_robot_capacity=float(args.eval_max_robot_capacity),
+                        joint_multiplier=float(args.eval_joint_multiplier),
+                        noop_candidates=float(args.eval_noop_candidates),
+                    )
+                    saved_paths.extend(
+                        plot_work_cmp_with_rl(
+                            combo_rows,
+                            scenario_output_dir,
+                            work_x=args.work_x,
+                            work_x_padding=float(args.work_x_padding),
+                            annotate_work=bool(args.annotate_work),
+                            rl_point=rl_point,
+                        )
+                    )
+                    rl_plot_emitted = True
+
+    if rl_plot_requested and not rl_plot_emitted:
+        print(
+            "[warn] RL overlay plot was requested but no matching scenario/route/protocol subset was found: "
+            f"scenario='{eval_target_scenario}', route='{eval_target_route_alias}', protocol='{eval_target_protocol_alias}'",
+            file=sys.stderr,
+        )
 
     print(f"Saved {len(saved_paths)} plot(s) to {output_dir}")
     return 0

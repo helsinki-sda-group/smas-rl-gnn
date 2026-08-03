@@ -42,4 +42,5 @@ Research prototype under active development.
 - [readme/05_conflicts_log.md](readme/05_conflicts_log.md) - Conflict-resolution logging semantics and related diagnostics.
 - [readme/06_comp_norms_log.md](readme/06_comp_norms_log.md) - Component norm logging for debugging/monitoring representation scale.
 - [readme/07_eval_baselines.md](readme/07_eval_baselines.md) - Baseline evaluation workflow and policy behavior (`random`, `greedy`, `unique`).
+- [readme/10_estimated_computational_work.md](readme/10_estimated_computational_work.md) - Analytical work-proxy metric definitions and resolver-specific computational work formulas.
 

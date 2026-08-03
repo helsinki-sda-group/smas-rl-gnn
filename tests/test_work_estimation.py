@@ -6,6 +6,7 @@ from aggregate_metrics_logs import MetricStats, ParsedLog
 from estimate_work_metrics import (
     WORK_MODEL_NAME,
     canonical_policy_name,
+    canonical_route_construction_name,
     enrich_rows,
     insertion_pairs,
     proposer_work,
@@ -55,6 +56,7 @@ class WorkEstimationTests(unittest.TestCase):
             insertion_pairs_value=insertion,
             competition_factor=1.0,
             joint_multiplier=1.5,
+            route_construction_name="reward_aligned",
         )
         r_work = resolver_work(
             resolver_name="predicted_reward",
@@ -64,9 +66,58 @@ class WorkEstimationTests(unittest.TestCase):
             decisions_per_episode=8.0,
             num_robots=6.0,
             mean_candidates=2.0,
+            route_construction_name="reward_aligned",
         )
         self.assertAlmostEqual(p_work, candidate_scan * insertion * 1.5)
         self.assertAlmostEqual(r_work, 12.0 * insertion)
+
+    def test_route_construction_changes_insertion_multiplier(self):
+        candidate_scan = 20.0
+        insertion = insertion_pairs(4.0)
+
+        nearest_policy = proposer_work(
+            policy_name="predicted_reward",
+            candidate_scan_work=candidate_scan,
+            insertion_pairs_value=insertion,
+            competition_factor=1.0,
+            joint_multiplier=1.5,
+            route_construction_name="nearest",
+        )
+        reward_aligned_policy = proposer_work(
+            policy_name="predicted_reward",
+            candidate_scan_work=candidate_scan,
+            insertion_pairs_value=insertion,
+            competition_factor=1.0,
+            joint_multiplier=1.5,
+            route_construction_name="reward_aligned",
+        )
+
+        nearest_resolver = resolver_work(
+            resolver_name="predicted_reward",
+            active_proposal_work=12.0,
+            insertion_pairs_value=insertion,
+            joint_multiplier=1.5,
+            decisions_per_episode=8.0,
+            num_robots=6.0,
+            mean_candidates=2.0,
+            route_construction_name="nearest",
+        )
+        reward_aligned_resolver = resolver_work(
+            resolver_name="predicted_reward",
+            active_proposal_work=12.0,
+            insertion_pairs_value=insertion,
+            joint_multiplier=1.5,
+            decisions_per_episode=8.0,
+            num_robots=6.0,
+            mean_candidates=2.0,
+            route_construction_name="reward_aligned",
+        )
+
+        self.assertEqual(canonical_route_construction_name("deadline_travel"), "reward_aligned")
+        self.assertAlmostEqual(nearest_policy, candidate_scan)
+        self.assertAlmostEqual(reward_aligned_policy, candidate_scan * insertion)
+        self.assertAlmostEqual(nearest_resolver, 12.0)
+        self.assertAlmostEqual(reward_aligned_resolver, 12.0 * insertion)
 
     def test_hungarian_scales_with_decisions(self):
         low = resolver_work(
@@ -99,6 +150,7 @@ class WorkEstimationTests(unittest.TestCase):
                 "scenario": "wave",
                 "resolver": "capacity",
                 "pol": "proposal_joint_competition",
+                "route_construction": "nearest",
                 "num_robots": "6",
                 "max_robot_capacity": "2",
                 "mcand": "2",
@@ -131,6 +183,7 @@ class WorkEstimationTests(unittest.TestCase):
                 "scenario": "wave",
                 "resolver": "capacity",
                 "pol": "new_unknown_policy",
+                "route_construction": "nearest",
                 "num_robots": "6",
                 "max_robot_capacity": "2",
                 "mcand": "2",

@@ -72,6 +72,12 @@ RESOLVER_ALIASES = {
     "random": "random",
 }
 
+ROUTE_CONSTRUCTION_ALIASES = {
+    "deadline_travel": "reward_aligned",
+    "nearest": "nearest",
+    "reward_aligned": "reward_aligned",
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -146,6 +152,18 @@ def canonical_resolver_name(resolver_name: str) -> str | None:
     return RESOLVER_ALIASES.get(normalized)
 
 
+def canonical_route_construction_name(route_construction: str) -> str:
+    normalized = normalize_name(route_construction)
+    return ROUTE_CONSTRUCTION_ALIASES.get(normalized, normalized)
+
+
+def route_construction_insertion_factor(route_construction: str, *, insertion_pairs_value: float) -> float:
+    mode = canonical_route_construction_name(route_construction)
+    if mode == "reward_aligned":
+        return insertion_pairs_value
+    return 1.0
+
+
 def _parse_num_robots_from_instance(row: dict[str, str]) -> float | None:
     instance = str(row.get("instance", "") or "")
     match = re.search(r"taxis(\d+)", instance, flags=re.IGNORECASE)
@@ -164,21 +182,27 @@ def proposer_work(
     insertion_pairs_value: float,
     competition_factor: float,
     joint_multiplier: float,
+    route_construction_name: str = "nearest",
 ) -> float | None:
     policy = canonical_policy_name(policy_name)
     if policy is None:
         return None
+
+    route_factor = route_construction_insertion_factor(
+        route_construction_name,
+        insertion_pairs_value=insertion_pairs_value,
+    )
 
     if policy in {"random", "unique", "pickup_distance", "pickup_deadline"}:
         return candidate_scan_work
     if policy == "pickup_deadline_distance":
         return 2.0 * candidate_scan_work
     if policy == "predicted_reward":
-        return candidate_scan_work * insertion_pairs_value
+        return candidate_scan_work * route_factor
     if policy == "predicted_reward_joint":
-        return candidate_scan_work * insertion_pairs_value * joint_multiplier
+        return candidate_scan_work * route_factor * joint_multiplier
     if policy == "proposal_joint_competition":
-        return candidate_scan_work * insertion_pairs_value * competition_factor
+        return candidate_scan_work * route_factor * competition_factor
     return None
 
 
@@ -191,19 +215,25 @@ def resolver_work(
     decisions_per_episode: float,
     num_robots: float,
     mean_candidates: float,
+    route_construction_name: str = "nearest",
 ) -> float | None:
     resolver = canonical_resolver_name(resolver_name)
     if resolver is None:
         return None
+
+    route_factor = route_construction_insertion_factor(
+        route_construction_name,
+        insertion_pairs_value=insertion_pairs_value,
+    )
 
     if resolver in {"random", "capacity"}:
         return active_proposal_work
     if resolver == "closest_then_capacity":
         return 2.0 * active_proposal_work
     if resolver == "predicted_reward":
-        return active_proposal_work * insertion_pairs_value
+        return active_proposal_work * route_factor
     if resolver == "predicted_reward_joint":
-        return active_proposal_work * insertion_pairs_value * joint_multiplier
+        return active_proposal_work * route_factor * joint_multiplier
     if resolver == "hungarian":
         estimated_tasks_per_step = max(num_robots * mean_candidates, 1.0)
         matrix_size = max(float(num_robots), estimated_tasks_per_step)
@@ -329,6 +359,7 @@ def enrich_rows(
             route_stops_override=route_stops_override,
         )
         insertion_pairs_value = insertion_pairs(route_stops)
+        route_construction_name = canonical_route_construction_name(str(row.get("route_construction", "nearest")))
 
         R = max(num_robots, 0.0)
         K = max(mcand, 0.0)
@@ -354,6 +385,7 @@ def enrich_rows(
             insertion_pairs_value=insertion_pairs_value,
             competition_factor=competition_factor,
             joint_multiplier=joint_multiplier,
+            route_construction_name=route_construction_name,
         )
         resolver = resolver_work(
             resolver_name=resolver_name,
@@ -363,6 +395,7 @@ def enrich_rows(
             decisions_per_episode=D,
             num_robots=R,
             mean_candidates=K,
+            route_construction_name=route_construction_name,
         )
 
         unknown_algorithm = False
