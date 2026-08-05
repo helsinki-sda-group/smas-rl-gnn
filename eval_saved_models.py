@@ -25,6 +25,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import torch as th
+import time
 from dataclasses import asdict, is_dataclass
 
 from stable_baselines3 import PPO
@@ -39,6 +40,12 @@ from utils.logit_metrics_logger import (
     aggregate_episode_logit_metrics,
     append_logit_metrics_log,
     LogitStepMetrics
+)
+from utils.eval_timing import (
+    TIMING_INFERENCE_MODE_ACTOR_CRITIC,
+    TimingRunCollector,
+    collect_run_metadata,
+    timing_config_from_opt,
 )
 
 
@@ -116,6 +123,8 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
     try:
         # Load model
         model = PPO.load(model_path)
+        model.policy.set_training_mode(False)
+        model.policy.eval()
         
         # Setup logger with fresh instance
         rp_logger = RidepoolLogger(
@@ -216,11 +225,13 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
         ep_reward = 0.0
         done = False
         step_idx = 0
+        timing_rows = []
         
         # Collect logit metrics for each decision step
         logit_step_metrics = []
         
         while not done:
+            t_decision_start = time.perf_counter_ns()
             #model.policy.noop_logit.data.fill_(-1.0)
             
             # Capture logits before prediction
@@ -252,7 +263,8 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             except Exception as e:
                 print(f"[STEP {step_idx}] logit capture error: {e}")
             
-            action, _states = model.predict(obs, deterministic=config.get('deterministic', False))
+            with th.inference_mode():
+                action, _states = model.predict(obs, deterministic=config.get('deterministic', False))
             
             if config.get('print_steps', False):
                 print(f"[STEP {step_idx}] action={action}")
@@ -260,6 +272,56 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             ep_reward += reward
+
+            t_decision_end = time.perf_counter_ns()
+            timing = info.get('timing', {}) if isinstance(info, dict) else {}
+            proposal_ns = int(timing.get('proposal_ns', 0))
+            resolution_ns = int(timing.get('resolution_ns', 0))
+            simulation_ns = int(timing.get('simulation_ns', 0))
+            decision_total_ns = int(max(0, t_decision_end - t_decision_start))
+            other_ns = max(0, decision_total_ns - proposal_ns - resolution_ns - simulation_ns)
+
+            warmup = int(int(attempt) < int(config.get('timing_warmup_episodes', 0)))
+            row = {
+                'method': 'gnn',
+                'policy': os.path.basename(model_path),
+                'proposer': 'gnn',
+                'resolver': str(config.get('conflict_resolution', 'closest_then_capacity')),
+                'protocol': ('admission_aware' if bool(config.get('admission_aware', False)) else 'forced'),
+                'inference_mode': TIMING_INFERENCE_MODE_ACTOR_CRITIC,
+                'seed': int(seed),
+                'episode': int(attempt),
+                'decision_idx': int(step_idx),
+                'sim_time_s': float(getattr(controller, '_now', lambda: 0.0)()),
+                'device': str(model.device),
+                'warmup': int(warmup),
+                'n_robots': int(config['R']),
+                'n_tasks': int(len(getattr(controller, '_last_tasks', []) or [])),
+                'n_candidate_pairs': int(timing.get('n_candidate_pairs', 0)),
+                'n_nonempty_robots': int(timing.get('n_nonempty_robots', 0)),
+                'n_proposals': int(timing.get('n_proposals', 0)),
+                'n_bid_tasks': int(timing.get('n_bid_tasks', 0)),
+                'n_conflicting_tasks': int(timing.get('n_conflicting_tasks', 0)),
+                'n_actor_graphs': int(timing.get('n_actor_graphs', 0)),
+                'n_actor_nonempty_graphs': int(timing.get('n_actor_nonempty_graphs', 0)),
+                'n_actor_nodes': int(timing.get('n_actor_nodes', 0)),
+                'n_actor_edges': int(timing.get('n_actor_edges', 0)),
+                'n_actor_candidates': int(timing.get('n_actor_candidates', 0)),
+                'proposal_ns': int(proposal_ns),
+                'resolution_ns': int(resolution_ns),
+                'simulation_ns': int(simulation_ns),
+                'decision_total_ns': int(decision_total_ns),
+                'other_ns': int(other_ns),
+                'gnn_obs_build_ns': int(timing.get('gnn_obs_build_ns', 0)),
+                'gnn_tensor_prepare_ns': int(timing.get('gnn_tensor_prepare_ns', 0)),
+                'gnn_graph_prepare_ns': int(timing.get('gnn_graph_prepare_ns', 0)),
+                'gnn_policy_total_ns': int(timing.get('gnn_policy_total_ns', 0)),
+                'gnn_actor_ns': int(timing.get('gnn_actor_ns', 0)),
+                'gnn_critic_ns': int(timing.get('gnn_critic_ns', 0)),
+                'gnn_action_ns': int(timing.get('gnn_action_ns', 0)),
+                'gnn_action_mapping_ns': int(timing.get('gnn_action_mapping_ns', 0)),
+            }
+            timing_rows.append(row)
             step_idx += 1
 
         # **FIX**: Flush logger files to ensure all data is written before extracting metrics
@@ -322,7 +384,9 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             'reward': ep_reward,
             'episode_metrics': episode_metrics,
             'metrics_dict': metrics_dict,
-            'logit_metrics': logit_episode_metrics
+            'logit_metrics': logit_episode_metrics,
+            'timing_rows': timing_rows,
+            'device': str(model.device),
         }
     
     except Exception as e:
@@ -678,6 +742,8 @@ def main():
         'extended_quality_include_task_level': bool(getattr(opt.logging, 'extended_quality_include_task_level', False)),
         'extended_quality_include_decision_level': bool(getattr(opt.logging, 'extended_quality_include_decision_level', False)),
     }
+    timing_cfg = timing_config_from_opt(opt)
+    config['timing_warmup_episodes'] = int(timing_cfg.warmup_episodes)
     
     # Create output directories
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -702,7 +768,24 @@ def main():
     print(f"Eval runs per seed: {getattr(args, 'eval_runs', 3)}")
     print(f"Moving average window: {getattr(args, 'ma_window', 10)}")
     print(f"Model sample rate: {getattr(args, 'model_sample', 1.0)*100:.1f}%")
+    print(f"Timing enabled: {bool(timing_cfg.enabled)}")
+    print(f"Timing internal_gnn: {bool(timing_cfg.internal_gnn)}")
+    print(f"Timing warmup_episodes: {int(timing_cfg.warmup_episodes)}")
     print()
+
+    static_meta = collect_run_metadata(
+        scenario=str(config.get('sumo_cfg', '')),
+        policy='checkpoint',
+        proposer='gnn',
+        resolver=str(config.get('conflict_resolution', 'closest_then_capacity')),
+        protocol=('admission_aware' if bool(config.get('admission_aware', False)) else 'forced'),
+        inference_mode=TIMING_INFERENCE_MODE_ACTOR_CRITIC,
+        seed=0,
+        n_robots=int(config.get('R', 0)),
+        device='cpu',
+        internal_gnn_timing=bool(timing_cfg.internal_gnn),
+    )
+    timing_collector = TimingRunCollector(config=timing_cfg, static_meta=static_meta)
     
     # Find all models and sort by timestep (not by filename)
     model_files = glob.glob(os.path.join(model_dir, 'model_episode*.zip'))
@@ -795,6 +878,9 @@ def main():
                     # Log logit metrics if available
                     if 'logit_metrics' in result and result['logit_metrics'] is not None:
                         append_logit_metrics_log(logit_metrics_file, result['logit_metrics'])
+
+                    for timing_row in result.get('timing_rows', []) or []:
+                        timing_collector.add_step(timing_row)
                     
                     print(f"[OK] reward={result['reward']:.4f}")
                 else:
@@ -815,6 +901,12 @@ def main():
         # Generate plots
         print("\nGenerating plots...")
         plot_evaluation_results(results_df, output_base, ma_window=int(getattr(args, "ma_window", 10)))
+
+    if timing_cfg.enabled:
+        steps_path = timing_collector.write_steps_csv(output_base)
+        summary_path = timing_collector.write_summary_csv(output_base)
+        print(f"[OK] Saved timing steps to {steps_path}")
+        print(f"[OK] Saved timing summary to {summary_path}")
     
     print(f"\n[OK] All results saved to {output_base}")
     tee.close()

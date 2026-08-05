@@ -13,6 +13,10 @@
   max_wait_delay_s: 300.0
   max_travel_delay_s: 240.0
   max_robot_capacity: 2
+  route_construction: nearest
+  route_exhaustive_max_stops: 8
+  route_construction_debug: false
+  admission_aware: true
   conflict_resolution: closest_then_capacity
   candidates_sorting: randomized
   two_hop: false
@@ -29,6 +33,9 @@
     travel_cap: 240.0
     deadline_cap: 600.0
   completion_mode: valid_dropoff
+  competition_joint:
+    tie_tolerance: 1.0e-8
+    competitors: two_hop
 features:
   use_xy_pickup: false
   use_reservation_time: false
@@ -97,7 +104,7 @@ ppo:
   ent_coef: 0.003
   gae_lambda: 0.95
   n_epochs: 5
-  total_timesteps: 120000
+  total_timesteps: 200000
 logging:
   run_name: 1hop_noop-w3-3_ctc_cap2
   out_dir: /scratch/project_2012159/kbocheni/smas-rl-gnn/runs
@@ -108,12 +115,18 @@ logging:
   extended_quality_plots: false
   extended_quality_include_task_level: false
   extended_quality_include_decision_level: false
+timing:
+  enabled: true
+  internal_gnn: true
+  warmup_episodes: 0
 continue_training: false
 baselines:
   policies:
   - random
   - unique
   - pickup_distance
+  - pickup_deadline
+  - pickup_deadline_distance
   - predicted_reward
   - predicted_reward_joint
   num_seeds: 10

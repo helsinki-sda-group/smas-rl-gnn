@@ -342,6 +342,13 @@ class RLControllerAdapter:
             "competition_tie_count": 0.0,
             "competition_single_owner_count": 0.0,
         }
+        self._last_timing: Dict[str, int] = {
+            "proposal_ns": 0,
+            "resolution_ns": 0,
+            "simulation_ns": 0,
+            "decision_total_ns": 0,
+            "other_ns": 0,
+        }
 
         self.reset_fn = reset_fn
         self._shadow_assigned_by_robot = defaultdict(list)  # rid -> [reservation 1, reservation 2, ...]
@@ -1725,6 +1732,13 @@ class RLControllerAdapter:
         self._prev_obsolete.clear()
         self._terminal_penalties_applied = False
         self._rew_accum = self._make_rew_accum()
+        self._last_timing = {
+            "proposal_ns": 0,
+            "resolution_ns": 0,
+            "simulation_ns": 0,
+            "decision_total_ns": 0,
+            "other_ns": 0,
+        }
 
 
 
@@ -3098,6 +3112,14 @@ class RLControllerAdapter:
         """
 
         
+        decision_total_start_ns = time.perf_counter_ns()
+        proposal_start_ns = decision_total_start_ns
+        proposal_end_ns = proposal_start_ns
+        resolution_start_ns = 0
+        resolution_end_ns = 0
+        simulation_start_ns = 0
+        simulation_end_ns = 0
+
         robots = self.get_robots()
         res_index = self._reservation_index()
         p2r = self._person_to_res_index(res_index)
@@ -3188,6 +3210,7 @@ class RLControllerAdapter:
             # 1b) resolve assignments.
             # - Task-level resolvers consume top-1 proposals.
             # - Hungarian builds a full feasible robot-task score matrix.
+            resolution_start_ns = time.perf_counter_ns()
             if self.conflict_resolution == "hungarian":
                 chosen, winners, selected_plans = self._resolve_assignments_hungarian(
                     robots=list(robots),
@@ -3202,6 +3225,8 @@ class RLControllerAdapter:
                     selection_margins=selection_margins,
                     selection_raw_logits=selection_raw_logits,
                 )
+            resolution_end_ns = time.perf_counter_ns()
+            proposal_end_ns = max(proposal_start_ns, int(resolution_start_ns))
 
             # Per-step robot-level coordination counters, based on current policy decisions
             # and the resolver output of this exact call.
@@ -3477,6 +3502,7 @@ class RLControllerAdapter:
                     # keep previous plan on failure
 
         # 3) advance simulation and clean the shadow
+        simulation_start_ns = time.perf_counter_ns()
         self._step()
         new_pickups, new_dropoffs, alive_now = self._reservation_events()
         self._detect_and_log_events_from_sets(new_pickups, new_dropoffs)
@@ -3489,6 +3515,7 @@ class RLControllerAdapter:
 
         )
         self._refresh_shadow_plan(alive_now)
+        simulation_end_ns = time.perf_counter_ns()
         robots = (self._last_robot_ids or self.get_robots())
         done = self.is_episode_done()
         if done and not self._terminal_penalties_applied:
@@ -3547,6 +3574,19 @@ class RLControllerAdapter:
                 )
                 self._episode_closed = True
 
+
+        decision_total_ns = time.perf_counter_ns() - decision_total_start_ns
+        proposal_ns = max(0, int(proposal_end_ns) - int(proposal_start_ns))
+        resolution_ns = max(0, int(resolution_end_ns) - int(resolution_start_ns))
+        simulation_ns = max(0, int(simulation_end_ns) - int(simulation_start_ns))
+        other_ns = max(0, int(decision_total_ns) - proposal_ns - resolution_ns - simulation_ns)
+        self._last_timing = {
+            "proposal_ns": int(proposal_ns),
+            "resolution_ns": int(resolution_ns),
+            "simulation_ns": int(simulation_ns),
+            "decision_total_ns": int(decision_total_ns),
+            "other_ns": int(other_ns),
+        }
 
         total = float(sum(per_robot.values()))
         return {"per_robot": per_robot, "sum_reward": total, "terms": terms}

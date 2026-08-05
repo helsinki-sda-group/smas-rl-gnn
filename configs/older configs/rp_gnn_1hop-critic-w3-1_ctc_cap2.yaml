@@ -21,7 +21,7 @@
   two_hop_arch: comp_corr
   reward_params:
     reward_type: wait_travel
-    w_comp: 2.0
+    w_comp: 3.0
     w_wait: 1.5
     w_travel: 1.25
     w_deadline: 0
@@ -98,9 +98,9 @@ ppo:
   n_epochs: 5
   total_timesteps: 120000
 logging:
-  run_name: 1hop_critic-2_ctc_cap2
+  run_name: 1hop_critic-w3-1_ctc_cap2
   out_dir: /scratch/project_2012159/kbocheni/smas-rl-gnn/runs
-  model_save_dir: /scratch/project_2012159/kbocheni/smas-rl-gnn/runs/1hop_critic-2_ctc_cap2/!saved_models
+  model_save_dir: /scratch/project_2012159/kbocheni/smas-rl-gnn/runs/1hop_critic-w3-1_ctc_cap2/!saved_models
   log_conflict_metrics: true
   prune_episode_dir_after_metrics: true
   extended_quality_metrics: true
@@ -113,6 +113,8 @@ baselines:
   - random
   - unique
   - pickup_distance
+  - pickup_deadline
+  - pickup_deadline_distance
   - predicted_reward
   - predicted_reward_joint
   num_seeds: 10

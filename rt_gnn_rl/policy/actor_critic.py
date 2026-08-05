@@ -1,6 +1,7 @@
 # rt_gnn_rl/policy/actor_critic.py
 import torch
 import torch.nn as nn
+import time
 from typing import List, Literal, Optional
 
 from .gnn_backbone import DummyBackbone, EgoGraphEncoder
@@ -89,6 +90,8 @@ class EgoActorCritic(nn.Module):
         self._comp_log_count: int = 0
         self._comp_log_comp_count: int = 0
         self._comp_log_robot_count: int = 0
+        self._last_timing_payload: dict[str, int] = {}
+        self._last_workload_payload: dict[str, int] = {}
 
         if backbone == "dummy":
             self.enc_actor = _DummyEgoEncoder(in_dim, hidden)
@@ -426,11 +429,13 @@ class EgoActorCritic(nn.Module):
         )
 
     def forward(self, obs, return_noop: bool = False):
+        t_graph_start = time.perf_counter_ns()
         (
             x_list, ei_list, edge_attr_list, cand_loc_idx,
             x_list_full, ei_list_full, edge_attr_list_full, cand_loc_idx_full,
             R,
         ) = self._build_graph_lists(obs)
+        graph_prepare_ns = time.perf_counter_ns() - t_graph_start
         K_max = obs["cand_mask"].shape[1]
         device = obs["x"].device
 
@@ -439,7 +444,14 @@ class EgoActorCritic(nn.Module):
         actor_ea_list = edge_attr_list_full if self.use_two_hop_actor else edge_attr_list
         actor_cand_idx = cand_loc_idx_full if self.use_two_hop_actor else cand_loc_idx
 
+        # Count workload on exactly the graph family fed to actor.
+        actor_nodes = int(sum(int(x_i.size(0)) for x_i in actor_x_list))
+        actor_edges = int(sum(int(ei_i.size(1)) for ei_i in actor_ei_list))
+        actor_candidates = int(sum(int(c_i.numel()) for c_i in actor_cand_idx))
+        actor_nonempty_graphs = int(sum(1 for c_i in actor_cand_idx if int(c_i.numel()) > 0))
+
         # === Actor graph ===
+        t_actor_start = time.perf_counter_ns()
         h_a, batch_a = self.enc_actor.encode_graphs(actor_x_list, actor_ei_list, actor_ea_list)
         h_a = self.actor_norm(h_a)
 
@@ -543,6 +555,7 @@ class EgoActorCritic(nn.Module):
                 )
             logits_list.append(li)
         logits = torch.stack(logits_list, dim=0)      # [R, K_max]
+        actor_ns = time.perf_counter_ns() - t_actor_start
         noop_logits = (
             torch.stack(noop_logits_list, dim=0)
             if self.noop_mode == "state_dependent"
@@ -554,6 +567,7 @@ class EgoActorCritic(nn.Module):
         critic_ea_list = edge_attr_list_full if self.use_two_hop_critic else edge_attr_list
 
         # === Critic graph ===
+        t_critic_start = time.perf_counter_ns()
         h_c, batch_c = self.enc_critic.encode_graphs(critic_x_list, critic_ei_list, critic_ea_list)
         # First, get one embedding per robot by mean-pooling its nodes
         robot_embeds: List[torch.Tensor] = []
@@ -586,6 +600,30 @@ class EgoActorCritic(nn.Module):
         else:
             raise ValueError(f"Unknown critic_aggregation '{self.critic_aggregation}'")
 
+        critic_ns = time.perf_counter_ns() - t_critic_start
+        self._last_timing_payload = {
+            "gnn_graph_prepare_ns": int(graph_prepare_ns),
+            "gnn_actor_ns": int(actor_ns),
+            "gnn_critic_ns": int(critic_ns),
+        }
+        self._last_workload_payload = {
+            "n_actor_graphs": int(R),
+            "n_actor_nonempty_graphs": int(actor_nonempty_graphs),
+            "n_actor_nodes": int(actor_nodes),
+            "n_actor_edges": int(actor_edges),
+            "n_actor_candidates": int(actor_candidates),
+        }
+
         if return_noop:
             return logits, noop_logits, v
         return logits, v
+
+    def pop_last_timing_payload(self) -> dict[str, int]:
+        out = dict(self._last_timing_payload)
+        self._last_timing_payload = {}
+        return out
+
+    def pop_last_workload_payload(self) -> dict[str, int]:
+        out = dict(self._last_workload_payload)
+        self._last_workload_payload = {}
+        return out

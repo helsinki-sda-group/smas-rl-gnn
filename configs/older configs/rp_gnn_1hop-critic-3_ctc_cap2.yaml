@@ -1,5 +1,5 @@
-env:
-  sumo_cfg: /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/configs/small_net_cap2_wave.sumocfg
+﻿env:
+  sumo_cfg: /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/configs/small_net_cap2.sumocfg
   use_gui: false
   R: 6
   K_max: 3
@@ -7,14 +7,14 @@ env:
   E_max: 64
   G: 0
   vicinity_m: 2000.0
-  max_steps: 2400
+  max_steps: 3000
   min_episode_steps: 100
   decision_dt: 60
-  max_wait_delay_s: 240.0
+  max_wait_delay_s: 300.0
   max_travel_delay_s: 240.0
   max_robot_capacity: 2
   conflict_resolution: closest_then_capacity
-  sorted_candidates: false
+  candidates_sorting: randomized
   two_hop: false
   two_hop_directed: true
   two_hop_critic: false
@@ -22,16 +22,17 @@ env:
   reward_params:
     reward_type: wait_travel
     w_comp: 2.0
-    w_wait: 0
-    w_travel: 0
+    w_wait: 1.5
+    w_travel: 1.25
     w_deadline: 0
     wait_cap: 600.0
-    travel_cap: 90.0
+    travel_cap: 240.0
     deadline_cap: 600.0
   completion_mode: valid_dropoff
 features:
-  base_dim: 9
   use_xy_pickup: false
+  use_reservation_time: false
+  base_dim: 9
   normalize_features: true
   use_node_type: true
   use_ego_robot: true
@@ -110,9 +111,15 @@ continue_training: false
 baselines:
   policies:
   - random
-  - greedy
   - unique
+  - pickup_distance
+  - predicted_reward
+  - predicted_reward_joint
   num_seeds: 10
 sorted: false
 sumoport: 8813
+
+
+
+
 

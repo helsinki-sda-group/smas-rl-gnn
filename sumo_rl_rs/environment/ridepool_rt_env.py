@@ -1,10 +1,12 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
+import time
 from typing import List, Optional, Dict, Any
 
 from rt_gnn_rl.graphs import build_padded_ego_batch  # implemented below
 from rt_gnn_rl.policy.action_context import pop_latest_policy_step
+from rt_gnn_rl.policy.timing_context import pop_latest_policy_timing
 
 class RidepoolRTEnv(gym.Env):
     """
@@ -55,6 +57,8 @@ class RidepoolRTEnv(gym.Env):
         self.edge_features = list(edge_features or [])
         self._episode_reward = 0
         self._macro_step = 0
+        self.timing_collector = None
+        self._pending_obs_build_ns = 0
 
         # explicit no-op slot at the END of each robot's action vector
         self._noop_index = self.K_max
@@ -149,7 +153,9 @@ class RidepoolRTEnv(gym.Env):
         self.controller.reset()
         self._episode_reward = 0
         self._macro_step = 0
+        t_obs_start = time.perf_counter_ns()
         obs = self._build_obs()
+        self._pending_obs_build_ns = time.perf_counter_ns() - t_obs_start
         info = {"action_mask": self.action_mask()}
         return obs, info
     
@@ -269,11 +275,37 @@ class RidepoolRTEnv(gym.Env):
             "nonserved": 0.,
         }
 
+        t_decision_start = time.perf_counter_ns()
+        obs_build_ns = int(max(0, self._pending_obs_build_ns))
+
         # (1) apply chosen assignments now
         decision_action_mask = self.action_mask()
+        n_candidate_pairs = int(np.sum(decision_action_mask[:, : self.K_max]))
+        n_nonempty_robots = int(np.sum(np.any(decision_action_mask[:, : self.K_max] > 0, axis=1)))
+
+        t_map_start = time.perf_counter_ns()
         assignments = self._decode(action)
+        action_mapping_ns = time.perf_counter_ns() - t_map_start
+
+        task_counts: Dict[str, int] = {}
+        n_proposals = 0
+        for assigned in assignments:
+            if assigned is None:
+                continue
+            n_proposals += 1
+            key = str(assigned)
+            task_counts[key] = task_counts.get(key, 0) + 1
+        n_bid_tasks = int(len(task_counts))
+        n_conflicting_tasks = int(sum(1 for cnt in task_counts.values() if cnt > 1))
+
         selected_task_margins = self._selected_task_margins(action)
         selected_task_raw_logits = self._selected_task_raw_logits(action)
+
+        proposal_ns = 0
+        resolution_ns = 0
+        simulation_ns = 0
+
+        t_resolve_start = time.perf_counter_ns()
         step_out = self.controller.apply_and_step(
             assignments,
             allow_redispatch=True,
@@ -284,6 +316,20 @@ class RidepoolRTEnv(gym.Env):
             final_action_mask=decision_action_mask,
             policy_robot_ids=list(self._last_robot_ids),
         )  # controller aligns with its robot order
+        t_apply_end = time.perf_counter_ns()
+
+        controller_timing = getattr(self.controller, "_last_timing", {}) or {}
+        proposal_ns_controller = int(controller_timing.get("proposal_ns", 0))
+        proposal_ns = int(proposal_ns_controller)
+        resolution_ns = int(controller_timing.get("resolution_ns", 0))
+        simulation_ns = int(controller_timing.get("simulation_ns", 0))
+
+        if proposal_ns <= 0 and resolution_ns <= 0 and simulation_ns <= 0:
+            # Fallback only if controller-level phase timings are unavailable.
+            proposal_ns = max(0, int(t_resolve_start - t_decision_start))
+            resolution_ns = 0
+            simulation_ns = max(0, int(t_apply_end - t_resolve_start))
+
          # Expect dict like {"per_robot": {...}, "sum_reward": float, "terms": {...}}
         total_reward += float(step_out.get("sum_reward", 0.0))
         terminated = bool(self.controller.is_episode_done())
@@ -303,6 +349,8 @@ class RidepoolRTEnv(gym.Env):
         while (not terminated) and steps_done < self.decision_dt:
             noop = [None] * self.R
             step_out = self.controller.apply_and_step(noop, allow_redispatch = False)
+            loop_timing = getattr(self.controller, "_last_timing", {}) or {}
+            simulation_ns += int(loop_timing.get("simulation_ns", 0))
             total_reward += float(step_out.get("sum_reward", 0.0))
             terminated = bool(self.controller.is_episode_done())
             last_info = {k: v for k, v in step_out.items() if k != "sum_reward"}
@@ -314,12 +362,19 @@ class RidepoolRTEnv(gym.Env):
 
             steps_done += 1
 
+        decision_total_ns = time.perf_counter_ns() - t_decision_start
+
        
         # (3) build next obs only at the macro boundary
+        next_obs_build_ns = 0
         try:
+            t_next_obs_start = time.perf_counter_ns()
             obs = self._build_obs()
+            next_obs_build_ns = time.perf_counter_ns() - t_next_obs_start
         except Exception:
             obs = {k: np.zeros_like(v) for k,v in self.observation_space.spaces.items()}
+            next_obs_build_ns = 0
+        self._pending_obs_build_ns = int(max(0, next_obs_build_ns))
 
         #total_reward = total_reward/100.0 # self.decision_dt
 
@@ -353,6 +408,53 @@ class RidepoolRTEnv(gym.Env):
             info["episode_reward"] = self._episode_reward
             info["steps_done"] = steps_done
             self._episode_reward = 0
+
+        info["timing"] = {
+            "proposal_ns": int(proposal_ns),
+            "resolution_ns": int(resolution_ns),
+            "simulation_ns": int(simulation_ns),
+            "decision_total_ns": int(decision_total_ns),
+            "other_ns": 0,
+            "n_candidate_pairs": int(n_candidate_pairs),
+            "n_nonempty_robots": int(n_nonempty_robots),
+            "n_proposals": int(n_proposals),
+            "n_bid_tasks": int(n_bid_tasks),
+            "n_conflicting_tasks": int(n_conflicting_tasks),
+            "gnn_action_mapping_ns": int(action_mapping_ns),
+            "gnn_obs_build_ns": int(obs_build_ns),
+            "controller_proposal_ns": int(proposal_ns_controller),
+        }
+
+        policy_timing = pop_latest_policy_timing()
+        if policy_timing is not None:
+            info["timing"].update(policy_timing)
+
+        # Compose shared outer proposal time with available components.
+        if policy_timing is not None:
+            info["timing"]["proposal_ns"] = int(
+                max(0, obs_build_ns)
+                + int(max(0, policy_timing.get("gnn_tensor_prepare_ns", 0)))
+                + int(max(0, policy_timing.get("gnn_policy_total_ns", 0)))
+                + int(max(0, policy_timing.get("gnn_action_ns", 0)))
+                + int(max(0, action_mapping_ns))
+                + int(max(0, proposal_ns_controller))
+            )
+        else:
+            info["timing"]["proposal_ns"] = int(
+                max(0, obs_build_ns)
+                + int(max(0, action_mapping_ns))
+                + int(max(0, proposal_ns_controller))
+            )
+
+        info["timing"]["other_ns"] = int(
+            max(
+                0,
+                int(info["timing"]["decision_total_ns"])
+                - int(info["timing"]["proposal_ns"])
+                - int(info["timing"]["resolution_ns"])
+                - int(info["timing"]["simulation_ns"]),
+            )
+        )
 
 
         return obs, total_reward, terminated, truncated, info

@@ -1,5 +1,6 @@
 ﻿import torch as th
 import torch.nn as nn
+import time
 from typing import Any, Dict, Optional, List, Literal, cast
 from gymnasium import spaces
 from stable_baselines3.common.policies import ActorCriticPolicy
@@ -7,6 +8,7 @@ from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
 from .actor_critic import EgoActorCritic  # pluggable GNN-based actor–critic
 from .action_context import set_latest_policy_step
+from .timing_context import set_latest_policy_timing
 
 
 class DictPassthroughExtractor(BaseFeaturesExtractor):
@@ -256,15 +258,22 @@ class RTGNNPolicy(ActorCriticPolicy):
     # --- main SB3 hooks ------------------------------------------------------
 
     def forward(self, obs: Any, deterministic: bool = False):
+        t_tensor_prepare_start = time.perf_counter_ns()
         # Pass the observation through the features extractor to obtain the dict with batch dimension
         _ = self.extract_features(obs, features_extractor=self.features_extractor)
 
         obs_dict_b = cast(Dict[str, th.Tensor], self.features_extractor.last_obs)
         assert obs_dict_b is not None, "Features extractor did not capture obs dict"
+        tensor_prepare_ns = time.perf_counter_ns() - t_tensor_prepare_start
 
+        t_policy_start = time.perf_counter_ns()
         logits_k, noop_logits, values = self._build_batch_outputs(obs_dict_b)           # [B,R,K_max], [B,1]
+        policy_total_ns = time.perf_counter_ns() - t_policy_start
+
         mask_k = obs_dict_b["cand_mask"]                                   # [B,R,K_max]
         set_latest_policy_step(logits_k, mask_k)
+
+        t_action_start = time.perf_counter_ns()
         logits, mask = self._append_noop(logits_k, mask_k, noop_logits)                 # [B,R,K_max+1] each
         logits = logits.masked_fill(~mask, -1e9)
 
@@ -273,6 +282,24 @@ class RTGNNPolicy(ActorCriticPolicy):
         #log_prob = dist.log_prob(actions)                                  # [B]
         active = mask_k.any(dim=-1)  # [B,R] True if at least one valid action for this taxi
         log_prob, _ = self.masked_logprob_entropy(logits, actions, active)  # [B] sum of log-probs over active taxis, used for actor loss
+        action_ns = time.perf_counter_ns() - t_action_start
+
+        ac_timing = self.gnn_ac.pop_last_timing_payload()
+        ac_workload = self.gnn_ac.pop_last_workload_payload()
+        payload: Dict[str, Any] = {
+            "gnn_tensor_prepare_ns": int(tensor_prepare_ns),
+            "gnn_policy_total_ns": int(policy_total_ns),
+            "gnn_action_ns": int(action_ns),
+            "gnn_graph_prepare_ns": int(ac_timing.get("gnn_graph_prepare_ns", 0)),
+            "gnn_actor_ns": int(ac_timing.get("gnn_actor_ns", 0)),
+            "gnn_critic_ns": int(ac_timing.get("gnn_critic_ns", 0)),
+            "n_actor_graphs": int(ac_workload.get("n_actor_graphs", 0)),
+            "n_actor_nonempty_graphs": int(ac_workload.get("n_actor_nonempty_graphs", 0)),
+            "n_actor_nodes": int(ac_workload.get("n_actor_nodes", 0)),
+            "n_actor_edges": int(ac_workload.get("n_actor_edges", 0)),
+            "n_actor_candidates": int(ac_workload.get("n_actor_candidates", 0)),
+        }
+        set_latest_policy_timing(payload)
 
         return actions, values, log_prob
 

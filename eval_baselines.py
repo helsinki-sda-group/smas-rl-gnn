@@ -1,5 +1,6 @@
 import numpy as np
 import argparse
+import time
 from stable_baselines3.common.monitor import Monitor
 from typing import Dict, List
 import pandas as pd
@@ -18,6 +19,12 @@ from utils.metrics_calculator import (
     get_metrics_header,
     build_metrics_metadata_lines,
     with_instance_and_resolver_alias,
+)
+from utils.eval_timing import (
+    TIMING_INFERENCE_MODE_ACTOR_CRITIC,
+    TimingRunCollector,
+    collect_run_metadata,
+    timing_config_from_opt,
 )
 
 
@@ -171,6 +178,7 @@ reward_params = dict(getattr(opt.env, "reward_params", {}) or {})
 COMPLETION_MODE = str(getattr(opt.env, "completion_mode", "dropoff"))
 CANDIDATES_SORTING = resolve_candidates_sorting(opt)
 ADMISSION_AWARE = resolve_admission_aware(opt)
+TIMING_CFG = timing_config_from_opt(opt)
 
 NUM_SEEDS = int(opt.baselines.num_seeds)
 SEEDS = list(opt.seeds.eval)
@@ -299,6 +307,20 @@ for seed in SEEDS[:NUM_SEEDS]:
             edge_features=edge_features,
         )
 
+        static_meta = collect_run_metadata(
+            scenario=str(SUMO_CFG),
+            policy=str(policy_name),
+            proposer=str(policy_name),
+            resolver=str(CONFLICT_RESOLUTION),
+            protocol=("admission_aware" if ADMISSION_AWARE else "forced"),
+            inference_mode="na",
+            seed=int(seed),
+            n_robots=int(R),
+            device="cpu",
+            internal_gnn_timing=bool(TIMING_CFG.internal_gnn),
+        )
+        collector = TimingRunCollector(config=TIMING_CFG, static_meta=static_meta)
+
         # ...existing code for NOOP, action functions, and episode run...
 
         # The rest of the per-policy loop (from 'def greedy_nearest_action' to metrics extraction and logging)
@@ -352,9 +374,11 @@ for seed in SEEDS[:NUM_SEEDS]:
         obs, info = env.reset()
         done = False
         trunc = False
+        decision_idx = 0
 
         while not (done or trunc):
             mask = info.get("action_mask", env.unwrapped.action_mask())
+            t_action_select_start = time.perf_counter_ns()
 
             if policy_name in SLOT0_SORTING_POLICY_MAP:
                 action = slot0_candidate_action(mask)
@@ -364,8 +388,46 @@ for seed in SEEDS[:NUM_SEEDS]:
                 action = greedy_unique_action(mask)
             else:
                 raise ValueError(f"Unknown policy: {policy_name}")
+            baseline_action_select_ns = time.perf_counter_ns() - t_action_select_start
 
             obs, reward, done, trunc, info = env.step(action)
+
+            timing = info.get("timing", {}) if isinstance(info, dict) else {}
+            proposal_ns = int(timing.get("proposal_ns", 0)) + int(baseline_action_select_ns)
+            decision_total_ns = int(timing.get("decision_total_ns", 0)) + int(baseline_action_select_ns)
+            resolution_ns = int(timing.get("resolution_ns", 0))
+            simulation_ns = int(timing.get("simulation_ns", 0))
+            other_ns = max(0, decision_total_ns - proposal_ns - resolution_ns - simulation_ns)
+            warmup = int(0 < int(getattr(TIMING_CFG, "warmup_episodes", 0)))
+            collector.add_step(
+                {
+                    "method": "baseline",
+                    "policy": str(policy_name),
+                    "proposer": str(policy_name),
+                    "resolver": str(CONFLICT_RESOLUTION),
+                    "protocol": ("admission_aware" if ADMISSION_AWARE else "forced"),
+                    "inference_mode": "na",
+                    "seed": int(seed),
+                    "episode": 0,
+                    "decision_idx": int(decision_idx),
+                    "sim_time_s": float(getattr(controller, "_now", lambda: 0.0)()),
+                    "device": "cpu",
+                    "warmup": int(warmup),
+                    "n_robots": int(R),
+                    "n_tasks": int(len(getattr(controller, "_last_tasks", []) or [])),
+                    "n_candidate_pairs": int(timing.get("n_candidate_pairs", 0)),
+                    "n_nonempty_robots": int(timing.get("n_nonempty_robots", 0)),
+                    "n_proposals": int(timing.get("n_proposals", 0)),
+                    "n_bid_tasks": int(timing.get("n_bid_tasks", 0)),
+                    "n_conflicting_tasks": int(timing.get("n_conflicting_tasks", 0)),
+                    "proposal_ns": int(proposal_ns),
+                    "resolution_ns": int(resolution_ns),
+                    "simulation_ns": int(simulation_ns),
+                    "decision_total_ns": int(decision_total_ns),
+                    "other_ns": int(other_ns),
+                }
+            )
+            decision_idx += 1
 
         # Get episode directory from logger
         episode_dir = rp_logger.ep_dir
@@ -399,6 +461,10 @@ for seed in SEEDS[:NUM_SEEDS]:
         print(f"    Pickups: {metrics.picked_up_tasks}/{metrics.total_tasks} ({metrics.pickup_rate:.1%})")
         print(f"    Completed: {metrics.completed_tasks}/{metrics.total_tasks} ({metrics.completion_rate:.1%})")
         print(f"    Pickup violations: {metrics.pickup_violated_rate:.1%}")
+
+        if TIMING_CFG.enabled:
+            collector.write_steps_csv(str(getattr(rp_logger, "run_dir", "runs")))
+            collector.write_summary_csv(str(getattr(rp_logger, "run_dir", "runs")))
 
     with open(metrics_log_path, "a", encoding="utf-8") as f:
         f.write("-" * 215 + "\n")
