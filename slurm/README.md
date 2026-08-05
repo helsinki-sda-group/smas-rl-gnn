@@ -25,6 +25,25 @@ cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
 sbatch --job-name=rp-eval-1hop slurm/run_eval_baselines.sbatch configs/rp_gnn_1hop-1.yaml
 ```
 
+### Baseline matrix evaluation on Mahti:
+
+```bash
+cd /projappl/project_2012159/kbocheni_temp/smas-rl-gnn
+sbatch slurm/run_eval_baselines_matrix.sbatch
+```
+
+Optional matrix subset example:
+
+```bash
+sbatch slurm/run_eval_baselines_matrix.sbatch --scenarios "randdest,wave" --resolvers "capacity,closest"
+```
+
+Matrix outputs are written under:
+
+```bash
+/scratch/project_2012159/kbocheni/smas-rl-gnn/eval_baseline_matrix/job_eval_baseline_matrix_<SLURM_JOB_ID>/
+```
+
 ## Usage
 
 ### Method Patterns
@@ -74,6 +93,7 @@ bash slurm/slurm_submit.sh 1hop_rnd 2hop --dry-run
 - `slurm_submit.ps1` - PowerShell helper for local testing/previewing
 - `run_train.sbatch` - Slurm job template
 - `run_eval_baselines.sbatch` - Slurm job template for `eval_baselines.py`
+- `run_eval_baselines_matrix.sbatch` - Slurm job template for scenario/resolver matrix baseline evaluations
 
 ## Features
 

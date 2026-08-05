@@ -199,6 +199,45 @@ metrics_log_path = with_instance_and_resolver_alias(
     route_construction=str(getattr(opt.env, "route_construction", "nearest")),
     admission_aware=ADMISSION_AWARE,
 )
+
+timing_steps_log_path = (
+    f"timing_steps_v{int(VICINITY_M)}_ms{MAX_STEPS}_mwd{int(MAX_WAIT_DELAY_S)}_"
+    f"mtd{int(MAX_TRAVEL_DELAY_S)}_cap{MAX_ROBOT_CAPACITY}.csv"
+)
+timing_steps_log_path = with_instance_and_resolver_alias(
+    timing_steps_log_path,
+    SUMO_CFG,
+    CONFLICT_RESOLUTION,
+    route_construction=str(getattr(opt.env, "route_construction", "nearest")),
+    admission_aware=ADMISSION_AWARE,
+)
+
+timing_summary_log_path = (
+    f"timing_summary_v{int(VICINITY_M)}_ms{MAX_STEPS}_mwd{int(MAX_WAIT_DELAY_S)}_"
+    f"mtd{int(MAX_TRAVEL_DELAY_S)}_cap{MAX_ROBOT_CAPACITY}.csv"
+)
+timing_summary_log_path = with_instance_and_resolver_alias(
+    timing_summary_log_path,
+    SUMO_CFG,
+    CONFLICT_RESOLUTION,
+    route_construction=str(getattr(opt.env, "route_construction", "nearest")),
+    admission_aware=ADMISSION_AWARE,
+)
+
+global_timing_meta = collect_run_metadata(
+    scenario=str(SUMO_CFG),
+    policy="all",
+    proposer="all",
+    resolver=str(CONFLICT_RESOLUTION),
+    protocol=("admission_aware" if ADMISSION_AWARE else "forced"),
+    inference_mode="na",
+    seed=0,
+    n_robots=int(R),
+    device="cpu",
+    internal_gnn_timing=bool(TIMING_CFG.internal_gnn),
+)
+global_timing_collector = TimingRunCollector(config=TIMING_CFG, static_meta=global_timing_meta)
+
 with open(metrics_log_path, "w", encoding="utf-8") as f:
     f.write(f"vicinity_m={VICINITY_M}, max_steps={MAX_STEPS}, max_wait_delay_s={MAX_WAIT_DELAY_S}, "
             f"max_travel_delay_s={MAX_TRAVEL_DELAY_S}, max_robot_capacity={MAX_ROBOT_CAPACITY}\n")
@@ -396,37 +435,42 @@ for seed in SEEDS[:NUM_SEEDS]:
             proposal_ns = int(timing.get("proposal_ns", 0)) + int(baseline_action_select_ns)
             decision_total_ns = int(timing.get("decision_total_ns", 0)) + int(baseline_action_select_ns)
             resolution_ns = int(timing.get("resolution_ns", 0))
+            commit_dispatch_ns = int(timing.get("commit_dispatch_ns", 0))
             simulation_ns = int(timing.get("simulation_ns", 0))
-            other_ns = max(0, decision_total_ns - proposal_ns - resolution_ns - simulation_ns)
-            warmup = int(0 < int(getattr(TIMING_CFG, "warmup_episodes", 0)))
-            collector.add_step(
-                {
-                    "method": "baseline",
-                    "policy": str(policy_name),
-                    "proposer": str(policy_name),
-                    "resolver": str(CONFLICT_RESOLUTION),
-                    "protocol": ("admission_aware" if ADMISSION_AWARE else "forced"),
-                    "inference_mode": "na",
-                    "seed": int(seed),
-                    "episode": 0,
-                    "decision_idx": int(decision_idx),
-                    "sim_time_s": float(getattr(controller, "_now", lambda: 0.0)()),
-                    "device": "cpu",
-                    "warmup": int(warmup),
-                    "n_robots": int(R),
-                    "n_tasks": int(len(getattr(controller, "_last_tasks", []) or [])),
-                    "n_candidate_pairs": int(timing.get("n_candidate_pairs", 0)),
-                    "n_nonempty_robots": int(timing.get("n_nonempty_robots", 0)),
-                    "n_proposals": int(timing.get("n_proposals", 0)),
-                    "n_bid_tasks": int(timing.get("n_bid_tasks", 0)),
-                    "n_conflicting_tasks": int(timing.get("n_conflicting_tasks", 0)),
-                    "proposal_ns": int(proposal_ns),
-                    "resolution_ns": int(resolution_ns),
-                    "simulation_ns": int(simulation_ns),
-                    "decision_total_ns": int(decision_total_ns),
-                    "other_ns": int(other_ns),
-                }
+            other_ns = max(
+                0,
+                decision_total_ns - proposal_ns - resolution_ns - commit_dispatch_ns - simulation_ns,
             )
+            warmup = int(0 < int(getattr(TIMING_CFG, "warmup_episodes", 0)))
+            timing_row = {
+                "method": "baseline",
+                "policy": str(policy_name),
+                "proposer": str(policy_name),
+                "resolver": str(CONFLICT_RESOLUTION),
+                "protocol": ("admission_aware" if ADMISSION_AWARE else "forced"),
+                "inference_mode": "na",
+                "seed": int(seed),
+                "episode": 0,
+                "decision_idx": int(decision_idx),
+                "sim_time_s": float(getattr(controller, "_now", lambda: 0.0)()),
+                "device": "cpu",
+                "warmup": int(warmup),
+                "n_robots": int(R),
+                "n_tasks": int(len(getattr(controller, "_last_tasks", []) or [])),
+                "n_candidate_pairs": int(timing.get("n_candidate_pairs", 0)),
+                "n_nonempty_robots": int(timing.get("n_nonempty_robots", 0)),
+                "n_proposals": int(timing.get("n_proposals", 0)),
+                "n_bid_tasks": int(timing.get("n_bid_tasks", 0)),
+                "n_conflicting_tasks": int(timing.get("n_conflicting_tasks", 0)),
+                "proposal_ns": int(proposal_ns),
+                "resolution_ns": int(resolution_ns),
+                "commit_dispatch_ns": int(commit_dispatch_ns),
+                "simulation_ns": int(simulation_ns),
+                "decision_total_ns": int(decision_total_ns),
+                "other_ns": int(other_ns),
+            }
+            collector.add_step(timing_row)
+            global_timing_collector.add_step(timing_row)
             decision_idx += 1
 
         # Get episode directory from logger
@@ -707,6 +751,12 @@ with open(summary_path, "a", encoding="utf-8") as f:
         f.write(f"  Macro Steps Done: {np.mean(macro_steps):.1f} ± {np.std(macro_steps):.1f}\n\n")
 
 print(f"\nMetrics saved to {metrics_log_path}")
+
+if TIMING_CFG.enabled:
+    timing_steps_written = global_timing_collector.write_steps_csv_path(timing_steps_log_path)
+    timing_summary_written = global_timing_collector.write_summary_csv_path(timing_summary_log_path)
+    print(f"Timing steps saved to {timing_steps_written}")
+    print(f"Timing summary saved to {timing_summary_written}")
 
  
 

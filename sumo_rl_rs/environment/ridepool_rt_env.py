@@ -322,6 +322,7 @@ class RidepoolRTEnv(gym.Env):
         proposal_ns_controller = int(controller_timing.get("proposal_ns", 0))
         proposal_ns = int(proposal_ns_controller)
         resolution_ns = int(controller_timing.get("resolution_ns", 0))
+        commit_dispatch_ns = int(controller_timing.get("commit_dispatch_ns", 0))
         simulation_ns = int(controller_timing.get("simulation_ns", 0))
 
         if proposal_ns <= 0 and resolution_ns <= 0 and simulation_ns <= 0:
@@ -412,6 +413,7 @@ class RidepoolRTEnv(gym.Env):
         info["timing"] = {
             "proposal_ns": int(proposal_ns),
             "resolution_ns": int(resolution_ns),
+            "commit_dispatch_ns": int(commit_dispatch_ns),
             "simulation_ns": int(simulation_ns),
             "decision_total_ns": int(decision_total_ns),
             "other_ns": 0,
@@ -452,6 +454,7 @@ class RidepoolRTEnv(gym.Env):
                 int(info["timing"]["decision_total_ns"])
                 - int(info["timing"]["proposal_ns"])
                 - int(info["timing"]["resolution_ns"])
+                - int(info["timing"].get("commit_dispatch_ns", 0))
                 - int(info["timing"]["simulation_ns"]),
             )
         )

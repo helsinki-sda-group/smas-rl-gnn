@@ -345,6 +345,7 @@ class RLControllerAdapter:
         self._last_timing: Dict[str, int] = {
             "proposal_ns": 0,
             "resolution_ns": 0,
+            "commit_dispatch_ns": 0,
             "simulation_ns": 0,
             "decision_total_ns": 0,
             "other_ns": 0,
@@ -1735,6 +1736,7 @@ class RLControllerAdapter:
         self._last_timing = {
             "proposal_ns": 0,
             "resolution_ns": 0,
+            "commit_dispatch_ns": 0,
             "simulation_ns": 0,
             "decision_total_ns": 0,
             "other_ns": 0,
@@ -3117,6 +3119,8 @@ class RLControllerAdapter:
         proposal_end_ns = proposal_start_ns
         resolution_start_ns = 0
         resolution_end_ns = 0
+        commit_dispatch_start_ns = 0
+        commit_dispatch_end_ns = 0
         simulation_start_ns = 0
         simulation_end_ns = 0
 
@@ -3340,6 +3344,7 @@ class RLControllerAdapter:
 
             # --- Build per-step "owners" map to guarantee global uniqueness ---
             # --- Build exclusive owners map: onboard > winner(this tick) > sticky(previous plan) ---
+            commit_dispatch_start_ns = time.perf_counter_ns()
             onboard_by_res: Dict[str, str] = {}
             for rid0 in robots:
                 for res_id in self._current_picked_reservation_ids(rid0, p2r, res_index):
@@ -3501,6 +3506,8 @@ class RLControllerAdapter:
                         )
                     # keep previous plan on failure
 
+            commit_dispatch_end_ns = time.perf_counter_ns()
+
         # 3) advance simulation and clean the shadow
         simulation_start_ns = time.perf_counter_ns()
         self._step()
@@ -3578,11 +3585,16 @@ class RLControllerAdapter:
         decision_total_ns = time.perf_counter_ns() - decision_total_start_ns
         proposal_ns = max(0, int(proposal_end_ns) - int(proposal_start_ns))
         resolution_ns = max(0, int(resolution_end_ns) - int(resolution_start_ns))
+        commit_dispatch_ns = max(0, int(commit_dispatch_end_ns) - int(commit_dispatch_start_ns))
         simulation_ns = max(0, int(simulation_end_ns) - int(simulation_start_ns))
-        other_ns = max(0, int(decision_total_ns) - proposal_ns - resolution_ns - simulation_ns)
+        other_ns = max(
+            0,
+            int(decision_total_ns) - proposal_ns - resolution_ns - commit_dispatch_ns - simulation_ns,
+        )
         self._last_timing = {
             "proposal_ns": int(proposal_ns),
             "resolution_ns": int(resolution_ns),
+            "commit_dispatch_ns": int(commit_dispatch_ns),
             "simulation_ns": int(simulation_ns),
             "decision_total_ns": int(decision_total_ns),
             "other_ns": int(other_ns),

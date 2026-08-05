@@ -4,6 +4,9 @@ set -euo pipefail
 # Run eval_baselines.py across scenario/resolver combinations.
 # For each pair, regenerate config files first (overwrite), then execute eval.
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT_DEFAULT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -17,9 +20,11 @@ Options:
   --policies "p1,p2,..."      Optional proposer policy list for generated YAML.
                                If omitted, generator uses canonical default policies
                                (alias duplicates greedy and predicted_reward_joint_competition are excluded).
+  --repo-root <path>           Repository root (default: auto-detected from script location)
   --base-yaml <path>           Base YAML template (default: configs/rp_gnn.yaml)
   --base-sumocfg <path>        Base SUMO cfg template (default: configs/small_net.sumocfg)
   --output-dir <path>          Generated config output dir (default: configs)
+  --sumoport <int>             Optional SUMO remote port forwarded to eval_baselines.py
   --python <bin>               Python executable (default: python)
   --dry-run                    Print commands without running eval.
   -h, --help                   Show this help.
@@ -27,6 +32,7 @@ Options:
 Notes:
   - Generated files are overwritten each time.
   - eval_baselines.py reads proposer policies from generated YAML baselines.policies.
+  - eval outputs are written under the current working directory.
 EOF
 }
 
@@ -35,9 +41,11 @@ RESOLVERS="capacity,closest,ctc,predicted_reward,predicted_reward_joint,hungaria
 ADMISSION_AWARE="false"
 ROUTE_CONSTRUCTION="all"
 POLICIES=""
-BASE_YAML="configs/rp_gnn.yaml"
-BASE_SUMOCFG="configs/small_net.sumocfg"
+REPO_ROOT="$REPO_ROOT_DEFAULT"
+BASE_YAML="${REPO_ROOT_DEFAULT}/configs/rp_gnn.yaml"
+BASE_SUMOCFG="${REPO_ROOT_DEFAULT}/configs/small_net.sumocfg"
 OUTPUT_DIR="configs"
+SUMO_PORT=""
 PYTHON_BIN="python"
 DRY_RUN=0
 
@@ -53,6 +61,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --policies)
       POLICIES="$2"
+      shift 2
+      ;;
+    --repo-root)
+      REPO_ROOT="$2"
       shift 2
       ;;
     --admission-aware)
@@ -75,6 +87,10 @@ while [[ $# -gt 0 ]]; do
       OUTPUT_DIR="$2"
       shift 2
       ;;
+    --sumoport)
+      SUMO_PORT="$2"
+      shift 2
+      ;;
     --python)
       PYTHON_BIN="$2"
       shift 2
@@ -94,6 +110,26 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+GENERATOR_SCRIPT="${REPO_ROOT}/scripts/generate_baseline_eval_configs.py"
+EVAL_SCRIPT="${REPO_ROOT}/eval_baselines.py"
+
+if [[ ! -f "$GENERATOR_SCRIPT" ]]; then
+  echo "[ERROR] Generator script not found: $GENERATOR_SCRIPT"
+  exit 1
+fi
+if [[ ! -f "$EVAL_SCRIPT" ]]; then
+  echo "[ERROR] Eval script not found: $EVAL_SCRIPT"
+  exit 1
+fi
+if [[ ! -f "$BASE_YAML" ]]; then
+  echo "[ERROR] Base YAML not found: $BASE_YAML"
+  exit 1
+fi
+if [[ ! -f "$BASE_SUMOCFG" ]]; then
+  echo "[ERROR] Base SUMO cfg not found: $BASE_SUMOCFG"
+  exit 1
+fi
 
 IFS=',' read -r -a SCENARIO_LIST <<< "$SCENARIOS"
 IFS=',' read -r -a RESOLVER_LIST <<< "$RESOLVERS"
@@ -129,9 +165,13 @@ echo "[INFO] scenarios: ${SCENARIOS}"
 echo "[INFO] resolvers: ${RESOLVERS}"
 echo "[INFO] admission-aware: ${ADMISSION_AWARE}"
 echo "[INFO] route-construction: ${ROUTE_CONSTRUCTION}"
+echo "[INFO] repo-root: ${REPO_ROOT}"
 echo "[INFO] base-yaml: ${BASE_YAML}"
 echo "[INFO] base-sumocfg: ${BASE_SUMOCFG}"
 echo "[INFO] output-dir: ${OUTPUT_DIR}"
+if [[ -n "$SUMO_PORT" ]]; then
+  echo "[INFO] sumoport: ${SUMO_PORT}"
+fi
 
 for scenario in "${SCENARIO_LIST[@]}"; do
   scenario="${scenario//[[:space:]]/}"
@@ -153,7 +193,7 @@ for scenario in "${SCENARIO_LIST[@]}"; do
         echo "[RUN] scenario=${scenario} resolver=${resolver} admission_aware=${admission} route_construction=${route_mode}"
 
         GEN_ARGS=(
-          "scripts/generate_baseline_eval_configs.py"
+          "$GENERATOR_SCRIPT"
           "--scenario" "$scenario"
           "--resolver" "$resolver"
           "--admission-aware" "$admission"
@@ -191,8 +231,13 @@ for scenario in "${SCENARIO_LIST[@]}"; do
           exit 1
         fi
 
-        echo "[RUN] $PYTHON_BIN eval_baselines.py --config $generated_yaml (admission_aware=$admission route_construction=$route_mode)"
-        "$PYTHON_BIN" eval_baselines.py --config "$generated_yaml"
+        EVAL_ARGS=("$EVAL_SCRIPT" "--config" "$generated_yaml")
+        if [[ -n "$SUMO_PORT" ]]; then
+          EVAL_ARGS+=("--sumoport" "$SUMO_PORT")
+        fi
+
+        echo "[RUN] $PYTHON_BIN ${EVAL_ARGS[*]} (admission_aware=$admission route_construction=$route_mode)"
+        "$PYTHON_BIN" "${EVAL_ARGS[@]}"
       done
     done
   done

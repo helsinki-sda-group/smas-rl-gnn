@@ -44,6 +44,7 @@ STEP_COLUMNS: List[str] = [
     "n_actor_candidates",
     "proposal_ns",
     "resolution_ns",
+    "commit_dispatch_ns",
     "simulation_ns",
     "decision_total_ns",
     "other_ns",
@@ -243,6 +244,7 @@ class TimingRunCollector:
         for ns_key in [
             "proposal_ns",
             "resolution_ns",
+            "commit_dispatch_ns",
             "simulation_ns",
             "decision_total_ns",
             "other_ns",
@@ -263,6 +265,7 @@ class TimingRunCollector:
                 _safe_int(merged.get("decision_total_ns", 0))
                 - _safe_int(merged.get("proposal_ns", 0))
                 - _safe_int(merged.get("resolution_ns", 0))
+                - _safe_int(merged.get("commit_dispatch_ns", 0))
                 - _safe_int(merged.get("simulation_ns", 0)),
             )
 
@@ -274,6 +277,13 @@ class TimingRunCollector:
             return ""
 
         path = Path(run_dir) / "timing_steps.csv"
+        return self.write_steps_csv_path(str(path))
+
+    def write_steps_csv_path(self, csv_path: str) -> str:
+        if not self.config.enabled:
+            return ""
+
+        path = Path(csv_path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
         with path.open("w", newline="", encoding="utf-8") as f:
@@ -308,6 +318,13 @@ class TimingRunCollector:
             return ""
 
         path = Path(run_dir) / "timing_summary.csv"
+        return self.write_summary_csv_path(str(path))
+
+    def write_summary_csv_path(self, csv_path: str) -> str:
+        if not self.config.enabled:
+            return ""
+
+        path = Path(csv_path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
         groups = self._group_rows()
@@ -323,6 +340,7 @@ class TimingRunCollector:
 
             prop = ns_array("proposal_ns")
             res = ns_array("resolution_ns")
+            commit = ns_array("commit_dispatch_ns")
             sim = ns_array("simulation_ns")
             dec = ns_array("decision_total_ns")
 
@@ -354,6 +372,7 @@ class TimingRunCollector:
 
             add_time_stats("proposal", prop)
             add_time_stats("resolution", res)
+            add_time_stats("commit_dispatch", commit)
             add_time_stats("simulation", sim)
             add_time_stats("decision", dec)
 
