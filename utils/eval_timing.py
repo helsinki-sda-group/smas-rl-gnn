@@ -42,10 +42,13 @@ STEP_COLUMNS: List[str] = [
     "n_actor_nodes",
     "n_actor_edges",
     "n_actor_candidates",
+    "env_pre_controller_ns",
+    "pre_step_sync_ns",
     "proposal_ns",
     "resolution_ns",
     "commit_dispatch_ns",
     "simulation_ns",
+    "post_step_logging_ns",
     "decision_total_ns",
     "other_ns",
     "gnn_obs_build_ns",
@@ -242,10 +245,13 @@ class TimingRunCollector:
         merged["sim_time_s"] = _safe_float(merged.get("sim_time_s", 0.0))
 
         for ns_key in [
+            "env_pre_controller_ns",
+            "pre_step_sync_ns",
             "proposal_ns",
             "resolution_ns",
             "commit_dispatch_ns",
             "simulation_ns",
+            "post_step_logging_ns",
             "decision_total_ns",
             "other_ns",
             "gnn_obs_build_ns",
@@ -263,10 +269,13 @@ class TimingRunCollector:
             merged["other_ns"] = max(
                 0,
                 _safe_int(merged.get("decision_total_ns", 0))
+                - _safe_int(merged.get("env_pre_controller_ns", 0))
+                - _safe_int(merged.get("pre_step_sync_ns", 0))
                 - _safe_int(merged.get("proposal_ns", 0))
                 - _safe_int(merged.get("resolution_ns", 0))
                 - _safe_int(merged.get("commit_dispatch_ns", 0))
                 - _safe_int(merged.get("simulation_ns", 0)),
+                - _safe_int(merged.get("post_step_logging_ns", 0))
             )
 
         self._compute_derived(merged)
@@ -342,6 +351,9 @@ class TimingRunCollector:
             res = ns_array("resolution_ns")
             commit = ns_array("commit_dispatch_ns")
             sim = ns_array("simulation_ns")
+            env_pre = ns_array("env_pre_controller_ns")
+            pre_sync = ns_array("pre_step_sync_ns")
+            post_log = ns_array("post_step_logging_ns")
             dec = ns_array("decision_total_ns")
 
             row: Dict[str, Any] = {
@@ -370,10 +382,13 @@ class TimingRunCollector:
                 row[f"{prefix}_p95_ms"] = q["p95"]
                 row[f"{prefix}_max_ms"] = q["max"]
 
+            add_time_stats("env_pre_controller", env_pre)
+            add_time_stats("pre_step_sync", pre_sync)
             add_time_stats("proposal", prop)
             add_time_stats("resolution", res)
             add_time_stats("commit_dispatch", commit)
             add_time_stats("simulation", sim)
+            add_time_stats("post_step_logging", post_log)
             add_time_stats("decision", dec)
 
             for col in [

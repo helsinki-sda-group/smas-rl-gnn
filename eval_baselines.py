@@ -432,14 +432,24 @@ for seed in SEEDS[:NUM_SEEDS]:
             obs, reward, done, trunc, info = env.step(action)
 
             timing = info.get("timing", {}) if isinstance(info, dict) else {}
+            env_pre_controller_ns = int(timing.get("env_pre_controller_ns", 0))
+            pre_step_sync_ns = int(timing.get("pre_step_sync_ns", 0))
             proposal_ns = int(timing.get("proposal_ns", 0)) + int(baseline_action_select_ns)
             decision_total_ns = int(timing.get("decision_total_ns", 0)) + int(baseline_action_select_ns)
             resolution_ns = int(timing.get("resolution_ns", 0))
             commit_dispatch_ns = int(timing.get("commit_dispatch_ns", 0))
             simulation_ns = int(timing.get("simulation_ns", 0))
+            post_step_logging_ns = int(timing.get("post_step_logging_ns", 0))
             other_ns = max(
                 0,
-                decision_total_ns - proposal_ns - resolution_ns - commit_dispatch_ns - simulation_ns,
+                decision_total_ns
+                - env_pre_controller_ns
+                - pre_step_sync_ns
+                - proposal_ns
+                - resolution_ns
+                - commit_dispatch_ns
+                - simulation_ns
+                - post_step_logging_ns,
             )
             warmup = int(0 < int(getattr(TIMING_CFG, "warmup_episodes", 0)))
             timing_row = {
@@ -462,10 +472,13 @@ for seed in SEEDS[:NUM_SEEDS]:
                 "n_proposals": int(timing.get("n_proposals", 0)),
                 "n_bid_tasks": int(timing.get("n_bid_tasks", 0)),
                 "n_conflicting_tasks": int(timing.get("n_conflicting_tasks", 0)),
+                "env_pre_controller_ns": int(env_pre_controller_ns),
+                "pre_step_sync_ns": int(pre_step_sync_ns),
                 "proposal_ns": int(proposal_ns),
                 "resolution_ns": int(resolution_ns),
                 "commit_dispatch_ns": int(commit_dispatch_ns),
                 "simulation_ns": int(simulation_ns),
+                "post_step_logging_ns": int(post_step_logging_ns),
                 "decision_total_ns": int(decision_total_ns),
                 "other_ns": int(other_ns),
             }

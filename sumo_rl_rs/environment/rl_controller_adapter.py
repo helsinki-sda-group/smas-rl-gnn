@@ -343,10 +343,12 @@ class RLControllerAdapter:
             "competition_single_owner_count": 0.0,
         }
         self._last_timing: Dict[str, int] = {
+            "pre_step_sync_ns": 0,
             "proposal_ns": 0,
             "resolution_ns": 0,
             "commit_dispatch_ns": 0,
             "simulation_ns": 0,
+            "post_step_logging_ns": 0,
             "decision_total_ns": 0,
             "other_ns": 0,
         }
@@ -1734,10 +1736,12 @@ class RLControllerAdapter:
         self._terminal_penalties_applied = False
         self._rew_accum = self._make_rew_accum()
         self._last_timing = {
+            "pre_step_sync_ns": 0,
             "proposal_ns": 0,
             "resolution_ns": 0,
             "commit_dispatch_ns": 0,
             "simulation_ns": 0,
+            "post_step_logging_ns": 0,
             "decision_total_ns": 0,
             "other_ns": 0,
         }
@@ -3123,10 +3127,15 @@ class RLControllerAdapter:
         commit_dispatch_end_ns = 0
         simulation_start_ns = 0
         simulation_end_ns = 0
+        pre_step_sync_start_ns = time.perf_counter_ns()
+        pre_step_sync_end_ns = pre_step_sync_start_ns
+        post_step_logging_start_ns = 0
+        post_step_logging_end_ns = 0
 
         robots = self.get_robots()
         res_index = self._reservation_index()
         p2r = self._person_to_res_index(res_index)
+        pre_step_sync_end_ns = time.perf_counter_ns()
 
         if allow_redispatch:
 
@@ -3533,6 +3542,7 @@ class RLControllerAdapter:
                     per_robot[rid] = float(per_robot.get(rid, 0.0)) + float(val)
             self._terminal_penalties_applied = True
         if self.logger:
+            post_step_logging_start_ns = time.perf_counter_ns()
             tnow = self._now()
             total = 0.0
             pickups = dropoffs = 0
@@ -3580,22 +3590,33 @@ class RLControllerAdapter:
                     duration=float(self._step_count),
                 )
                 self._episode_closed = True
+            post_step_logging_end_ns = time.perf_counter_ns()
 
 
         decision_total_ns = time.perf_counter_ns() - decision_total_start_ns
+        pre_step_sync_ns = max(0, int(pre_step_sync_end_ns) - int(pre_step_sync_start_ns))
         proposal_ns = max(0, int(proposal_end_ns) - int(proposal_start_ns))
         resolution_ns = max(0, int(resolution_end_ns) - int(resolution_start_ns))
         commit_dispatch_ns = max(0, int(commit_dispatch_end_ns) - int(commit_dispatch_start_ns))
         simulation_ns = max(0, int(simulation_end_ns) - int(simulation_start_ns))
+        post_step_logging_ns = max(0, int(post_step_logging_end_ns) - int(post_step_logging_start_ns))
         other_ns = max(
             0,
-            int(decision_total_ns) - proposal_ns - resolution_ns - commit_dispatch_ns - simulation_ns,
+            int(decision_total_ns)
+            - pre_step_sync_ns
+            - proposal_ns
+            - resolution_ns
+            - commit_dispatch_ns
+            - simulation_ns
+            - post_step_logging_ns,
         )
         self._last_timing = {
+            "pre_step_sync_ns": int(pre_step_sync_ns),
             "proposal_ns": int(proposal_ns),
             "resolution_ns": int(resolution_ns),
             "commit_dispatch_ns": int(commit_dispatch_ns),
             "simulation_ns": int(simulation_ns),
+            "post_step_logging_ns": int(post_step_logging_ns),
             "decision_total_ns": int(decision_total_ns),
             "other_ns": int(other_ns),
         }

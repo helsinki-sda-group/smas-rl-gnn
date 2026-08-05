@@ -277,6 +277,7 @@ class RidepoolRTEnv(gym.Env):
 
         t_decision_start = time.perf_counter_ns()
         obs_build_ns = int(max(0, self._pending_obs_build_ns))
+        env_pre_controller_start_ns = time.perf_counter_ns()
 
         # (1) apply chosen assignments now
         decision_action_mask = self.action_mask()
@@ -300,10 +301,13 @@ class RidepoolRTEnv(gym.Env):
 
         selected_task_margins = self._selected_task_margins(action)
         selected_task_raw_logits = self._selected_task_raw_logits(action)
+        env_pre_controller_ns = time.perf_counter_ns() - env_pre_controller_start_ns
 
         proposal_ns = 0
         resolution_ns = 0
+        pre_step_sync_ns = 0
         simulation_ns = 0
+        post_step_logging_ns = 0
 
         t_resolve_start = time.perf_counter_ns()
         step_out = self.controller.apply_and_step(
@@ -323,7 +327,9 @@ class RidepoolRTEnv(gym.Env):
         proposal_ns = int(proposal_ns_controller)
         resolution_ns = int(controller_timing.get("resolution_ns", 0))
         commit_dispatch_ns = int(controller_timing.get("commit_dispatch_ns", 0))
+        pre_step_sync_ns = int(controller_timing.get("pre_step_sync_ns", 0))
         simulation_ns = int(controller_timing.get("simulation_ns", 0))
+        post_step_logging_ns = int(controller_timing.get("post_step_logging_ns", 0))
 
         if proposal_ns <= 0 and resolution_ns <= 0 and simulation_ns <= 0:
             # Fallback only if controller-level phase timings are unavailable.
@@ -411,10 +417,13 @@ class RidepoolRTEnv(gym.Env):
             self._episode_reward = 0
 
         info["timing"] = {
+            "env_pre_controller_ns": int(env_pre_controller_ns),
+            "pre_step_sync_ns": int(pre_step_sync_ns),
             "proposal_ns": int(proposal_ns),
             "resolution_ns": int(resolution_ns),
             "commit_dispatch_ns": int(commit_dispatch_ns),
             "simulation_ns": int(simulation_ns),
+            "post_step_logging_ns": int(post_step_logging_ns),
             "decision_total_ns": int(decision_total_ns),
             "other_ns": 0,
             "n_candidate_pairs": int(n_candidate_pairs),
@@ -452,10 +461,13 @@ class RidepoolRTEnv(gym.Env):
             max(
                 0,
                 int(info["timing"]["decision_total_ns"])
+                - int(info["timing"].get("env_pre_controller_ns", 0))
+                - int(info["timing"].get("pre_step_sync_ns", 0))
                 - int(info["timing"]["proposal_ns"])
                 - int(info["timing"]["resolution_ns"])
                 - int(info["timing"].get("commit_dispatch_ns", 0))
                 - int(info["timing"]["simulation_ns"]),
+                - int(info["timing"].get("post_step_logging_ns", 0))
             )
         )
 
