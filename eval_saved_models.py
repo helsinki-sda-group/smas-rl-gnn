@@ -888,6 +888,14 @@ def main():
     
     print(f"\n{'='*80}")
     print(f"[OK] Evaluation complete. Processed {len(results)} evaluations")
+
+    timing_steps_path = ""
+    timing_summary_path = ""
+    if timing_cfg.enabled:
+        timing_steps_path = timing_collector.write_steps_csv(output_base)
+        timing_summary_path = timing_collector.write_summary_csv(output_base)
+        print(f"[OK] Saved timing steps to {timing_steps_path}")
+        print(f"[OK] Saved timing summary to {timing_summary_path}")
     
     # Create results DataFrame
     if results:
@@ -902,11 +910,11 @@ def main():
         print("\nGenerating plots...")
         plot_evaluation_results(results_df, output_base, ma_window=int(getattr(args, "ma_window", 10)))
 
-    if timing_cfg.enabled:
-        steps_path = timing_collector.write_steps_csv(output_base)
-        summary_path = timing_collector.write_summary_csv(output_base)
-        print(f"[OK] Saved timing steps to {steps_path}")
-        print(f"[OK] Saved timing summary to {summary_path}")
+    if timing_cfg.enabled and (not timing_steps_path or not timing_summary_path):
+        timing_steps_path = timing_collector.write_steps_csv(output_base)
+        timing_summary_path = timing_collector.write_summary_csv(output_base)
+        print(f"[OK] Saved timing steps to {timing_steps_path}")
+        print(f"[OK] Saved timing summary to {timing_summary_path}")
     
     print(f"\n[OK] All results saved to {output_base}")
     tee.close()
