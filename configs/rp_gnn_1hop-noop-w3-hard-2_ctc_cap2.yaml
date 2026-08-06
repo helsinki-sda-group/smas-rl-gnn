@@ -1,5 +1,5 @@
 ﻿env:
-  sumo_cfg: /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/configs/small_net_cap2.sumocfg
+  sumo_cfg: /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/configs/small_net_cap2_hard.sumocfg
   use_gui: false
   R: 6
   K_max: 3
@@ -106,9 +106,9 @@ ppo:
   n_epochs: 5
   total_timesteps: 200000
 logging:
-  run_name: 1hop_noop-w3-1_ctc_cap2
+  run_name: 1hop_noop-w3-hard-2_ctc_cap2
   out_dir: /scratch/project_2012159/kbocheni/smas-rl-gnn/runs
-  model_save_dir: /scratch/project_2012159/kbocheni/smas-rl-gnn/runs/1hop_noop-w3-1_ctc_cap2/!saved_models
+  model_save_dir: /scratch/project_2012159/kbocheni/smas-rl-gnn/runs/1hop_noop-w3-hard-2_ctc_cap2/!saved_models
   log_conflict_metrics: true
   prune_episode_dir_after_metrics: true
   extended_quality_metrics: true

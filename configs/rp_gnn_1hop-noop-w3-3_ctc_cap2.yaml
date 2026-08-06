@@ -129,6 +129,7 @@ baselines:
   - pickup_deadline_distance
   - predicted_reward
   - predicted_reward_joint
+  - proposal_joint_competition
   num_seeds: 10
 sorted: false
 sumoport: 8813
