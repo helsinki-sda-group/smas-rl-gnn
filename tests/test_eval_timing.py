@@ -25,6 +25,7 @@ class EvalTimingTests(unittest.TestCase):
             "decision_total_ns",
             "other_ns",
             "gnn_obs_build_ns",
+            "candidate_filter_ns",
             "gnn_tensor_prepare_ns",
             "gnn_graph_prepare_ns",
             "gnn_policy_total_ns",
@@ -75,6 +76,7 @@ class EvalTimingTests(unittest.TestCase):
                 "simulation_ns": 300,
                 "decision_total_ns": 1700,
                 "gnn_obs_build_ns": 100,
+                "candidate_filter_ns": 25,
                 "gnn_tensor_prepare_ns": 100,
                 "gnn_graph_prepare_ns": 100,
                 "gnn_actor_ns": 300,
@@ -112,6 +114,7 @@ class EvalTimingTests(unittest.TestCase):
                 "simulation_ns": 10,
                 "decision_total_ns": 30,
                 "n_actor_graphs": 0,
+                "candidate_filter_ns": 0,
             }
         )
         row_zero = collector.rows[-1]

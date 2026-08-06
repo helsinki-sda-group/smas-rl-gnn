@@ -59,6 +59,7 @@ class RidepoolRTEnv(gym.Env):
         self._macro_step = 0
         self.timing_collector = None
         self._pending_obs_build_ns = 0
+        self._pending_candidate_filter_ns = 0
 
         # explicit no-op slot at the END of each robot's action vector
         self._noop_index = self.K_max
@@ -92,8 +93,10 @@ class RidepoolRTEnv(gym.Env):
 
     # --- helpers
     def _sync_from_controller(self) -> Dict[str, Any]:
+        t_candidate_start = time.perf_counter_ns()
         robots = self.controller.get_robots()
         tasks_viable, cand_lists = self.controller.get_tasks_and_candidate_lists(self.K_max)
+        candidate_filter_ns = time.perf_counter_ns() - t_candidate_start
 
         # Trim robots to R; pad with None to keep fixed shapes
         robots = robots[: self.R]
@@ -105,7 +108,12 @@ class RidepoolRTEnv(gym.Env):
             cand_lists += [[] for _ in range(self.R - len(cand_lists))]
         cand_lists = cand_lists[: self.R]
 
-        return {"robots": robots, "tasks": tasks_viable, "cand_lists": cand_lists}
+        return {
+            "robots": robots,
+            "tasks": tasks_viable,
+            "cand_lists": cand_lists,
+            "candidate_filter_ns": int(max(0, candidate_filter_ns)),
+        }
 
 
     def _build_obs(self):
@@ -113,7 +121,9 @@ class RidepoolRTEnv(gym.Env):
         robots = snap["robots"]
         tasks = snap["tasks"]
         cand_lists = snap["cand_lists"]
+        candidate_filter_ns = int(max(0, snap.get("candidate_filter_ns", 0)))
 
+        t_obs_core_start = time.perf_counter_ns()
         obs, cand_task_ids = build_padded_ego_batch(
             robots=robots,
             tasks=tasks,
@@ -130,9 +140,12 @@ class RidepoolRTEnv(gym.Env):
             edge_features=self.edge_features,
             # global_stats_fn=self.global_stats_fn,  # currently unused
         )
+        obs_core_ns = time.perf_counter_ns() - t_obs_core_start
         # Save the exact ids used for slots this step (for action mapping)
         self._last_cand_task_ids = cand_task_ids
         self._last_robot_ids = list(robots)
+        self._pending_obs_build_ns = int(max(0, obs_core_ns))
+        self._pending_candidate_filter_ns = int(max(0, candidate_filter_ns))
 
         x = obs["x"]
 
@@ -153,9 +166,7 @@ class RidepoolRTEnv(gym.Env):
         self.controller.reset()
         self._episode_reward = 0
         self._macro_step = 0
-        t_obs_start = time.perf_counter_ns()
         obs = self._build_obs()
-        self._pending_obs_build_ns = time.perf_counter_ns() - t_obs_start
         info = {"action_mask": self.action_mask()}
         return obs, info
     
@@ -277,6 +288,7 @@ class RidepoolRTEnv(gym.Env):
 
         t_decision_start = time.perf_counter_ns()
         obs_build_ns = int(max(0, self._pending_obs_build_ns))
+        candidate_filter_ns = int(max(0, self._pending_candidate_filter_ns))
         env_pre_controller_start_ns = time.perf_counter_ns()
 
         # (1) apply chosen assignments now
@@ -445,6 +457,7 @@ class RidepoolRTEnv(gym.Env):
             "n_conflicting_tasks": int(n_conflicting_tasks),
             "gnn_action_mapping_ns": int(action_mapping_ns),
             "gnn_obs_build_ns": int(obs_build_ns),
+            "candidate_filter_ns": int(candidate_filter_ns),
             "controller_proposal_ns": int(proposal_ns_controller),
         }
 
@@ -456,6 +469,7 @@ class RidepoolRTEnv(gym.Env):
         if policy_timing is not None:
             info["timing"]["proposal_ns"] = int(
                 max(0, obs_build_ns)
+                + int(max(0, candidate_filter_ns))
                 + int(max(0, policy_timing.get("gnn_tensor_prepare_ns", 0)))
                 + int(max(0, policy_timing.get("gnn_policy_total_ns", 0)))
                 + int(max(0, policy_timing.get("gnn_action_ns", 0)))
@@ -465,6 +479,7 @@ class RidepoolRTEnv(gym.Env):
         else:
             info["timing"]["proposal_ns"] = int(
                 max(0, obs_build_ns)
+                + int(max(0, candidate_filter_ns))
                 + int(max(0, action_mapping_ns))
                 + int(max(0, proposal_ns_controller))
             )

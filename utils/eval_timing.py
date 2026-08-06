@@ -52,6 +52,7 @@ STEP_COLUMNS: List[str] = [
     "decision_total_ns",
     "other_ns",
     "gnn_obs_build_ns",
+    "candidate_filter_ns",
     "gnn_tensor_prepare_ns",
     "gnn_graph_prepare_ns",
     "gnn_policy_total_ns",
@@ -395,6 +396,7 @@ class TimingRunCollector:
 
             for col in [
                 "gnn_obs_build_ns",
+                "candidate_filter_ns",
                 "gnn_tensor_prepare_ns",
                 "gnn_graph_prepare_ns",
                 "gnn_policy_total_ns",
