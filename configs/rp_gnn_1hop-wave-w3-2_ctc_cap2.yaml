@@ -13,7 +13,7 @@
   max_wait_delay_s: 300.0
   max_travel_delay_s: 240.0
   max_robot_capacity: 2
-  route_construction: nearest
+  route_construction: reward_aligned
   route_exhaustive_max_stops: 8
   route_construction_debug: false
   admission_aware: true
