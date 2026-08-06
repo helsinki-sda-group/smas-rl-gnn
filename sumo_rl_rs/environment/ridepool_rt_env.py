@@ -328,7 +328,11 @@ class RidepoolRTEnv(gym.Env):
         resolution_ns = int(controller_timing.get("resolution_ns", 0))
         commit_dispatch_ns = int(controller_timing.get("commit_dispatch_ns", 0))
         pre_step_sync_ns = int(controller_timing.get("pre_step_sync_ns", 0))
-        simulation_ns = int(controller_timing.get("simulation_ns", 0))
+        # Controller-level residual time is dominated by inner tick orchestration,
+        # so attribute it to simulation for macro-step accounting.
+        simulation_ns = int(controller_timing.get("simulation_ns", 0)) + int(
+            controller_timing.get("other_ns", 0)
+        )
         post_step_logging_ns = int(controller_timing.get("post_step_logging_ns", 0))
 
         if proposal_ns <= 0 and resolution_ns <= 0 and simulation_ns <= 0:
@@ -357,7 +361,10 @@ class RidepoolRTEnv(gym.Env):
             noop = [None] * self.R
             step_out = self.controller.apply_and_step(noop, allow_redispatch = False)
             loop_timing = getattr(self.controller, "_last_timing", {}) or {}
-            simulation_ns += int(loop_timing.get("simulation_ns", 0))
+            # For no-op inner ticks, count controller residual as simulation time.
+            simulation_ns += int(loop_timing.get("simulation_ns", 0)) + int(
+                loop_timing.get("other_ns", 0)
+            )
             total_reward += float(step_out.get("sum_reward", 0.0))
             terminated = bool(self.controller.is_episode_done())
             last_info = {k: v for k, v in step_out.items() if k != "sum_reward"}
@@ -466,7 +473,7 @@ class RidepoolRTEnv(gym.Env):
                 - int(info["timing"]["proposal_ns"])
                 - int(info["timing"]["resolution_ns"])
                 - int(info["timing"].get("commit_dispatch_ns", 0))
-                - int(info["timing"]["simulation_ns"]),
+                - int(info["timing"]["simulation_ns"])
                 - int(info["timing"].get("post_step_logging_ns", 0))
             )
         )

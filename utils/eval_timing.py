@@ -274,7 +274,7 @@ class TimingRunCollector:
                 - _safe_int(merged.get("proposal_ns", 0))
                 - _safe_int(merged.get("resolution_ns", 0))
                 - _safe_int(merged.get("commit_dispatch_ns", 0))
-                - _safe_int(merged.get("simulation_ns", 0)),
+                - _safe_int(merged.get("simulation_ns", 0))
                 - _safe_int(merged.get("post_step_logging_ns", 0))
             )
 
@@ -355,6 +355,7 @@ class TimingRunCollector:
             pre_sync = ns_array("pre_step_sync_ns")
             post_log = ns_array("post_step_logging_ns")
             dec = ns_array("decision_total_ns")
+            other = ns_array("other_ns")
 
             row: Dict[str, Any] = {
                 "method": key[0],
@@ -390,6 +391,7 @@ class TimingRunCollector:
             add_time_stats("simulation", sim)
             add_time_stats("post_step_logging", post_log)
             add_time_stats("decision", dec)
+            add_time_stats("other", other)
 
             for col in [
                 "gnn_obs_build_ns",
