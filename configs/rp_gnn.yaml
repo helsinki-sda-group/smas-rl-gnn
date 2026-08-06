@@ -118,7 +118,7 @@ logging:
   extended_quality_include_decision_level: false
 
 timing:
-  enabled: false
+  enabled: true
   internal_gnn: true
   warmup_episodes: 0
 
@@ -129,6 +129,8 @@ baselines:
   - random
   - unique
   - pickup_distance
+  - pickup_deadline
+  - pickup_deadline_distance
   - predicted_reward
   - predicted_reward_joint
   - proposal_joint_competition
