@@ -361,6 +361,11 @@ class RidepoolRTEnv(gym.Env):
             noop = [None] * self.R
             step_out = self.controller.apply_and_step(noop, allow_redispatch = False)
             loop_timing = getattr(self.controller, "_last_timing", {}) or {}
+            pre_step_sync_ns += int(loop_timing.get("pre_step_sync_ns", 0))
+            proposal_ns += int(loop_timing.get("proposal_ns", 0))
+            resolution_ns += int(loop_timing.get("resolution_ns", 0))
+            commit_dispatch_ns += int(loop_timing.get("commit_dispatch_ns", 0))
+            post_step_logging_ns += int(loop_timing.get("post_step_logging_ns", 0))
             # For no-op inner ticks, count controller residual as simulation time.
             simulation_ns += int(loop_timing.get("simulation_ns", 0)) + int(
                 loop_timing.get("other_ns", 0)
