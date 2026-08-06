@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -163,6 +164,44 @@ def _load_and_patch_sumocfg(base_sumocfg: Path, route_file_name: str) -> ET.Elem
     return tree
 
 
+def _copy_companion_if_needed(*, source_dir: Path, output_dir: Path, rel_path: str) -> None:
+    rel = str(rel_path or "").strip()
+    if not rel:
+        return
+    src = Path(rel)
+    if not src.is_absolute():
+        src = source_dir / rel
+    if not src.exists():
+        raise FileNotFoundError(f"SUMO companion file not found: {src}")
+
+    dst = output_dir / Path(rel).name
+    if src.resolve() == dst.resolve():
+        return
+    shutil.copy2(src, dst)
+
+
+def _copy_sumocfg_companions(*, sumo_tree: ET.ElementTree, source_dir: Path, output_dir: Path) -> None:
+    root = sumo_tree.getroot()
+
+    def _node_value(xpath: str) -> str:
+        node = root.find(xpath)
+        if node is None:
+            return ""
+        return str(node.attrib.get("value", "")).strip()
+
+    for xpath in ["./input/net-file", "./input/route-files", "./gui_only/gui-settings-file"]:
+        val = _node_value(xpath)
+        if val:
+            _copy_companion_if_needed(source_dir=source_dir, output_dir=output_dir, rel_path=val)
+
+    additional = _node_value("./input/additional-files")
+    if additional:
+        for part in additional.split(","):
+            rel = part.strip()
+            if rel:
+                _copy_companion_if_needed(source_dir=source_dir, output_dir=output_dir, rel_path=rel)
+
+
 def generate_configs(
     *,
     scenario: str,
@@ -203,6 +242,11 @@ def generate_configs(
 
     sumo_tree = _load_and_patch_sumocfg(base_sumocfg, route_file_name)
     sumo_tree.write(generated_sumocfg_path, encoding="UTF-8", xml_declaration=True)
+    _copy_sumocfg_companions(
+        sumo_tree=sumo_tree,
+        source_dir=base_sumocfg.parent,
+        output_dir=configs_dir,
+    )
 
     cfg = OmegaConf.load(base_yaml)
     cfg.env.sumo_cfg = str(Path(configs_dir.name) / generated_sumocfg_name).replace("\\", "/")
