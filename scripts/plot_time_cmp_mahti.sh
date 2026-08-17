@@ -114,7 +114,9 @@ if [[ ! -d "$BASELINE_JOB_DIR" ]]; then
   exit 1
 fi
 
-mapfile -t RL_EVAL_DIRS < <(find "$RL_RUN_DIR" -maxdepth 1 -type d -name 'evaluation_*' | sort)
+# Match evaluation_<date>_<time> output dirs only (e.g. evaluation_20260806_133415);
+# excludes sibling dirs like evaluation_runs/ (raw per-episode scratch space, not a run output).
+mapfile -t RL_EVAL_DIRS < <(find "$RL_RUN_DIR" -maxdepth 1 -type d -regextype posix-extended -regex '.*/evaluation_[0-9]{8}_[0-9]{6}' | sort)
 if [[ ${#RL_EVAL_DIRS[@]} -eq 0 ]]; then
   echo "[ERROR] No evaluation_<date>_<time> directories found under: $RL_RUN_DIR"
   exit 1
