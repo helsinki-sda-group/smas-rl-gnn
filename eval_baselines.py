@@ -472,6 +472,7 @@ for seed in SEEDS[:NUM_SEEDS]:
                 "n_proposals": int(timing.get("n_proposals", 0)),
                 "n_bid_tasks": int(timing.get("n_bid_tasks", 0)),
                 "n_conflicting_tasks": int(timing.get("n_conflicting_tasks", 0)),
+                "n_conflicting_task_proposals": int(timing.get("n_conflicting_task_proposals", 0)),
                 "env_pre_controller_ns": int(env_pre_controller_ns),
                 "pre_step_sync_ns": int(pre_step_sync_ns),
                 "proposal_ns": int(proposal_ns),

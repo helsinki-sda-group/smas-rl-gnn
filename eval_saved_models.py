@@ -319,6 +319,7 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
                 'n_proposals': int(timing.get('n_proposals', 0)),
                 'n_bid_tasks': int(timing.get('n_bid_tasks', 0)),
                 'n_conflicting_tasks': int(timing.get('n_conflicting_tasks', 0)),
+                'n_conflicting_task_proposals': int(timing.get('n_conflicting_task_proposals', 0)),
                 'n_actor_graphs': int(timing.get('n_actor_graphs', 0)),
                 'n_actor_nonempty_graphs': int(timing.get('n_actor_nonempty_graphs', 0)),
                 'n_actor_nodes': int(timing.get('n_actor_nodes', 0)),

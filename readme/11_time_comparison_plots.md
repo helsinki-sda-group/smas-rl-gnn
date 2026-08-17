@@ -57,7 +57,8 @@ This produces, per `<scenario>/time_cmp/<route>_<protocol>/`:
 - `decision_phase_totals_overall.png`
 - diagnostics (with `--time-diagnose-proposer-resolver`):
   `proposal_latency_vs_candidate_workload.png`,
-  `proposal_latency_by_proposer_and_resolver.png`, matched-replicate/spread plots.
+  `proposal_latency_by_proposer_and_resolver.png`,
+  `resolution_latency_normalized_by_conflict_workload.png`, matched-replicate/spread plots.
 - `time_cmp_data.csv`, `time_phase_data.csv` (audit CSVs)
 
 ## Adding the RL overlay: `--rl-eval-dirs`
@@ -206,3 +207,25 @@ See also [plot_metrics_wide.py](../plot_metrics_wide.py) (`load_rl_time_overlay`
 `_load_rl_run`, `_rolling_best_window_rows`, `plot_time_cmp`,
 `plot_time_phase_breakdown_mean`, `plot_time_phase_totals`) and
 [scripts/plot_time_cmp_mahti.sh](../scripts/plot_time_cmp_mahti.sh).
+## Resolution latency normalized by conflict workload
+
+`--time-diagnose-proposer-resolver` also emits
+`resolution_latency_normalized_by_conflict_workload.png`, with resolution latency
+normalized by three conflict-workload quantities:
+
+- **per bucket**: $T_{\text{resolution}} / N_{\text{buckets}}$, where a "bucket" is a
+  distinct proposed task (one or more robots proposed it).
+- **per conflict**: $T_{\text{resolution}} / N_{\text{conflicts}}$, where a "conflict"
+  is a bucket with more than one competing proposal.
+- **per conflict competitor**: $T_{\text{resolution}} / \sum_{j \in \text{conflicts}} |R_j|$,
+  where $|R_j|$ is the number of robots competing for contested task $j$ -- this
+  accounts for conflict *size*, not just conflict *count*.
+
+These counters ($N_{\text{buckets}}$, $N_{\text{conflicts}}$,
+$\sum_j |R_j|$) are computed per decision in
+[ridepool_rt_env.py](../sumo_rl_rs/environment/ridepool_rt_env.py) (`n_bid_tasks`,
+`n_conflicting_tasks`, `n_conflicting_task_proposals`), logged into
+`timing_steps.csv`/`timing_summary.csv` by both `eval_baselines.py` and
+`eval_saved_models.py`, and pooled per proposer/resolver group in
+`plot_metrics_wide.py` (`_build_proposal_resolver_diagnostics`). The same values are
+also written to `proposal_resolver_diagnostics_groups.csv` for auditing.

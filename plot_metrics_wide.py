@@ -4096,6 +4096,17 @@ def _build_proposal_resolver_diagnostics(
         resolution_pooled = _pooled_mean_from_total(rows, total_field="resolution_total_ms")
         decision_total_pooled = _pooled_mean_from_total(rows, total_field="decision_total_ms")
 
+        # Conflict-resolution workload: buckets (distinct proposed tasks), conflicts (buckets with
+        # >1 competing proposal), and total competing proposals across conflicting buckets (sum_j |R_j|).
+        n_buckets_pooled = _pooled_mean_from_total_or_mean(rows, total_field="n_bid_tasks_total", mean_field="n_bid_tasks_mean")
+        n_conflicts_pooled = _pooled_mean_from_total_or_mean(rows, total_field="n_conflicting_tasks_total", mean_field="n_conflicting_tasks_mean")
+        n_conflict_proposals_pooled = _pooled_mean_from_total_or_mean(
+            rows, total_field="n_conflicting_task_proposals_total", mean_field="n_conflicting_task_proposals_mean"
+        )
+        resolution_ms_per_bucket = _safe_ratio(resolution_pooled, n_buckets_pooled)
+        resolution_ms_per_conflict = _safe_ratio(resolution_pooled, n_conflicts_pooled)
+        resolution_ms_per_conflict_competitor = _safe_ratio(resolution_pooled, n_conflict_proposals_pooled)
+
         workload = _diagnostic_workload_values(matched_metric_row, proposal_pooled)
         workload = _augment_workload_with_timing_observed(
             workload=workload,
@@ -4126,6 +4137,12 @@ def _build_proposal_resolver_diagnostics(
                 "proposal_mean_max_ms": proposal_max,
                 "resolution_mean_pooled_ms": resolution_pooled,
                 "decision_total_mean_pooled_ms": decision_total_pooled,
+                "n_buckets_mean_pooled": n_buckets_pooled,
+                "n_conflicts_mean_pooled": n_conflicts_pooled,
+                "n_conflict_competitors_mean_pooled": n_conflict_proposals_pooled,
+                "resolution_ms_per_bucket": resolution_ms_per_bucket,
+                "resolution_ms_per_conflict": resolution_ms_per_conflict,
+                "resolution_ms_per_conflict_competitor": resolution_ms_per_conflict_competitor,
                 **workload,
             }
         )
@@ -4381,6 +4398,61 @@ def _plot_proposal_normalized_panels(group_rows: list[dict[str, object]], output
     fig.text(0.01, 0.01, "Normalized ratios are descriptive diagnostics and do not represent algorithmic complexity estimates.", fontsize=8, alpha=0.85)
     fig.tight_layout(rect=(0.0, 0.03, 0.84, 0.97))
     out = output_dir / "proposal_latency_normalized_by_workload.png"
+    fig.savefig(out, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
+def _plot_resolution_workload_panels(group_rows: list[dict[str, object]], output_dir: Path) -> Path:
+    """Resolution latency normalized by three conflict-workload quantities:
+    per bucket (distinct proposed tasks), per conflict (contested buckets), and per
+    conflict competitor (total competing proposals across contested buckets, sum_j |R_j|)."""
+    resolvers = _ordered_resolvers([str(row.get("resolver") or "") for row in group_rows])
+    proposers = sorted({str(row.get("proposer") or "") for row in group_rows})
+    resolver_colors = _series_color_map(resolvers, preferred=RESOLVER_COLOR_MAP)
+    lookup = {(str(row.get("proposer")), str(row.get("resolver"))): row for row in group_rows}
+    fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(19.5, 5.3), squeeze=False)
+    fields = [
+        ("resolution_ms_per_bucket", "Resolution ms per bucket (distinct proposed tasks)"),
+        ("resolution_ms_per_conflict", "Resolution ms per conflict (contested buckets)"),
+        ("resolution_ms_per_conflict_competitor", "Resolution ms per conflict competitor (sum |R_j|)"),
+    ]
+    bar_width = GROUPED_BAR_WIDTH
+    base_positions = list(range(len(proposers)))
+    offsets = [(idx - (len(resolvers) - 1) / 2.0) * bar_width for idx in range(len(resolvers))]
+    for axis, (field, ylabel) in zip(axes[0], fields):
+        for idx, resolver in enumerate(resolvers):
+            vals: list[float] = []
+            xpos: list[float] = []
+            for pos, proposer in enumerate(proposers):
+                row = lookup.get((proposer, resolver))
+                value = safe_number(row.get(field)) if row is not None else None
+                if value is None:
+                    continue
+                vals.append(float(value))
+                xpos.append(pos + offsets[idx])
+            axis.bar(xpos, vals, width=bar_width, color=resolver_colors.get(resolver, "#4C78A8"), edgecolor="#2F3E4E", linewidth=0.6, label=_display_label(resolver))
+        axis.set_xticks(base_positions)
+        axis.set_xticklabels([_display_label(p) for p in proposers], rotation=43, ha="right")
+        axis.set_ylabel(ylabel)
+        axis.grid(axis="y", alpha=0.2, linestyle="-")
+        axis.set_axisbelow(True)
+    axes[0][0].set_title("Resolution latency by bucket count")
+    axes[0][1].set_title("Resolution latency by conflict count")
+    axes[0][2].set_title("Resolution latency by conflict size")
+    axes[0][2].legend(title="resolver", loc="upper left", bbox_to_anchor=(1.01, 1.0), frameon=False)
+    fig.suptitle("Resolution latency normalized by conflict workload", fontsize=14)
+    fig.text(
+        0.01,
+        0.01,
+        "bucket = a distinct proposed task; conflict = a bucket with >1 competing proposal; "
+        "conflict competitor = one competing proposal within a contested bucket (sum_j |R_j|). "
+        "Normalized ratios are descriptive diagnostics, not algorithmic complexity estimates.",
+        fontsize=8,
+        alpha=0.85,
+    )
+    fig.tight_layout(rect=(0.0, 0.04, 0.86, 0.93))
+    out = output_dir / "resolution_latency_normalized_by_conflict_workload.png"
     fig.savefig(out, dpi=200, bbox_inches="tight")
     plt.close(fig)
     return out
@@ -4665,6 +4737,12 @@ def run_time_diagnostics(
         "proposal_mean_max_ms",
         "resolution_mean_pooled_ms",
         "decision_total_mean_pooled_ms",
+        "n_buckets_mean_pooled",
+        "n_conflicts_mean_pooled",
+        "n_conflict_competitors_mean_pooled",
+        "resolution_ms_per_bucket",
+        "resolution_ms_per_conflict",
+        "resolution_ms_per_conflict_competitor",
     ] + TIME_DIAG_WORKLOAD_FIELDS + [
         "candidate_entries_per_macro_step",
         "active_robot_decisions_per_macro_step",
@@ -4707,6 +4785,7 @@ def run_time_diagnostics(
     saved.append(_plot_proposal_latency_by_proposer_and_resolver(group_rows, output_dir))
     saved.append(_plot_proposal_workload_panels(group_rows, output_dir))
     saved.append(_plot_proposal_normalized_panels(group_rows, output_dir))
+    saved.append(_plot_resolution_workload_panels(group_rows, output_dir))
     saved.append(_plot_proposal_vs_workload_scatter(group_rows, output_dir))
     matched_plot = _plot_matched_replicates(matched_rows, matched_summary_rows, output_dir)
     if matched_plot is not None:

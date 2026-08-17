@@ -310,6 +310,9 @@ class RidepoolRTEnv(gym.Env):
             task_counts[key] = task_counts.get(key, 0) + 1
         n_bid_tasks = int(len(task_counts))
         n_conflicting_tasks = int(sum(1 for cnt in task_counts.values() if cnt > 1))
+        # Total competing proposals across all conflicting task buckets (sum_j |R_j|),
+        # used to normalize resolution latency by conflict size, not just conflict count.
+        n_conflicting_task_proposals = int(sum(cnt for cnt in task_counts.values() if cnt > 1))
 
         selected_task_margins = self._selected_task_margins(action)
         selected_task_raw_logits = self._selected_task_raw_logits(action)
@@ -455,6 +458,7 @@ class RidepoolRTEnv(gym.Env):
             "n_proposals": int(n_proposals),
             "n_bid_tasks": int(n_bid_tasks),
             "n_conflicting_tasks": int(n_conflicting_tasks),
+            "n_conflicting_task_proposals": int(n_conflicting_task_proposals),
             "gnn_action_mapping_ns": int(action_mapping_ns),
             "gnn_obs_build_ns": int(obs_build_ns),
             "candidate_filter_ns": int(candidate_filter_ns),
