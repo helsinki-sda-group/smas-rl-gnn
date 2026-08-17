@@ -137,11 +137,17 @@ else
   fi
 fi
 
+mapfile -t BASELINE_TIMING_FILES < <(find "$BASELINE_JOB_DIR" -maxdepth 1 -type f -name 'timing_summary*.csv' | sort)
+if [[ ${#BASELINE_TIMING_FILES[@]} -eq 0 ]]; then
+  echo "[ERROR] No top-level timing_summary*.csv files found under: $BASELINE_JOB_DIR"
+  exit 1
+fi
+
 PLOT_CMD=(
   python "${REPO}/plot_metrics_wide.py" "$METRICS_WIDE_CSV"
   --output-dir "$OUTPUT_DIR"
   --time
-  --timing-dir "$BASELINE_JOB_DIR"
+  --timing-files "${BASELINE_TIMING_FILES[@]}"
   --scenario "$SCENARIO"
   --metrics "${METRICS[@]}"
   --rl-eval-dirs "${RL_EVAL_DIRS[@]}"

@@ -1768,19 +1768,32 @@ def _parse_rl_quality_rows(log_path: Path) -> list[dict[str, Any]]:
     return parsed_rows
 
 
-def _infer_rl_attempt_indices(rows: list[dict[str, Any]]) -> None:
-    """Reconstruct the 0-based attempt (episode) index per seed from row order.
+_RL_MODEL_TS_PATTERN = re.compile(r"model_episode(\d+)_ts(\d+)\.zip")
 
-    eval_saved_models.py appends rows in `for seed: for attempt in range(eval_runs)` order,
-    matching the 'episode' column written to timing_summary.csv, so this lets us correlate
-    quality rows (which carry no explicit episode index) with timing rows.
+
+def _extract_ts_from_rl_policy_name(value: object) -> int | None:
+    """Extract the training-checkpoint timestep from an eval_saved_models.py timing row's 'policy'
+    field (the checkpoint filename, e.g. model_episode12_ts5000000.zip)."""
+    match = _RL_MODEL_TS_PATTERN.search(str(value or ""))
+    return int(match.group(2)) if match else None
+
+
+def _infer_rl_attempt_indices(rows: list[dict[str, Any]]) -> None:
+    """Reconstruct the 0-based attempt (episode) index per (seed, ts) from row order.
+
+    eval_saved_models.py appends rows in `for model/ts: for seed: for attempt in range(eval_runs)`
+    order, matching the 'episode' column written to timing_summary.csv for that checkpoint, so this
+    lets us correlate quality rows (which carry no explicit episode index) with timing rows. Keying
+    on (seed, ts) -- not seed alone -- matters whenever a run sweeps multiple training checkpoints.
     """
-    counters: dict[int, int] = {}
+    counters: dict[tuple[int, int], int] = {}
     for row in rows:
         seed = int(row.get("seed") or 0)
-        attempt = counters.get(seed, 0)
+        ts = int(row.get("ts") or 0)
+        key = (seed, ts)
+        attempt = counters.get(key, 0)
         row["_attempt"] = attempt
-        counters[seed] = attempt + 1
+        counters[key] = attempt + 1
 
 
 def _rl_numeric_quality_columns(rows: list[dict[str, Any]]) -> list[str]:
@@ -1797,24 +1810,38 @@ def _rl_numeric_quality_columns(rows: list[dict[str, Any]]) -> list[str]:
     return columns
 
 
-def _rolling_best_window_rows(rows: list[dict[str, Any]], *, metric: str, window: int) -> list[dict[str, Any]]:
-    """Slide a window of `window` consecutive episodes and keep the window with the highest mean `metric`."""
+def _rolling_best_ts_window(
+    rows: list[dict[str, Any]], *, metric: str, window: int
+) -> tuple[list[dict[str, Any]], set[int]]:
+    """Slide a window of `window` consecutive training checkpoints (ts) and keep the window whose
+    pooled episodes have the highest mean `metric`. Mirrors aggregate_ablation_results.py's
+    best-window selection, but applied to RL saved-model evaluation sweeps."""
     window = max(1, int(window))
-    if len(rows) <= window:
-        return list(rows)
-
-    values = [safe_number(row.get(metric)) for row in rows]
-    best_start = 0
-    best_mean = -math.inf
-    for start in range(0, len(rows) - window + 1):
-        window_values = [value for value in values[start : start + window] if value is not None]
-        if not window_values:
-            continue
-        mean_value = sum(window_values) / float(len(window_values))
-        if mean_value > best_mean:
-            best_mean = mean_value
-            best_start = start
-    return rows[best_start : best_start + window]
+    ts_values = sorted({int(row["ts"]) for row in rows if row.get("ts") is not None})
+    if not ts_values:
+        return list(rows), set()
+    if len(ts_values) <= window:
+        selected_ts = set(ts_values)
+    else:
+        best_start = 0
+        best_mean = -math.inf
+        for start in range(0, len(ts_values) - window + 1):
+            window_ts = set(ts_values[start : start + window])
+            window_values = [
+                safe_number(row.get(metric))
+                for row in rows
+                if int(row.get("ts") or -1) in window_ts
+            ]
+            valid = [value for value in window_values if value is not None]
+            if not valid:
+                continue
+            mean_value = sum(valid) / float(len(valid))
+            if mean_value > best_mean:
+                best_mean = mean_value
+                best_start = start
+        selected_ts = set(ts_values[best_start : best_start + window])
+    window_rows = [row for row in rows if int(row.get("ts") or -1) in selected_ts]
+    return window_rows, selected_ts
 
 
 def _quality_point_from_rows(rows: list[dict[str, Any]], numeric_columns: list[str]) -> dict[str, float]:
@@ -1858,7 +1885,7 @@ def _load_rl_run(
     rows = _parse_rl_quality_rows(quality_path)
     _infer_rl_attempt_indices(rows)
     numeric_columns = _rl_numeric_quality_columns(rows)
-    window_rows = _rolling_best_window_rows(rows, metric="rew", window=quality_window)
+    window_rows, window_ts_set = _rolling_best_ts_window(rows, metric="rew", window=quality_window)
 
     timing_path = _find_rl_run_file(eval_dir, timing_file_name)
     timing_rows = _load_timing_rows([timing_path]) if timing_path is not None else []
@@ -1870,7 +1897,7 @@ def _load_rl_run(
         "dir": eval_dir,
         "rows": rows,
         "window_rows": window_rows,
-        "window_attempts": {(int(row.get("seed") or 0), int(row.get("_attempt") or 0)) for row in window_rows},
+        "window_ts_set": window_ts_set,
         "quality_all": _quality_point_from_rows(rows, numeric_columns),
         "quality_window": _quality_point_from_rows(window_rows, numeric_columns),
         "timing_rows": timing_rows,
@@ -1881,12 +1908,25 @@ def _rl_timing_rows_for_scope(run: dict[str, Any], *, scope: str) -> list[dict[s
     timing_rows = run["timing_rows"]
     if scope != "window":
         return timing_rows
-    window_attempts = run["window_attempts"]
-    filtered = [
-        row
-        for row in timing_rows
-        if (int(safe_number(row.get("seed")) or 0), int(safe_number(row.get("episode")) or 0)) in window_attempts
-    ]
+    window_ts_set = run["window_ts_set"]
+    if not window_ts_set:
+        return timing_rows
+    filtered: list[dict[str, object]] = []
+    unresolved = 0
+    for row in timing_rows:
+        ts = _extract_ts_from_rl_policy_name(row.get("policy"))
+        if ts is None:
+            unresolved += 1
+            continue
+        if ts in window_ts_set:
+            filtered.append(row)
+    if unresolved:
+        print(
+            f"[warn] Could not determine the training checkpoint (ts) for {unresolved} timing row(s) in "
+            f"run '{run['name']}' (policy filename did not match model_episode<E>_ts<TS>.zip); "
+            "they were excluded from --rl-time-scope=window",
+            file=sys.stderr,
+        )
     if not filtered:
         print(
             f"[warn] --rl-time-scope=window matched no timing rows for run '{run['name']}'; falling back to all timing rows",
@@ -1935,6 +1975,15 @@ def _build_rl_timing_rows(
     scenario: str,
     episode_offset: int = 0,
 ) -> list[dict[str, object]]:
+    # A run that sweeps multiple training checkpoints (ts) reuses the same (seed, episode) attempt
+    # numbers per checkpoint; offset per-checkpoint so those rows never collide in the duplicate-
+    # detection key (which does not otherwise distinguish checkpoints once 'proposer' is relabeled).
+    unique_ts = sorted({
+        ts for ts in (_extract_ts_from_rl_policy_name(row.get("policy")) for row in raw_timing_rows)
+        if ts is not None
+    })
+    checkpoint_offset = {ts: index * 1_000 for index, ts in enumerate(unique_ts)}
+
     out_rows: list[dict[str, object]] = []
     for raw_row in raw_timing_rows:
         row = dict(raw_row)
@@ -1942,9 +1991,9 @@ def _build_rl_timing_rows(
         row["scenario"] = scenario
         row["route_construction"] = route_construction
         row["protocol"] = protocol
-        if episode_offset:
-            episode_value = safe_number(row.get("episode")) or 0.0
-            row["episode"] = int(episode_value) + episode_offset
+        episode_value = int(safe_number(row.get("episode")) or 0.0)
+        ts = _extract_ts_from_rl_policy_name(row.get("policy"))
+        row["episode"] = episode_value + checkpoint_offset.get(ts, 0) + episode_offset
         out_rows.append(row)
     return out_rows
 

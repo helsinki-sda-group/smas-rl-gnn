@@ -80,11 +80,14 @@ python plot_metrics_wide.py metrics_wide.csv \
 `plot_metrics_wide.py`:
 
 1. Parses each run's `evaluation_metrics.log` (per-episode `rew`, `mcand`, `msd`,
-   `dstep`, `noop`, `ovrlap`, `shared`, ...) in file order, dropping `MEAN`/`STD`
-   summary rows.
-2. Selects a **quality window** per run: a sliding window of `--rl-quality-window`
-   (default 5) consecutive episodes; the window with the highest mean reward is
-   kept, and its episodes are averaged (mean/std) to produce that run's quality point.
+   `dstep`, `noop`, `ovrlap`, `shared`, ..., and the training-checkpoint `ts` each
+   episode was evaluated at), dropping `MEAN`/`STD` summary rows.
+2. Selects a **quality window** per run over the **training-checkpoint (`ts`) axis**:
+   groups episodes by `ts`, then slides a window of `--rl-quality-window` (default 5)
+   consecutive checkpoints; the window whose pooled episodes have the highest mean
+   reward is kept, and those episodes are averaged (mean/std) to produce that run's
+   quality point. If a run only ever evaluates a single fixed checkpoint (all rows
+   share one `ts`), the window trivially covers that checkpoint's episodes.
 3. Combines runs per `--rl-mode`:
    - `best` (default): use the run whose quality-window mean reward is highest;
      its timing data alone is used.
@@ -126,13 +129,19 @@ grouped and colored together.
 
 ### Timing scope: `--rl-time-scope`
 
-- `all` (default, recommended): use every non-warmup measured episode for timing.
-  Latency is a property of the (fixed) policy/model and hardware, not of which
-  episodes happened to score well, so pooling more episodes reduces noise without
-  biasing the estimate.
-- `window`: restrict RL timing rows to the same episodes selected for the quality
-  window. Useful if you suspect systematic correlation between reward and per-decision
-  cost (e.g., harder episodes are also slower), but uses far fewer samples.
+- `all` (default, recommended): use every non-warmup measured episode across every
+  evaluated checkpoint for timing. Latency is mostly a property of the (fixed-size)
+  model architecture and hardware rather than of which checkpoint/episodes happened
+  to score well, so pooling more episodes reduces noise without biasing the estimate.
+- `window`: restrict RL timing rows to the same training checkpoints (`ts`) selected
+  for the quality window. `timing_summary.csv` rows don't carry a `ts` column directly
+  -- it's recovered from the `policy` column (the checkpoint filename, e.g.
+  `model_episode12_ts5000000.zip`); rows whose filename doesn't match that pattern are
+  excluded from `window` scope with a warning.
+
+Note: because multiple checkpoints reuse the same `(seed, episode)` attempt numbers,
+RL timing rows are internally offset per checkpoint before being merged with baseline
+timing rows, so pooling a checkpoint sweep never trips the duplicate-timing-row check.
 
 ## Mahti wrapper: `scripts/plot_time_cmp_mahti.sh`
 
@@ -148,8 +157,11 @@ bash scripts/plot_time_cmp_mahti.sh 1hop_noop-w3-1_ctc_cap2 job_eval_baseline_ma
 - `job_eval_baseline_matrix_7162319` is a job folder under
   `/scratch/project_2012159/kbocheni/smas-rl-gnn/eval_baseline_matrix/`; the
   script runs `aggregate_metrics_logs.py` on it to build `metrics_wide.csv`
-  (skippable with `--skip-aggregate` if already built), then points
-  `--timing-dir` at the same folder.
+  (skippable with `--skip-aggregate` if already built), then passes only the
+  **top-level** `timing_summary_*.csv` files via `--timing-files` (not a recursive
+  `--timing-dir` search) -- baseline job dirs can also contain a `runs/rp_eval_seed*/`
+  subfolder with raw per-seed copies of the same timing data, and including both
+  copies would trip the duplicate-timing-row check.
 - Output goes to
   `/projappl/project_2012159/kbocheni_temp/smas-rl-gnn/plot_time_comparison/<RL_RUN_NAME>__vs__<BASELINE_JOB_NAME>/`.
 - Run `bash scripts/plot_time_cmp_mahti.sh --help` (or with no arguments) for the
