@@ -231,10 +231,10 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
         logit_step_metrics = []
         
         while not done:
-            t_decision_start = time.perf_counter_ns()
             #model.policy.noop_logit.data.fill_(-1.0)
             
-            # Capture logits before prediction
+            # Capture logits before prediction (diagnostic-only duplicate forward pass;
+            # excluded from decision timing below so it never leaks into proposal/other_ns).
             try:
                 with th.no_grad():
                     obs_tensor, _ = model.policy.obs_to_tensor(obs)
@@ -263,6 +263,9 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
             except Exception as e:
                 print(f"[STEP {step_idx}] logit capture error: {e}")
             
+            # Decision timing starts here so it reflects only the real inference + env step,
+            # not the diagnostic logit-capture pass above (which duplicates the GNN forward pass).
+            t_decision_start = time.perf_counter_ns()
             with th.inference_mode():
                 action, _states = model.predict(obs, deterministic=config.get('deterministic', False))
             
@@ -275,11 +278,25 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
 
             t_decision_end = time.perf_counter_ns()
             timing = info.get('timing', {}) if isinstance(info, dict) else {}
+            env_pre_controller_ns = int(timing.get('env_pre_controller_ns', 0))
+            pre_step_sync_ns = int(timing.get('pre_step_sync_ns', 0))
             proposal_ns = int(timing.get('proposal_ns', 0))
             resolution_ns = int(timing.get('resolution_ns', 0))
+            commit_dispatch_ns = int(timing.get('commit_dispatch_ns', 0))
             simulation_ns = int(timing.get('simulation_ns', 0))
+            post_step_logging_ns = int(timing.get('post_step_logging_ns', 0))
             decision_total_ns = int(max(0, t_decision_end - t_decision_start))
-            other_ns = max(0, decision_total_ns - proposal_ns - resolution_ns - simulation_ns)
+            other_ns = max(
+                0,
+                decision_total_ns
+                - env_pre_controller_ns
+                - pre_step_sync_ns
+                - proposal_ns
+                - resolution_ns
+                - commit_dispatch_ns
+                - simulation_ns
+                - post_step_logging_ns,
+            )
 
             warmup = int(int(attempt) < int(config.get('timing_warmup_episodes', 0)))
             row = {
@@ -307,9 +324,13 @@ def evaluate_model(model_path, episode_idx, ts_idx, seed, attempt, config, port_
                 'n_actor_nodes': int(timing.get('n_actor_nodes', 0)),
                 'n_actor_edges': int(timing.get('n_actor_edges', 0)),
                 'n_actor_candidates': int(timing.get('n_actor_candidates', 0)),
+                'env_pre_controller_ns': int(env_pre_controller_ns),
+                'pre_step_sync_ns': int(pre_step_sync_ns),
                 'proposal_ns': int(proposal_ns),
                 'resolution_ns': int(resolution_ns),
+                'commit_dispatch_ns': int(commit_dispatch_ns),
                 'simulation_ns': int(simulation_ns),
+                'post_step_logging_ns': int(post_step_logging_ns),
                 'decision_total_ns': int(decision_total_ns),
                 'other_ns': int(other_ns),
                 'gnn_obs_build_ns': int(timing.get('gnn_obs_build_ns', 0)),

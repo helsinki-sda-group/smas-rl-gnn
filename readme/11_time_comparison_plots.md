@@ -127,6 +127,22 @@ grouped and colored together.
   with baselines**. Instead it is computed separately and drawn as a second,
   hatched bar group next to the baseline bars.
 
+### Actor-only variant: `--time-actor-only`
+
+The GNN policy's `forward()` call always computes both the actor (used for action
+selection) and the critic (only needed during training, not at inference) in one
+pass, and their combined wall-clock cost is measured as a single `gnn_policy_total_ns`
+that flows into `proposal_ns`. So by default, RL's "proposal" time on `--time` plots
+includes critic computation that a deployed (inference-only) policy would not pay.
+
+`--time-actor-only` emits an additional `{metric}_time_cmp_actor_only.png` per
+combination (e.g. `rew_time_cmp_actor_only.png`), where RL's proposal time has
+`gnn_critic_time_ms` subtracted (`actor_only_proposal_time_ms = max(0, proposal_time_ms
+- gnn_critic_time_ms)`, then `actor_only_allocation_time_ms = actor_only_proposal_time_ms
++ resolution_time_ms`). Baseline points are unaffected (no critic cost to subtract).
+These columns are also written to `time_cmp_data.csv` for every run, whether or not
+`--time-actor-only` is passed.
+
 ### Timing scope: `--rl-time-scope`
 
 - `all` (default, recommended): use every non-warmup measured episode across every

@@ -259,6 +259,15 @@ def parse_args() -> argparse.Namespace:
         help="Add diagnostics to explain proposer-latency spread across resolvers (implies --time)",
     )
     parser.add_argument(
+        "--time-actor-only",
+        action="store_true",
+        help=(
+            "Also emit an actor-only variant of the reward-vs-time plots (e.g. rew_time_cmp_actor_only.png) "
+            "where RL proposal time excludes GNN critic computation, which is not needed for inference "
+            "(implies --time); baseline points are unaffected"
+        ),
+    )
+    parser.add_argument(
         "--time-phase-stat",
         choices=["mean", "total", "both"],
         default="both",
@@ -545,6 +554,10 @@ def resolve_plot_types(args: argparse.Namespace) -> list[str]:
         if "time_cmp" not in requested_types:
             requested_types.append("time_cmp")
         requested_types.append("time_diag")
+    if args.time_actor_only:
+        has_explicit_flags = True
+        if "time_cmp" not in requested_types:
+            requested_types.append("time_cmp")
 
     if has_explicit_flags:
         return requested_types
@@ -1343,6 +1356,28 @@ def _aggregate_timing_groups(rows: list[dict[str, object]]) -> list[dict[str, ob
             if p is not None and r is not None:
                 allocation_run_means.append(float(p) + float(r))
 
+        # Actor-only variant: excludes GNN critic time (not needed for inference) from proposal time.
+        # For baselines gnn_critic_*_ms is absent/zero, so actor-only == real (no distortion).
+        gnn_critic_totals = [
+            float(value)
+            for value in [safe_number(row.get("gnn_critic_total_ms")) for row in group_rows]
+            if value is not None
+        ]
+        gnn_critic_sum = sum(gnn_critic_totals)
+        actor_only_proposal_run_means: list[float] = []
+        actor_only_allocation_run_means: list[float] = []
+        for row in group_rows:
+            p_mean = safe_number(row.get("proposal_mean_ms"))
+            if p_mean is None:
+                continue
+            c_mean = safe_number(row.get("gnn_critic_mean_ms")) or 0.0
+            actor_only_mean = max(0.0, float(p_mean) - float(c_mean))
+            actor_only_proposal_run_means.append(actor_only_mean)
+            r_mean = safe_number(row.get("resolution_mean_ms"))
+            if r_mean is not None:
+                actor_only_allocation_run_means.append(actor_only_mean + float(r_mean))
+        actor_only_proposal_sum = max(0.0, proposal_sum - gnn_critic_sum)
+
         phase_means: dict[str, float | None] = {}
         phase_stds: dict[str, float] = {}
         phase_totals: dict[str, float] = {}
@@ -1407,6 +1442,11 @@ def _aggregate_timing_groups(rows: list[dict[str, object]]) -> list[dict[str, ob
             "proposal_time_std_ms": _sample_std(proposal_run_means),
             "resolution_time_std_ms": _sample_std(resolution_run_means),
             "allocation_time_std_ms": _sample_std(allocation_run_means),
+            "gnn_critic_time_ms": (gnn_critic_sum / measured_sum),
+            "actor_only_proposal_time_ms": (actor_only_proposal_sum / measured_sum),
+            "actor_only_allocation_time_ms": ((actor_only_proposal_sum + resolution_sum) / measured_sum),
+            "actor_only_proposal_time_std_ms": _sample_std(actor_only_proposal_run_means),
+            "actor_only_allocation_time_std_ms": _sample_std(actor_only_allocation_run_means),
             "timing_protocol_values": sorted({_metadata_string(row.get("timing_protocol")) for row in group_rows}),
             "device_values": sorted({_metadata_string(row.get("device")) for row in group_rows}),
             "torch_num_threads_values": sorted({_metadata_string(row.get("torch_num_threads")) for row in group_rows}),
@@ -3125,6 +3165,11 @@ def _write_time_cmp_audit_csv(
         "resolution_time_std_ms",
         "allocation_time_ms",
         "allocation_time_std_ms",
+        "gnn_critic_time_ms",
+        "actor_only_proposal_time_ms",
+        "actor_only_proposal_time_std_ms",
+        "actor_only_allocation_time_ms",
+        "actor_only_allocation_time_std_ms",
         "quality_metric",
         "quality_mean",
         "quality_std",
@@ -3161,6 +3206,11 @@ def _write_time_cmp_audit_csv(
                     "resolution_time_std_ms": safe_number(row.get("timing_resolution_time_std_ms")) or 0.0,
                     "allocation_time_ms": safe_number(row.get("timing_allocation_time_ms")),
                     "allocation_time_std_ms": safe_number(row.get("timing_allocation_time_std_ms")) or 0.0,
+                    "gnn_critic_time_ms": safe_number(row.get("timing_gnn_critic_time_ms")) or 0.0,
+                    "actor_only_proposal_time_ms": safe_number(row.get("timing_actor_only_proposal_time_ms")),
+                    "actor_only_proposal_time_std_ms": safe_number(row.get("timing_actor_only_proposal_time_std_ms")) or 0.0,
+                    "actor_only_allocation_time_ms": safe_number(row.get("timing_actor_only_allocation_time_ms")),
+                    "actor_only_allocation_time_std_ms": safe_number(row.get("timing_actor_only_allocation_time_std_ms")) or 0.0,
                     "quality_metric": metric,
                     "quality_mean": float(quality_mean),
                     "quality_std": float(quality_std),
@@ -3241,6 +3291,62 @@ def plot_time_cmp(
     annotate_time: bool,
     time_linear: bool,
 ) -> list[Path]:
+    return _plot_time_cmp_variant(
+        joined_rows,
+        metrics,
+        output_dir,
+        pareto=pareto,
+        annotate_time=annotate_time,
+        time_linear=time_linear,
+        x_field="timing_allocation_time_ms",
+        x_std_field="timing_allocation_time_std_ms",
+        x_label="Measured proposal + resolver latency per decision (ms)",
+        filename_suffix="",
+        footer_note="",
+    )
+
+
+def plot_time_cmp_actor_only(
+    joined_rows: list[dict[str, object]],
+    metrics: list[str],
+    output_dir: Path,
+    *,
+    pareto: bool,
+    annotate_time: bool,
+    time_linear: bool,
+) -> list[Path]:
+    """Actor-only variant: RL proposal time excludes GNN critic computation (not needed for
+    inference, but currently bundled into 'proposal' since actor+critic run in one forward pass).
+    Baseline points are unchanged (no critic cost to subtract)."""
+    return _plot_time_cmp_variant(
+        joined_rows,
+        metrics,
+        output_dir,
+        pareto=pareto,
+        annotate_time=annotate_time,
+        time_linear=time_linear,
+        x_field="timing_actor_only_allocation_time_ms",
+        x_std_field="timing_actor_only_allocation_time_std_ms",
+        x_label="Measured proposal (actor-only, critic excluded) + resolver latency per decision (ms)",
+        filename_suffix="_actor_only",
+        footer_note=" RL proposal time excludes GNN critic computation (critic is not required for inference); baseline points are unchanged.",
+    )
+
+
+def _plot_time_cmp_variant(
+    joined_rows: list[dict[str, object]],
+    metrics: list[str],
+    output_dir: Path,
+    *,
+    pareto: bool,
+    annotate_time: bool,
+    time_linear: bool,
+    x_field: str,
+    x_std_field: str,
+    x_label: str,
+    filename_suffix: str,
+    footer_note: str,
+) -> list[Path]:
     saved_paths: list[Path] = []
     resolver_labels = _ordered_resolvers([
         str(row.get("timing_resolver", "")).strip()
@@ -3263,8 +3369,8 @@ def plot_time_cmp(
         for row in joined_rows:
             quality = safe_number(row.get(metric))
             quality_std = safe_number(row.get(f"{metric}_std")) or 0.0
-            x_value = safe_number(row.get("timing_allocation_time_ms"))
-            x_std = safe_number(row.get("timing_allocation_time_std_ms")) or 0.0
+            x_value = safe_number(row.get(x_field))
+            x_std = safe_number(row.get(x_std_field)) or 0.0
             if quality is None or x_value is None:
                 continue
             if not time_linear and x_value <= 0.0:
@@ -3342,12 +3448,12 @@ def plot_time_cmp(
             axis.xaxis.set_minor_locator(LogLocator(base=10.0, subs=tuple(range(2, 10))))
             axis.xaxis.set_minor_formatter(NullFormatter())
 
-        axis.set_xlabel("Measured proposal + resolver latency per decision (ms)")
+        axis.set_xlabel(x_label)
         axis.set_ylabel(_metric_ylabel(metric))
         if str(metric).strip().lower() == "rew":
-            axis.set_title("Reward vs measured allocation latency")
+            axis.set_title("Reward vs measured allocation latency" + (" (actor-only)" if filename_suffix else ""))
         else:
-            axis.set_title(f"{_metric_title(metric)} vs measured allocation latency")
+            axis.set_title(f"{_metric_title(metric)} vs measured allocation latency" + (" (actor-only)" if filename_suffix else ""))
         axis.grid(axis="y", alpha=0.2, linestyle="-", linewidth=0.8)
         axis.set_axisbelow(True)
 
@@ -3385,12 +3491,13 @@ def plot_time_cmp(
         figure.text(
             0.01,
             0.01,
-            "Measured wall-clock latency from timing-summary logs; allocation latency includes proposal generation and conflict resolution only.",
+            "Measured wall-clock latency from timing-summary logs; allocation latency includes proposal generation and conflict resolution only."
+            + footer_note,
             fontsize=8,
             alpha=0.85,
         )
         figure.tight_layout(rect=(0.0, 0.03, 0.81, 0.97))
-        output_path = output_dir / f"{metric}_time_cmp.png"
+        output_path = output_dir / f"{metric}_time_cmp{filename_suffix}.png"
         figure.savefig(output_path, dpi=200, bbox_inches="tight")
         plt.close(figure)
         saved_paths.append(output_path)
@@ -4840,6 +4947,17 @@ def main() -> int:
                         time_linear=bool(args.time_linear),
                     )
                 )
+                if args.time_actor_only:
+                    saved_paths.extend(
+                        plot_time_cmp_actor_only(
+                            joined_rows,
+                            metrics,
+                            time_output_dir,
+                            pareto=bool(args.pareto),
+                            annotate_time=bool(args.annotate_time),
+                            time_linear=bool(args.time_linear),
+                        )
+                    )
                 saved_paths.extend(plot_time_component_comparisons(joined_rows, time_output_dir))
 
                 if args.time_phase_stat in {"mean", "both"}:
