@@ -333,6 +333,55 @@ def parse_args() -> argparse.Namespace:
         choices=["aa", "admission", "forced"],
         help="Protocol combo for RL overlay plot selection (default: aa)",
     )
+    parser.add_argument(
+        "--rl-eval-dirs",
+        nargs="+",
+        type=Path,
+        default=None,
+        help=(
+            "One or more evaluation_<date>_<time> directories (RL saved-model evaluation runs) to overlay "
+            "on --time plots (resolver/proposer combination plots, decision-phase breakdowns, and rew_time_cmp). "
+            "Each directory is expected to contain --rl-quality-file and (optionally) --rl-timing-file."
+        ),
+    )
+    parser.add_argument(
+        "--rl-mode",
+        choices=["mean", "best", "distinct"],
+        default="best",
+        help=(
+            "How to combine multiple --rl-eval-dirs runs: 'best' picks the run with the highest quality-window "
+            "reward (timing from that run only); 'mean' averages the quality-window point across runs and pools "
+            "all runs' timing rows; 'distinct' keeps every run as its own labeled series (default: best)"
+        ),
+    )
+    parser.add_argument(
+        "--rl-quality-window",
+        type=int,
+        default=5,
+        help="Sliding window size (in episodes) used to pick the best-reward quality window per RL run (default: 5)",
+    )
+    parser.add_argument(
+        "--rl-time-scope",
+        choices=["all", "window"],
+        default="all",
+        help=(
+            "Which RL episodes contribute measured timing data: 'all' uses every non-warmup measured episode "
+            "(recommended: more samples, latency is not expected to depend on the reward window); 'window' "
+            "restricts timing rows to the same episodes selected for the quality window (default: all)"
+        ),
+    )
+    parser.add_argument(
+        "--rl-quality-file",
+        type=str,
+        default="evaluation_metrics.log",
+        help="Filename (relative to each --rl-eval-dirs entry) with per-episode quality metrics (default: evaluation_metrics.log)",
+    )
+    parser.add_argument(
+        "--rl-timing-file",
+        type=str,
+        default="timing_summary.csv",
+        help="Filename (relative to each --rl-eval-dirs entry) with per-episode measured timing (default: timing_summary.csv)",
+    )
     return parser.parse_args()
 
 
@@ -1638,6 +1687,412 @@ def _estimate_rl_point_from_eval(
     }
 
 
+# ---------------------------------------------------------------------------
+# RL saved-model evaluation overlay for --time plots (rew_time_cmp, decision-phase
+# breakdowns, proposal-latency diagnostics). Unlike --work-cmp-with-rl (an analytical
+# work estimate), this uses REAL measured timing_summary.csv rows produced by
+# eval_saved_models.py, so the RL point is injected as ordinary rows into the same
+# quality/timing pipeline used for baselines and flows through every combination plot.
+# ---------------------------------------------------------------------------
+
+RL_POLICY_PREFIX = "rl_"
+
+
+def _is_rl_policy_label(value: object) -> bool:
+    return str(value or "").strip().lower().startswith(RL_POLICY_PREFIX)
+
+
+def _parse_rl_quality_rows(log_path: Path) -> list[dict[str, Any]]:
+    """Parse per-episode rows from an evaluation_metrics.log-style file, preserving file order.
+
+    Uses the same header/row layout as _parse_eval_log_rows but keeps 'pol' as text and
+    drops MEAN/STD summary rows so only real per-episode data remains (needed for the
+    sliding quality-window selection, which relies on episode order).
+    """
+    lines = [
+        line.rstrip("\n")
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    header_index: int | None = None
+    header_columns: list[str] = []
+    for index, line in enumerate(lines):
+        low = line.lower()
+        if "|" in line and "pol" in low and "seed" in low and "rew" in low and "ts" in low:
+            columns = _split_columns_from_header(line)
+            if columns:
+                header_index = index
+                header_columns = columns
+                break
+    if header_index is None:
+        raise ValueError(f"Could not find metrics header in RL evaluation log: {log_path}")
+
+    parsed_rows: list[dict[str, Any]] = []
+    for line in lines[header_index + 1 :]:
+        if line.lstrip().startswith("#"):
+            continue
+        fields: list[str] = []
+        for segment in line.split("|"):
+            fields.extend(part for part in segment.strip().split() if part)
+        if len(fields) < len(header_columns):
+            fields.extend([""] * (len(header_columns) - len(fields)))
+        if len(fields) > len(header_columns):
+            fields = fields[: len(header_columns)]
+
+        row: dict[str, Any] = {}
+        for key, raw in zip(header_columns, fields):
+            text = str(raw).strip()
+            if key == "pol":
+                row[key] = text
+                continue
+            if key in {"seed", "ts"}:
+                try:
+                    row[key] = int(text)
+                except ValueError:
+                    row[key] = None
+                continue
+            try:
+                row[key] = float(text)
+            except ValueError:
+                row[key] = text
+
+        if str(row.get("pol", "")).strip().lower() in {"mean", "std"}:
+            continue
+        if row.get("seed") is None or safe_number(row.get("rew")) is None:
+            continue
+        parsed_rows.append(row)
+
+    if not parsed_rows:
+        raise ValueError(f"No usable per-episode rows in RL evaluation log: {log_path}")
+    return parsed_rows
+
+
+def _infer_rl_attempt_indices(rows: list[dict[str, Any]]) -> None:
+    """Reconstruct the 0-based attempt (episode) index per seed from row order.
+
+    eval_saved_models.py appends rows in `for seed: for attempt in range(eval_runs)` order,
+    matching the 'episode' column written to timing_summary.csv, so this lets us correlate
+    quality rows (which carry no explicit episode index) with timing rows.
+    """
+    counters: dict[int, int] = {}
+    for row in rows:
+        seed = int(row.get("seed") or 0)
+        attempt = counters.get(seed, 0)
+        row["_attempt"] = attempt
+        counters[seed] = attempt + 1
+
+
+def _rl_numeric_quality_columns(rows: list[dict[str, Any]]) -> list[str]:
+    excluded = {"pol", "seed", "ts", "_attempt"}
+    columns: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for key, value in row.items():
+            if key in excluded or key in seen:
+                continue
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                columns.append(key)
+                seen.add(key)
+    return columns
+
+
+def _rolling_best_window_rows(rows: list[dict[str, Any]], *, metric: str, window: int) -> list[dict[str, Any]]:
+    """Slide a window of `window` consecutive episodes and keep the window with the highest mean `metric`."""
+    window = max(1, int(window))
+    if len(rows) <= window:
+        return list(rows)
+
+    values = [safe_number(row.get(metric)) for row in rows]
+    best_start = 0
+    best_mean = -math.inf
+    for start in range(0, len(rows) - window + 1):
+        window_values = [value for value in values[start : start + window] if value is not None]
+        if not window_values:
+            continue
+        mean_value = sum(window_values) / float(len(window_values))
+        if mean_value > best_mean:
+            best_mean = mean_value
+            best_start = start
+    return rows[best_start : best_start + window]
+
+
+def _quality_point_from_rows(rows: list[dict[str, Any]], numeric_columns: list[str]) -> dict[str, float]:
+    point: dict[str, float] = {"n": float(len(rows))}
+    for column in numeric_columns:
+        values = [safe_number(row.get(column)) for row in rows]
+        valid = [float(value) for value in values if value is not None and math.isfinite(value)]
+        if not valid:
+            continue
+        mean_value = sum(valid) / float(len(valid))
+        if len(valid) > 1:
+            variance = sum((value - mean_value) ** 2 for value in valid) / float(len(valid))
+            std_value = math.sqrt(variance)
+        else:
+            std_value = 0.0
+        point[column] = mean_value
+        point[f"{column}_std"] = std_value
+    return point
+
+
+def _find_rl_run_file(eval_dir: Path, file_name: str) -> Path | None:
+    direct = eval_dir / file_name
+    if direct.is_file():
+        return direct
+    matches = sorted(eval_dir.rglob(file_name))
+    return matches[0] if matches else None
+
+
+def _load_rl_run(
+    eval_dir: Path,
+    *,
+    quality_file_name: str,
+    timing_file_name: str,
+    quality_window: int,
+) -> dict[str, Any]:
+    eval_dir = eval_dir.expanduser().resolve()
+    quality_path = _find_rl_run_file(eval_dir, quality_file_name)
+    if quality_path is None:
+        raise FileNotFoundError(f"Could not find '{quality_file_name}' under RL eval dir: {eval_dir}")
+
+    rows = _parse_rl_quality_rows(quality_path)
+    _infer_rl_attempt_indices(rows)
+    numeric_columns = _rl_numeric_quality_columns(rows)
+    window_rows = _rolling_best_window_rows(rows, metric="rew", window=quality_window)
+
+    timing_path = _find_rl_run_file(eval_dir, timing_file_name)
+    timing_rows = _load_timing_rows([timing_path]) if timing_path is not None else []
+    if timing_path is None:
+        print(f"[warn] No '{timing_file_name}' found under RL eval dir: {eval_dir}; time plots will skip this run", file=sys.stderr)
+
+    return {
+        "name": eval_dir.name,
+        "dir": eval_dir,
+        "rows": rows,
+        "window_rows": window_rows,
+        "window_attempts": {(int(row.get("seed") or 0), int(row.get("_attempt") or 0)) for row in window_rows},
+        "quality_all": _quality_point_from_rows(rows, numeric_columns),
+        "quality_window": _quality_point_from_rows(window_rows, numeric_columns),
+        "timing_rows": timing_rows,
+    }
+
+
+def _rl_timing_rows_for_scope(run: dict[str, Any], *, scope: str) -> list[dict[str, object]]:
+    timing_rows = run["timing_rows"]
+    if scope != "window":
+        return timing_rows
+    window_attempts = run["window_attempts"]
+    filtered = [
+        row
+        for row in timing_rows
+        if (int(safe_number(row.get("seed")) or 0), int(safe_number(row.get("episode")) or 0)) in window_attempts
+    ]
+    if not filtered:
+        print(
+            f"[warn] --rl-time-scope=window matched no timing rows for run '{run['name']}'; falling back to all timing rows",
+            file=sys.stderr,
+        )
+        return timing_rows
+    return filtered
+
+
+def _eval_protocol_to_metrics_text(protocol: str) -> str:
+    """metrics_wide.csv rows only recognize the raw 'protocol' values 'admission'/'forced'
+    (unlike timing CSVs, which also accept the 'aa' alias); convert --eval-protocol accordingly."""
+    return "admission" if _protocol_alias_from_text(protocol) == "aa" else "forced"
+
+
+def _build_rl_quality_row(
+    quality_point: dict[str, float],
+    *,
+    label: str,
+    resolver: str,
+    route_construction: str,
+    protocol: str,
+    scenario: str,
+    source_name: str,
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "source_file": source_name,
+        "scenario": scenario,
+        "instance": "rl_eval",
+        "protocol": _eval_protocol_to_metrics_text(protocol),
+        "resolver": resolver,
+        "route_construction": route_construction,
+        "admission_aware": "true" if _protocol_alias_from_text(protocol) == "aa" else "false",
+        "pol": label,
+    }
+    row.update(quality_point)
+    return row
+
+
+def _build_rl_timing_rows(
+    raw_timing_rows: list[dict[str, object]],
+    *,
+    label: str,
+    route_construction: str,
+    protocol: str,
+    scenario: str,
+    episode_offset: int = 0,
+) -> list[dict[str, object]]:
+    out_rows: list[dict[str, object]] = []
+    for raw_row in raw_timing_rows:
+        row = dict(raw_row)
+        row["proposer"] = label
+        row["scenario"] = scenario
+        row["route_construction"] = route_construction
+        row["protocol"] = protocol
+        if episode_offset:
+            episode_value = safe_number(row.get("episode")) or 0.0
+            row["episode"] = int(episode_value) + episode_offset
+        out_rows.append(row)
+    return out_rows
+
+
+def _resolver_from_rl_timing_rows(timing_rows: list[dict[str, object]], fallback: str) -> str:
+    for row in timing_rows:
+        resolver = str(row.get("resolver") or "").strip()
+        if resolver:
+            return resolver
+    return fallback
+
+
+def load_rl_time_overlay(args: argparse.Namespace) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Build synthetic quality rows + raw timing rows representing RL saved-model evaluation run(s).
+
+    Returned rows use the same column conventions as metrics_wide.csv rows / timing_summary.csv rows, so
+    callers can simply concatenate them onto the normal quality/timing row lists before the rest of the
+    --time pipeline runs; every per-combination plot then includes the RL point automatically.
+    """
+    eval_dirs = list(args.rl_eval_dirs or [])
+    if not eval_dirs:
+        return [], []
+
+    quality_window = int(args.rl_quality_window)
+    runs = [
+        _load_rl_run(
+            eval_dir,
+            quality_file_name=str(args.rl_quality_file),
+            timing_file_name=str(args.rl_timing_file),
+            quality_window=quality_window,
+        )
+        for eval_dir in eval_dirs
+    ]
+
+    scenario = str(args.eval_scenario)
+    route_construction = str(args.eval_route_construction)
+    protocol = str(args.eval_protocol)
+    base_label = f"{RL_POLICY_PREFIX}{args.eval_proposer}"
+
+    quality_rows: list[dict[str, object]] = []
+    timing_rows: list[dict[str, object]] = []
+
+    if args.rl_mode == "distinct":
+        for index, run in enumerate(runs, start=1):
+            label = f"{base_label}_r{index}"
+            resolver = _resolver_from_rl_timing_rows(run["timing_rows"], fallback=str(args.eval_resolver))
+            quality_rows.append(
+                _build_rl_quality_row(
+                    run["quality_window"],
+                    label=label,
+                    resolver=resolver,
+                    route_construction=route_construction,
+                    protocol=protocol,
+                    scenario=scenario,
+                    source_name=run["name"],
+                )
+            )
+            scoped_timing = _rl_timing_rows_for_scope(run, scope=str(args.rl_time_scope))
+            timing_rows.extend(
+                _build_rl_timing_rows(
+                    scoped_timing,
+                    label=label,
+                    route_construction=route_construction,
+                    protocol=protocol,
+                    scenario=scenario,
+                )
+            )
+        return quality_rows, timing_rows
+
+    if args.rl_mode == "best":
+        best_run = max(runs, key=lambda run: float(run["quality_window"].get("rew", -math.inf)))
+        resolver = _resolver_from_rl_timing_rows(best_run["timing_rows"], fallback=str(args.eval_resolver))
+        quality_rows.append(
+            _build_rl_quality_row(
+                best_run["quality_window"],
+                label=base_label,
+                resolver=resolver,
+                route_construction=route_construction,
+                protocol=protocol,
+                scenario=scenario,
+                source_name=best_run["name"],
+            )
+        )
+        scoped_timing = _rl_timing_rows_for_scope(best_run, scope=str(args.rl_time_scope))
+        timing_rows.extend(
+            _build_rl_timing_rows(
+                scoped_timing,
+                label=base_label,
+                route_construction=route_construction,
+                protocol=protocol,
+                scenario=scenario,
+            )
+        )
+        return quality_rows, timing_rows
+
+    # "mean": average the per-run quality windows, pool all runs' timing rows.
+    numeric_columns = sorted({
+        key
+        for run in runs
+        for key in run["quality_window"]
+        if not key.endswith("_std") and key != "n"
+    })
+    pooled_window_rows = [run["quality_window"] for run in runs]
+    mean_point: dict[str, float] = {"n": float(sum(row.get("n", 0.0) for row in pooled_window_rows))}
+    for column in numeric_columns:
+        run_means = [row[column] for row in pooled_window_rows if column in row]
+        if not run_means:
+            continue
+        mean_value = sum(run_means) / float(len(run_means))
+        std_value = _sample_std(run_means) if len(run_means) > 1 else 0.0
+        mean_point[column] = mean_value
+        mean_point[f"{column}_std"] = std_value
+
+    resolver = str(args.eval_resolver)
+    for run in runs:
+        candidate = _resolver_from_rl_timing_rows(run["timing_rows"], fallback="")
+        if candidate:
+            resolver = candidate
+            break
+
+    quality_rows.append(
+        _build_rl_quality_row(
+            mean_point,
+            label=base_label,
+            resolver=resolver,
+            route_construction=route_construction,
+            protocol=protocol,
+            scenario=scenario,
+            source_name="+".join(run["name"] for run in runs),
+        )
+    )
+    for run_index, run in enumerate(runs):
+        scoped_timing = _rl_timing_rows_for_scope(run, scope=str(args.rl_time_scope))
+        timing_rows.extend(
+            _build_rl_timing_rows(
+                scoped_timing,
+                label=base_label,
+                route_construction=route_construction,
+                protocol=protocol,
+                scenario=scenario,
+                # All pooled runs share the same label, so episodes must be offset per run to
+                # avoid colliding (seed, episode) keys across otherwise-identical run structures.
+                episode_offset=run_index * 1_000_000,
+            )
+        )
+    return quality_rows, timing_rows
+
+
 def metric_limits(rows: list[dict[str, object]], metric: str) -> tuple[float, float]:
     if metric.lower() in RATIO_METRICS:
         return (-0.02, 1.02)
@@ -2749,6 +3204,10 @@ def plot_time_cmp(
         for row in joined_rows
         if str(row.get("timing_proposer", "")).strip()
     ])
+    # RL points always get a distinct star marker, regardless of alphabetical marker assignment.
+    for proposer_label in list(policy_markers):
+        if _is_rl_policy_label(proposer_label):
+            policy_markers[proposer_label] = "*"
 
     for metric in metrics:
         points: list[dict[str, object]] = []
@@ -2795,18 +3254,19 @@ def plot_time_cmp(
                 capthick=0.8,
                 zorder=2,
             )
+            is_rl = _is_rl_policy_label(proposer)
             axis.scatter(
                 [float(point["x"])],
                 [float(point["y"])],
                 marker=policy_markers.get(proposer, "o"),
                 color=resolver_colors.get(resolver, "#4C78A8"),
-                edgecolors="#2F3E4E",
-                linewidths=0.6,
-                s=52,
-                alpha=0.95,
-                zorder=3,
+                edgecolors="#111111" if is_rl else "#2F3E4E",
+                linewidths=1.1 if is_rl else 0.6,
+                s=190 if is_rl else 52,
+                alpha=0.98 if is_rl else 0.95,
+                zorder=6 if is_rl else 3,
             )
-            if annotate_time:
+            if annotate_time or is_rl:
                 axis.annotate(
                     _display_label(proposer),
                     (float(point["x"]), float(point["y"])),
@@ -3092,32 +3552,57 @@ def plot_time_phase_breakdown_mean(joined_rows: list[dict[str, object]], output_
     saved_paths.append(out1)
 
     phase_values: dict[str, list[float]] = {phase: [] for phase in TIME_PHASE_PREFIXES + ["decision_total"]}
+    rl_phase_values: dict[str, list[float]] = {phase: [] for phase in TIME_PHASE_PREFIXES + ["decision_total"]}
     for row in combos:
+        target = rl_phase_values if _is_rl_policy_label(row.get("proposer")) else phase_values
         for phase in TIME_PHASE_PREFIXES:
             value = safe_number(row.get(f"{phase}_mean_ms"))
             if value is not None:
-                phase_values[phase].append(float(value))
+                target[phase].append(float(value))
         decision_val = safe_number(row.get("decision_total_mean_ms"))
         if decision_val is not None:
-            phase_values["decision_total"].append(float(decision_val))
+            target["decision_total"].append(float(decision_val))
 
     named_means = [sum(phase_values[phase]) / len(phase_values[phase]) if phase_values[phase] else 0.0 for phase in TIME_PHASE_PREFIXES]
     named_stds = [_sample_std(phase_values[phase]) if phase_values[phase] else 0.0 for phase in TIME_PHASE_PREFIXES]
     decision_mean = (sum(phase_values["decision_total"]) / len(phase_values["decision_total"])) if phase_values["decision_total"] else 0.0
     decision_std = _sample_std(phase_values["decision_total"]) if phase_values["decision_total"] else 0.0
+    has_rl_overall = any(rl_phase_values[phase] for phase in TIME_PHASE_PREFIXES)
+    rl_named_means = [sum(rl_phase_values[phase]) / len(rl_phase_values[phase]) if rl_phase_values[phase] else 0.0 for phase in TIME_PHASE_PREFIXES]
+    rl_named_stds = [_sample_std(rl_phase_values[phase]) if rl_phase_values[phase] else 0.0 for phase in TIME_PHASE_PREFIXES]
+    rl_decision_mean = (sum(rl_phase_values["decision_total"]) / len(rl_phase_values["decision_total"])) if rl_phase_values["decision_total"] else 0.0
 
     fig2, axis2 = plt.subplots(figsize=(10.0, 5.6))
     positions = list(range(len(TIME_PHASE_PREFIXES)))
+    bar_width = 0.38 if has_rl_overall else 0.68
+    baseline_positions = [p - bar_width / 2.0 for p in positions] if has_rl_overall else positions
     axis2.bar(
-        positions,
+        baseline_positions,
         named_means,
+        width=bar_width,
         yerr=named_stds,
         capsize=2.5,
         color=[TIME_PHASE_COLORS.get(phase, "#4C78A8") for phase in TIME_PHASE_PREFIXES],
         edgecolor="#2F3E4E",
         linewidth=0.6,
+        label="baseline" if has_rl_overall else None,
     )
-    axis2.axhline(decision_mean, linestyle="--", color="#111111", linewidth=1.0, label="decision_total mean")
+    if has_rl_overall:
+        rl_positions = [p + bar_width / 2.0 for p in positions]
+        axis2.bar(
+            rl_positions,
+            rl_named_means,
+            width=bar_width,
+            yerr=rl_named_stds,
+            capsize=2.5,
+            color=[TIME_PHASE_COLORS.get(phase, "#4C78A8") for phase in TIME_PHASE_PREFIXES],
+            edgecolor="#111111",
+            linewidth=1.1,
+            hatch="//",
+            label="RL",
+        )
+        axis2.axhline(rl_decision_mean, linestyle=":", color="#111111", linewidth=1.2, label="RL decision_total mean")
+    axis2.axhline(decision_mean, linestyle="--", color="#111111", linewidth=1.0, label="decision_total mean" if not has_rl_overall else "baseline decision_total mean")
     axis2.set_xticks(positions)
     axis2.set_xticklabels([_display_label(phase) for phase in TIME_PHASE_PREFIXES], rotation=35, ha="right")
     axis2.set_ylabel("Mean latency per decision (ms)")
@@ -3129,7 +3614,7 @@ def plot_time_phase_breakdown_mean(joined_rows: list[dict[str, object]], output_
     fig2.text(
         0.01,
         0.01,
-        "Each proposer-resolver combination contributes equally; within each combination, phase means are pooled over measured decisions.",
+        "Each baseline proposer-resolver combination contributes equally; RL (if present) is averaged separately and shown as a second bar, not mixed into the baseline average.",
         fontsize=8,
         alpha=0.85,
     )
@@ -3154,13 +3639,23 @@ def plot_time_phase_totals(joined_rows: list[dict[str, object]], output_dir: Pat
     if not combos:
         return []
 
+    baseline_combos = [row for row in combos if not _is_rl_policy_label(row.get("proposer"))]
+    rl_combos = [row for row in combos if _is_rl_policy_label(row.get("proposer"))]
+
     totals_ms = {phase: 0.0 for phase in TIME_PHASE_PREFIXES + ["decision_total"]}
-    for row in combos:
+    for row in baseline_combos:
         for phase in TIME_PHASE_PREFIXES:
             totals_ms[phase] += float(row.get(f"{phase}_total_ms") or 0.0)
         totals_ms["decision_total"] += float(row.get("decision_total_total_ms") or 0.0)
 
-    max_total_ms = max(totals_ms.values()) if totals_ms else 0.0
+    rl_totals_ms = {phase: 0.0 for phase in TIME_PHASE_PREFIXES + ["decision_total"]}
+    for row in rl_combos:
+        for phase in TIME_PHASE_PREFIXES:
+            rl_totals_ms[phase] += float(row.get(f"{phase}_total_ms") or 0.0)
+        rl_totals_ms["decision_total"] += float(row.get("decision_total_total_ms") or 0.0)
+    has_rl = bool(rl_combos)
+
+    max_total_ms = max(list(totals_ms.values()) + list(rl_totals_ms.values())) if totals_ms else 0.0
     use_seconds = max_total_ms >= 5000.0
     scale = 0.001 if use_seconds else 1.0
     unit = "s" if use_seconds else "ms"
@@ -3170,8 +3665,16 @@ def plot_time_phase_totals(joined_rows: list[dict[str, object]], output_dir: Pat
     colors = [TIME_PHASE_COLORS.get(label, "#4C78A8") if label != "decision_total" else "#111111" for label in labels]
 
     fig, axis = plt.subplots(figsize=(10.0, 5.6))
-    axis.bar(list(range(len(labels))), values, color=colors, edgecolor="#2F3E4E", linewidth=0.6)
-    axis.set_xticks(list(range(len(labels))))
+    positions = list(range(len(labels)))
+    bar_width = 0.38 if has_rl else 0.68
+    baseline_positions = [p - bar_width / 2.0 for p in positions] if has_rl else positions
+    axis.bar(baseline_positions, values, width=bar_width, color=colors, edgecolor="#2F3E4E", linewidth=0.6, label="baseline" if has_rl else None)
+    if has_rl:
+        rl_values = [rl_totals_ms[label] * scale for label in labels]
+        rl_positions = [p + bar_width / 2.0 for p in positions]
+        axis.bar(rl_positions, rl_values, width=bar_width, color=colors, edgecolor="#111111", linewidth=1.1, hatch="//", label="RL")
+        axis.legend(frameon=False)
+    axis.set_xticks(positions)
     axis.set_xticklabels([_display_label(label) for label in labels], rotation=35, ha="right")
     axis.set_ylabel(f"Total measured time ({unit})")
     axis.set_title("Total measured time by decision phase")
@@ -3179,7 +3682,8 @@ def plot_time_phase_totals(joined_rows: list[dict[str, object]], output_dir: Pat
     fig.text(
         0.01,
         0.01,
-        "Totals depend on the number of measured decisions and timing runs and should not be used to compare scenarios with different measurement volumes.",
+        "Totals depend on the number of measured decisions and timing runs and should not be used to compare scenarios with different measurement volumes. "
+        "RL (if present) is summed separately and shown as a second bar, not mixed into the baseline total.",
         fontsize=8,
         alpha=0.85,
     )
@@ -4075,6 +4579,10 @@ def main() -> int:
     metrics = select_metrics(args.metrics, available_metrics)
     plot_types = resolve_plot_types(args)
 
+    rl_quality_rows, rl_timing_rows = load_rl_time_overlay(args)
+    if rl_quality_rows:
+        rows = rows + rl_quality_rows
+
     if "work_cmp" in plot_types and "work_total" not in rows[0]:
         raise ValueError(
             "metrics_wide.csv has no work estimates.\n"
@@ -4121,6 +4629,8 @@ def main() -> int:
             csv_parent=args.csv_path.parent,
         )
         timing_rows = _load_timing_rows(timing_files)
+        if rl_timing_rows:
+            timing_rows = timing_rows + rl_timing_rows
         canonical_timing_rows = _canonicalize_timing_rows(
             timing_rows,
             known_scenarios=set(known_scenarios),
