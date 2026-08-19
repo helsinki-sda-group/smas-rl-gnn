@@ -1,0 +1,138 @@
+env:
+  sumo_cfg: /projappl/project_2012159/kbocheni_temp/smas-rl-gnn/configs/small_net_cap2_hard.sumocfg
+  use_gui: false
+  R: 6
+  K_max: 3
+  N_max: 16
+  E_max: 64
+  G: 0
+  vicinity_m: 2000.0
+  max_steps: 3000
+  min_episode_steps: 100
+  decision_dt: 60
+  max_wait_delay_s: 300.0
+  max_travel_delay_s: 240.0
+  max_robot_capacity: 2
+  route_construction: nearest
+  route_exhaustive_max_stops: 8
+  route_construction_debug: false
+  admission_aware: true
+  conflict_resolution: predicted_reward_joint
+  candidates_sorting: randomized
+  two_hop: false
+  two_hop_directed: true
+  two_hop_critic: false
+  two_hop_arch: comp_corr
+  reward_params:
+    reward_type: wait_travel
+    w_comp: 3.0
+    w_wait: 1.5
+    w_travel: 1.25
+    w_deadline: 0
+    wait_cap: 600.0
+    travel_cap: 240.0
+    deadline_cap: 600.0
+  completion_mode: valid_dropoff
+  competition_joint:
+    tie_tolerance: 1.0e-8
+    competitors: two_hop
+features:
+  use_xy_pickup: false
+  use_reservation_time: false
+  base_dim: 9
+  normalize_features: true
+  use_node_type: true
+  use_ego_robot: true
+  use_edge_rt: true
+  edge_features:
+  - dx
+  - dy
+  - eta
+  - is_ego_edge
+  robot_commitment: route_slots
+  route_slots_k: 2
+seeds:
+  train:
+  - 100
+  - 200
+  - 300
+  - 400
+  - 500
+  - 600
+  - 700
+  - 800
+  - 900
+  - 1000
+  - 1100
+  - 1200
+  - 1300
+  - 1400
+  - 1500
+  - 1600
+  - 1700
+  - 1800
+  - 1900
+  - 2000
+  eval:
+  - 42
+  - 123
+  - 456
+  - 789
+  - 1011
+  - 1213
+  - 1415
+  - 1617
+  - 1819
+  - 2021
+ppo:
+  policy_kwargs:
+    hidden: 128
+    k_max: 3
+    logit_temperature: 1.0
+    noop_init: -1.0
+    freeze_noop_logit: false
+    noop_mode: state_dependent 
+    gnn_layers: 2
+    lambda_init: 0.5
+  n_steps: 256
+  batch_size: 64
+  learning_rate: 0.0003
+  gamma: 0.99
+  clip_range: 0.2
+  clip_range_vf: null
+  vf_coef: 0.35
+  ent_coef: 0.003
+  gae_lambda: 0.95
+  n_epochs: 5
+  total_timesteps: 200000
+logging:
+  run_name: 1hop_noop-w3-hard-2_prj_cap2
+  out_dir: /scratch/project_2012159/kbocheni/smas-rl-gnn/runs
+  model_save_dir: /scratch/project_2012159/kbocheni/smas-rl-gnn/runs/1hop_noop-w3-hard-2_prj_cap2/!saved_models
+  log_conflict_metrics: true
+  prune_episode_dir_after_metrics: true
+  extended_quality_metrics: true
+  extended_quality_plots: false
+  extended_quality_include_task_level: false
+  extended_quality_include_decision_level: false
+timing:
+  enabled: true
+  internal_gnn: true
+  warmup_episodes: 0
+continue_training: false
+baselines:
+  policies:
+  - random
+  - unique
+  - pickup_distance
+  - pickup_deadline
+  - pickup_deadline_distance
+  - predicted_reward
+  - predicted_reward_joint
+  - proposal_joint_competition
+  num_seeds: 10
+sorted: false
+sumoport: 8813
+
+
+
