@@ -32,12 +32,24 @@ Options:
   --coordination-window <n>   Override coordination smoothing window from YAML template.
   --mean_runs                 Enable mean-runs aggregation (sets mean_runs=true in generated config).
                               Default when omitted: false.
+  --baseline-matrix-job <id>   Job id (numeric suffix) of an eval_baseline_matrix run directory
+                              (job_eval_baseline_matrix_<id>) to source baseline reference lines from.
+  --baseline-matrix-root <p>  Root dir containing job_eval_baseline_matrix_* dirs.
+                              Default: /scratch/project_2012159/kbocheni/smas-rl-gnn/eval_baseline_matrix
+  --baseline-scenario <alias> Scenario alias used in baseline metrics filenames (e.g. wave, randdest,
+                              corridor_hard). Required when --baseline-matrix-job is set.
+  --baseline-route-construction <nr|ra>
+                              Route-construction alias for baseline filenames. Default: nr
+  --baseline-admission-aware <true|false>
+                              Whether to match admission-aware (_aa) baseline logs. Default: true
   -h, --help                  Show this help.
 
 Examples:
   scripts/plot_ablation_runs.sh 1hop 1hop_critic 2hop
   scripts/plot_ablation_runs.sh 1hop 1hop_critic 2hop --labels "1 hop,1 hop critic,2 hop"
   scripts/plot_ablation_runs.sh 1hop 1hop_critic 2hop --job-ids 6574001,6574582
+  scripts/plot_ablation_runs.sh 1hop_noop-w3-wavenear_ctc_cap2 --mean_runs \
+    --baseline-matrix-job 7243443 --baseline-scenario wave
 EOF
 }
 
@@ -56,6 +68,11 @@ COORDINATION_WINDOW_OVERRIDE=""
 JOB_IDS_CSV=""
 LABELS_CSV=""
 MEAN_RUNS_OVERRIDE="0"
+BASELINE_MATRIX_JOB=""
+BASELINE_MATRIX_ROOT="/scratch/project_2012159/kbocheni/smas-rl-gnn/eval_baseline_matrix"
+BASELINE_SCENARIO=""
+BASELINE_ROUTE="nr"
+BASELINE_ADMISSION_AWARE="true"
 
 METHODS=()
 while [[ $# -gt 0 ]]; do
@@ -100,6 +117,33 @@ while [[ $# -gt 0 ]]; do
       MEAN_RUNS_OVERRIDE="1"
       shift
       ;;
+    --baseline-matrix-job)
+      BASELINE_MATRIX_JOB="$2"
+      shift 2
+      ;;
+    --baseline-matrix-root)
+      BASELINE_MATRIX_ROOT="$2"
+      shift 2
+      ;;
+    --baseline-scenario)
+      BASELINE_SCENARIO="$2"
+      shift 2
+      ;;
+    --baseline-route-construction)
+      case "$2" in
+        nr|nearest) BASELINE_ROUTE="nr" ;;
+        ra|reward_aligned) BASELINE_ROUTE="ra" ;;
+        *) echo "[ERROR] --baseline-route-construction must be nr/nearest or ra/reward_aligned (got: $2)"; exit 1 ;;
+      esac
+      shift 2
+      ;;
+    --baseline-admission-aware)
+      case "$2" in
+        true|false) BASELINE_ADMISSION_AWARE="$2" ;;
+        *) echo "[ERROR] --baseline-admission-aware must be true or false (got: $2)"; exit 1 ;;
+      esac
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -118,6 +162,11 @@ done
 
 if [[ ${#METHODS[@]} -lt 1 ]]; then
   echo "[ERROR] Provide at least one method to compare."
+  exit 1
+fi
+
+if [[ -n "$BASELINE_MATRIX_JOB" && -z "$BASELINE_SCENARIO" ]]; then
+  echo "[ERROR] --baseline-scenario is required when --baseline-matrix-job is set."
   exit 1
 fi
 
@@ -298,11 +347,58 @@ for i in "${!SELECTED_JOBDIRS[@]}"; do
   printf '%s\t%s\t%s\n' "$base_name" "${SELECTED_LABELS[$i]}" "${SELECTED_JOBDIRS[$i]}" >> "$MAPPING_FILE"
 done
 
-ACTION_PARAMS="$($PYTHON_BIN - "$TEMPLATE_CONFIG" "$GENERATED_CONF" "$MAPPING_FILE" "$OUTDIR" "${ACTION_WINDOW_OVERRIDE:-}" "${CONFLICTS_WINDOW_OVERRIDE:-}" "${COORDINATION_WINDOW_OVERRIDE:-}" "$MEAN_RUNS_OVERRIDE" <<'PY'
+# Resolver suffix -> baseline metrics-log resolver alias (see utils/metrics_calculator.py resolver_alias_from_name).
+resolver_alias_for_method() {
+  local method="$1"
+  if [[ "$method" =~ _(ctc|rnd|cap|hun|pr|prj)_cap2$ ]]; then
+    case "${BASH_REMATCH[1]}" in
+      ctc) echo "closest" ;;
+      rnd) echo "random" ;;
+      cap) echo "capacity" ;;
+      hun) echo "hungarian" ;;
+      pr) echo "predicted_reward" ;;
+      prj) echo "predicted_reward_joint" ;;
+    esac
+    return
+  fi
+  echo ""
+}
+
+BASELINE_MAPPING_FILE="$OUTDIR/baseline_mapping.tsv"
+: > "$BASELINE_MAPPING_FILE"
+if [[ -n "$BASELINE_MATRIX_JOB" ]]; then
+  baseline_aa_suffix=""
+  [[ "$BASELINE_ADMISSION_AWARE" == "true" ]] && baseline_aa_suffix="_aa"
+  baseline_job_dir="$BASELINE_MATRIX_ROOT/job_eval_baseline_matrix_${BASELINE_MATRIX_JOB}"
+  if [[ ! -d "$baseline_job_dir" ]]; then
+    echo "[WARN] Baseline matrix job dir not found: $baseline_job_dir"
+  fi
+  for method in "${METHODS[@]}"; do
+    resolver_alias="$(resolver_alias_for_method "$method")"
+    if [[ -z "$resolver_alias" ]]; then
+      echo "[WARN] Could not infer resolver from method '$method'; skipping baseline lookup."
+      continue
+    fi
+    shopt -s nullglob
+    baseline_matches=("$baseline_job_dir"/metrics_*_"${BASELINE_SCENARIO}"_"${resolver_alias}"_"${BASELINE_ROUTE}${baseline_aa_suffix}".log)
+    shopt -u nullglob
+    if [[ ${#baseline_matches[@]} -eq 0 ]]; then
+      echo "[WARN] No baseline metrics log found for method '$method' (resolver=$resolver_alias, scenario=$BASELINE_SCENARIO)."
+      continue
+    fi
+    if [[ ${#baseline_matches[@]} -gt 1 ]]; then
+      echo "[WARN] Multiple baseline metrics logs matched for method '$method'; using the first: ${baseline_matches[0]}"
+    fi
+    echo "[INFO] Baseline for '$method' (resolver=$resolver_alias): ${baseline_matches[0]}"
+    printf '%s\t%s\n' "$method" "${baseline_matches[0]}" >> "$BASELINE_MAPPING_FILE"
+  done
+fi
+
+ACTION_PARAMS="$($PYTHON_BIN - "$TEMPLATE_CONFIG" "$GENERATED_CONF" "$MAPPING_FILE" "$OUTDIR" "${ACTION_WINDOW_OVERRIDE:-}" "${CONFLICTS_WINDOW_OVERRIDE:-}" "${COORDINATION_WINDOW_OVERRIDE:-}" "$MEAN_RUNS_OVERRIDE" "$BASELINE_MAPPING_FILE" <<'PY'
 import sys
 from omegaconf import OmegaConf
 
-template_path, generated_path, mapping_path, outdir, action_override, conflicts_override, coordination_override, mean_runs_override = sys.argv[1:9]
+template_path, generated_path, mapping_path, outdir, action_override, conflicts_override, coordination_override, mean_runs_override, baseline_mapping_path = sys.argv[1:10]
 cfg = OmegaConf.load(template_path)
 
 model_dirs = []
@@ -320,6 +416,16 @@ cfg.model_dirs = model_dirs
 cfg.experiment_names = experiment_names
 cfg.output_dir = f"{outdir}/ablation_results"
 cfg.mean_runs = bool(int(mean_runs_override))
+
+baseline_logs = {}
+with open(baseline_mapping_path, "r", encoding="utf-8") as f:
+    for line in f:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        method, log_path = line.split("\t", 1)
+        baseline_logs[method] = log_path
+cfg.baseline_logs = baseline_logs
 
 script_cfg = cfg.get("script") or {}
 default_window = int(cfg.get("k_eval", 10))

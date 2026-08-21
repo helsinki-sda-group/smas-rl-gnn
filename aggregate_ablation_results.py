@@ -396,6 +396,41 @@ def _method_from_label(label: str) -> str:
     return re.sub(r"-\d+(?=$|_)", "", str(label))
 
 
+def _parse_baseline_summary(log_path: Path) -> Dict[str, Dict[str, float]]:
+    """Parse the '# SUMMARY STATISTICS' table from an eval_baselines.py metrics log.
+
+    Returns {policy_name: {metric_key: mean_value}}.
+    """
+    text = Path(log_path).read_text(encoding="utf-8", errors="ignore")
+    marker = "# SUMMARY STATISTICS"
+    idx = text.find(marker)
+    if idx == -1:
+        return {}
+
+    header_tokens: Optional[List[str]] = None
+    result: Dict[str, Dict[str, float]] = {}
+    for line in text[idx:].splitlines()[1:]:
+        stripped = line.strip()
+        if not stripped:
+            if header_tokens is not None:
+                break
+            continue
+        tokens = [t for t in stripped.split() if t != "|"]
+        if header_tokens is None:
+            if tokens and tokens[0] == "pol":
+                header_tokens = [t.split("\u00b1")[0] for t in tokens[1:]]
+            continue
+        policy_name = tokens[0]
+        values: Dict[str, float] = {}
+        for key, val_tok in zip(header_tokens, tokens[1:]):
+            try:
+                values[key] = float(val_tok.split("\u00b1")[0])
+            except ValueError:
+                continue
+        result[policy_name] = values
+    return result
+
+
 def _ma(data: np.ndarray, window: int) -> np.ndarray:
     data = np.array(data, dtype=float)
     if data.size == 0:
@@ -591,6 +626,7 @@ def _plot_eval_comparison(
     coordination_output_dir: Optional[Path] = None,
     coordination_ma_window: Optional[int] = None,
     coordination_plot_std: bool = True,
+    baseline_logs: Optional[Dict[str, str]] = None,
 ) -> None:
     modes = {"deterministic", "stochastic"}
     if include_training_logs:
@@ -611,6 +647,13 @@ def _plot_eval_comparison(
     reward_metrics = [m for m in ["rew", "wait", "comp", "dln", "trav", "mdl"] if m in available_metrics]
     coordination_metrics = [m for m in COORDINATION_METRIC_KEYS if m in available_metrics]
     conflict_metrics = [m for m in CONFLICT_METRIC_KEYS if m in available_metrics]
+
+    baseline_metrics_by_method: Dict[str, Dict[str, Dict[str, float]]] = {}
+    for method, log_path in (baseline_logs or {}).items():
+        try:
+            baseline_metrics_by_method[method] = _parse_baseline_summary(Path(log_path))
+        except Exception as exc:
+            print(f"[WARN] Failed to parse baseline log for '{method}' ({log_path}): {exc}")
 
     plot_dir = output_dir / "eval_comp_plots"
     plot_dir.mkdir(parents=True, exist_ok=True)
@@ -729,6 +772,7 @@ def _plot_eval_comparison(
         window: int,
         y_limits: Optional[Tuple[float, float]],
         std_enabled: bool,
+        baseline_lines: Optional[List[Tuple[str, float]]] = None,
     ) -> List[Dict[str, object]]:
         series_rows = _collect_series_rows(metric)
         if not series_rows:
@@ -782,6 +826,9 @@ def _plot_eval_comparison(
                         ma_std = _ma(std_raw, window) if std_raw is not None else _ma_std(means_raw, window)
                         ax.fill_between(ts_raw, ma_vals - ma_std, ma_vals + ma_std, alpha=0.15)
 
+        for baseline_label, baseline_value in (baseline_lines or []):
+            ax.axhline(y=baseline_value, linestyle=(0, (3, 2)), linewidth=1.3, alpha=0.65, label=baseline_label)
+
         ax.set_xlabel("Training Steps", fontsize=11, fontweight="bold")
         ax.set_ylabel(ylabel, fontsize=11, fontweight="bold")
         ax.set_title(f"{ylabel} vs Training Steps", fontsize=12, fontweight="bold")
@@ -802,6 +849,12 @@ def _plot_eval_comparison(
         return plotted_series
 
     for metric in reward_metrics:
+        baseline_lines = [
+            (f"{method} baseline:{policy_name}", policy_metrics[metric])
+            for method, policies in baseline_metrics_by_method.items()
+            for policy_name, policy_metrics in policies.items()
+            if metric in policy_metrics
+        ]
         _plot_metric(
             metric,
             metric,
@@ -810,6 +863,7 @@ def _plot_eval_comparison(
             ma_window,
             None,
             std_enabled=True,
+            baseline_lines=baseline_lines,
         )
 
     coord_plotted: Dict[str, List[Dict[str, object]]] = {}
@@ -993,6 +1047,7 @@ def main() -> None:
         coordination_output_dir = Path(str(conf.get("coordination_output_dir", output_dir / "coord_cmp")))
         coordination_ma = int(conf.get("coordination_plot_ma", ma_window))
         coordination_plot_std = bool(conf.get("coordination_plot_std", True))
+        baseline_logs = dict(conf.get("baseline_logs") or {})
         _plot_eval_comparison(
             rows,
             output_dir,
@@ -1005,6 +1060,7 @@ def main() -> None:
             coordination_output_dir=coordination_output_dir,
             coordination_ma_window=coordination_ma,
             coordination_plot_std=coordination_plot_std,
+            baseline_logs=baseline_logs,
         )
 
     csv_rows = []
