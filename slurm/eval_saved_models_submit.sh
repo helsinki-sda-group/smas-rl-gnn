@@ -96,10 +96,10 @@ family_to_regex() {
   local core
   local suffix
 
-  if [[ "$family" =~ ^(.+)_(ctc|rnd)_cap2$ ]]; then
+  if [[ "$family" =~ ^(.+)_(ctc|rnd|cap|hun|pr|prj)_cap2$ ]]; then
     core="${BASH_REMATCH[1]}"
     suffix="_${BASH_REMATCH[2]}_cap2"
-  elif [[ "$family" =~ ^(.+)_(ctc|rnd)$ ]]; then
+  elif [[ "$family" =~ ^(.+)_(ctc|rnd|cap|hun|pr|prj)$ ]]; then
     core="${BASH_REMATCH[1]}"
     suffix="_${BASH_REMATCH[2]}"
   else
