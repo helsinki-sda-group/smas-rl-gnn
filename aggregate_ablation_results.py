@@ -826,8 +826,16 @@ def _plot_eval_comparison(
                         ma_std = _ma(std_raw, window) if std_raw is not None else _ma_std(means_raw, window)
                         ax.fill_between(ts_raw, ma_vals - ma_std, ma_vals + ma_std, alpha=0.15)
 
-        for baseline_label, baseline_value in (baseline_lines or []):
-            ax.axhline(y=baseline_value, linestyle=(0, (3, 2)), linewidth=1.3, alpha=0.65, label=baseline_label)
+        baseline_palette = plt.get_cmap("tab10").colors
+        for baseline_idx, (baseline_label, baseline_value) in enumerate(baseline_lines or []):
+            ax.axhline(
+                y=baseline_value,
+                color=baseline_palette[baseline_idx % len(baseline_palette)],
+                linestyle=(0, (3, 2)),
+                linewidth=1.3,
+                alpha=0.8,
+                label=baseline_label,
+            )
 
         ax.set_xlabel("Training Steps", fontsize=11, fontweight="bold")
         ax.set_ylabel(ylabel, fontsize=11, fontweight="bold")
