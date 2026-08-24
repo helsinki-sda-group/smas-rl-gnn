@@ -41,6 +41,7 @@
 #   --pareto / --no-pareto              Draw Pareto frontier on rew_time_cmp (default: on)
 #   --time-diagnose-proposer-resolver   Add proposer/resolver latency diagnostics
 #   --time-actor-only                   Add actor-only time plots excluding RL critic latency
+#   --time-amortized                    Add amortized time plots (proposer time / num_robots [+ resolver])
 #   --skip-aggregate                    Reuse an existing metrics_wide.csv under the baseline job dir
 #   --output-dir DIR                    Override output directory
 #   --dry-run                           Print the commands without executing them
@@ -93,6 +94,7 @@ SCENARIO=all
 PARETO=1
 TIME_DIAG=0
 TIME_ACTOR_ONLY=0
+TIME_AMORTIZED=0
 SKIP_AGGREGATE=0
 OUTPUT_DIR_OVERRIDE=""
 DRY_RUN=0
@@ -117,6 +119,7 @@ while [[ $# -gt 0 ]]; do
     --no-pareto) PARETO=0; shift ;;
     --time-diagnose-proposer-resolver) TIME_DIAG=1; shift ;;
     --time-actor-only) TIME_ACTOR_ONLY=1; shift ;;
+    --time-amortized) TIME_AMORTIZED=1; shift ;;
     --skip-aggregate) SKIP_AGGREGATE=1; shift ;;
     --output-dir) OUTPUT_DIR_OVERRIDE="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -203,6 +206,9 @@ if [[ "$TIME_DIAG" -eq 1 ]]; then
 fi
 if [[ "$TIME_ACTOR_ONLY" -eq 1 ]]; then
   PLOT_CMD+=(--time-actor-only)
+fi
+if [[ "$TIME_AMORTIZED" -eq 1 ]]; then
+  PLOT_CMD+=(--time-amortized)
 fi
 
 echo "[INFO] Plotting time comparison -> $OUTPUT_DIR"

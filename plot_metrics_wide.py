@@ -268,6 +268,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--time-amortized",
+        action="store_true",
+        help=(
+            "Also emit 'amortized' reward-vs-time plots where PROPOSER time is divided by num_robots "
+            "(implies --time): a proposer-only variant (rew_time_cmp_amortized_proposer.png) and a "
+            "proposer/num_robots + resolver variant (rew_time_cmp_amortized.png), each with an actor-only "
+            "(GNN critic excluded) counterpart. Resolver time and every other --time plot (plot_time_cmp, "
+            "phase breakdowns, proposer/resolver diagnostics) are never normalized by num_robots."
+        ),
+    )
+    parser.add_argument(
         "--time-phase-stat",
         choices=["mean", "total", "both"],
         default="both",
@@ -559,6 +570,10 @@ def resolve_plot_types(args: argparse.Namespace) -> list[str]:
             requested_types.append("time_cmp")
         requested_types.append("time_diag")
     if args.time_actor_only:
+        has_explicit_flags = True
+        if "time_cmp" not in requested_types:
+            requested_types.append("time_cmp")
+    if args.time_amortized:
         has_explicit_flags = True
         if "time_cmp" not in requested_types:
             requested_types.append("time_cmp")
@@ -2004,6 +2019,7 @@ def _build_rl_quality_row(
     protocol: str,
     scenario: str,
     source_name: str,
+    num_robots: float,
 ) -> dict[str, object]:
     row: dict[str, object] = {
         "source_file": source_name,
@@ -2014,6 +2030,9 @@ def _build_rl_quality_row(
         "route_construction": route_construction,
         "admission_aware": "true" if _protocol_alias_from_text(protocol) == "aa" else "false",
         "pol": label,
+        # Lets the amortized (proposer-time / num_robots) --time plots normalize RL the same way as
+        # baseline rows (which carry a real num_robots column from aggregate_metrics_logs.py).
+        "num_robots": float(num_robots),
     }
     row.update(quality_point)
     return row
@@ -2099,6 +2118,7 @@ def _load_rl_overlay_group(
                     protocol=protocol,
                     scenario=scenario,
                     source_name=run["name"],
+                    num_robots=float(args.eval_num_robots),
                 )
             )
             scoped_timing = _rl_timing_rows_for_scope(run, scope=str(args.rl_time_scope))
@@ -2126,6 +2146,7 @@ def _load_rl_overlay_group(
                 protocol=protocol,
                 scenario=scenario,
                 source_name=best_run["name"],
+                num_robots=float(args.eval_num_robots),
             )
         )
         scoped_timing = _rl_timing_rows_for_scope(best_run, scope=str(args.rl_time_scope))
@@ -2175,6 +2196,7 @@ def _load_rl_overlay_group(
             protocol=protocol,
             scenario=scenario,
             source_name="+".join(run["name"] for run in runs),
+            num_robots=float(args.eval_num_robots),
         )
     )
     for run_index, run in enumerate(runs):
@@ -3373,6 +3395,7 @@ def plot_time_cmp(
         x_std_field="timing_allocation_time_std_ms",
         x_label="Measured proposal + resolver latency per decision (ms)",
         filename_suffix="",
+        title_suffix="",
         footer_note="",
     )
 
@@ -3400,7 +3423,160 @@ def plot_time_cmp_actor_only(
         x_std_field="timing_actor_only_allocation_time_std_ms",
         x_label="Measured proposal (actor-only, critic excluded) + resolver latency per decision (ms)",
         filename_suffix="_actor_only",
+        title_suffix=" (actor-only)",
         footer_note=" RL proposal time excludes GNN critic computation (critic is not required for inference); baseline points are unchanged.",
+    )
+
+
+def _add_amortized_time_fields(joined_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Return a COPY of joined_rows with extra 'amortized_*' fields = proposer time / num_robots
+    [+ resolver time], for the dedicated amortized Pareto plots ONLY. Every other --time plot
+    (plot_time_cmp, plot_time_cmp_actor_only, phase breakdowns, proposer/resolver diagnostics) keeps
+    reading the original un-normalized 'timing_*' fields and is completely unaffected by this function.
+    Rows whose num_robots can't be resolved (baseline: missing/invalid; RL: shouldn't happen, see
+    _build_rl_quality_row) are returned unchanged and simply have no amortized_* fields, so they are
+    skipped by _plot_time_cmp_variant like any other row missing its x-field."""
+    out_rows: list[dict[str, object]] = []
+    for row in joined_rows:
+        merged = dict(row)
+        num_robots = _resolved_num_robots_for_parallel(row)
+        if num_robots is not None and num_robots > 0.0:
+            resolution = safe_number(row.get("timing_resolution_time_ms"))
+            resolution_std = safe_number(row.get("timing_resolution_time_std_ms")) or 0.0
+
+            proposal = safe_number(row.get("timing_proposal_time_ms"))
+            proposal_std = safe_number(row.get("timing_proposal_time_std_ms")) or 0.0
+            if proposal is not None:
+                amortized_proposal = float(proposal) / float(num_robots)
+                amortized_proposal_std = float(proposal_std) / float(num_robots)
+                merged["amortized_proposal_time_ms"] = amortized_proposal
+                merged["amortized_proposal_time_std_ms"] = amortized_proposal_std
+                if resolution is not None:
+                    merged["amortized_allocation_time_ms"] = amortized_proposal + float(resolution)
+                    # Proposal (÷num_robots) and resolution are independently measured; combine in quadrature.
+                    merged["amortized_allocation_time_std_ms"] = math.sqrt(
+                        amortized_proposal_std ** 2 + float(resolution_std) ** 2
+                    )
+
+            actor_only_proposal = safe_number(row.get("timing_actor_only_proposal_time_ms"))
+            actor_only_proposal_std = safe_number(row.get("timing_actor_only_proposal_time_std_ms")) or 0.0
+            if actor_only_proposal is not None:
+                amortized_actor_only_proposal = float(actor_only_proposal) / float(num_robots)
+                amortized_actor_only_proposal_std = float(actor_only_proposal_std) / float(num_robots)
+                merged["amortized_actor_only_proposal_time_ms"] = amortized_actor_only_proposal
+                merged["amortized_actor_only_proposal_time_std_ms"] = amortized_actor_only_proposal_std
+                if resolution is not None:
+                    merged["amortized_actor_only_allocation_time_ms"] = amortized_actor_only_proposal + float(resolution)
+                    merged["amortized_actor_only_allocation_time_std_ms"] = math.sqrt(
+                        amortized_actor_only_proposal_std ** 2 + float(resolution_std) ** 2
+                    )
+        out_rows.append(merged)
+    return out_rows
+
+
+def plot_time_cmp_amortized_proposer(
+    joined_rows: list[dict[str, object]],
+    metrics: list[str],
+    output_dir: Path,
+    *,
+    pareto: bool,
+    annotate_time: bool,
+    time_linear: bool,
+) -> list[Path]:
+    """Proposer time only, divided by num_robots (amortized); resolver time is NOT included."""
+    return _plot_time_cmp_variant(
+        joined_rows,
+        metrics,
+        output_dir,
+        pareto=pareto,
+        annotate_time=annotate_time,
+        time_linear=time_linear,
+        x_field="amortized_proposal_time_ms",
+        x_std_field="amortized_proposal_time_std_ms",
+        x_label="Proposer latency per decision, amortized over num_robots (ms)",
+        filename_suffix="_amortized_proposer",
+        title_suffix=" (amortized proposer only)",
+        footer_note=" Proposer time divided by num_robots (amortized); resolver time not included. Baseline and RL use the same normalization.",
+    )
+
+
+def plot_time_cmp_amortized(
+    joined_rows: list[dict[str, object]],
+    metrics: list[str],
+    output_dir: Path,
+    *,
+    pareto: bool,
+    annotate_time: bool,
+    time_linear: bool,
+) -> list[Path]:
+    """Proposer time divided by num_robots (amortized), plus resolver time (not divided)."""
+    return _plot_time_cmp_variant(
+        joined_rows,
+        metrics,
+        output_dir,
+        pareto=pareto,
+        annotate_time=annotate_time,
+        time_linear=time_linear,
+        x_field="amortized_allocation_time_ms",
+        x_std_field="amortized_allocation_time_std_ms",
+        x_label="Amortized proposer (\u00f7num_robots) + resolver latency per decision (ms)",
+        filename_suffix="_amortized",
+        title_suffix=" (amortized)",
+        footer_note=" Proposer time divided by num_robots (amortized) then added to resolver time; baseline and RL use the same normalization.",
+    )
+
+
+def plot_time_cmp_amortized_proposer_actor_only(
+    joined_rows: list[dict[str, object]],
+    metrics: list[str],
+    output_dir: Path,
+    *,
+    pareto: bool,
+    annotate_time: bool,
+    time_linear: bool,
+) -> list[Path]:
+    """Actor-only proposer time (critic excluded) divided by num_robots (amortized); resolver time
+    is NOT included."""
+    return _plot_time_cmp_variant(
+        joined_rows,
+        metrics,
+        output_dir,
+        pareto=pareto,
+        annotate_time=annotate_time,
+        time_linear=time_linear,
+        x_field="amortized_actor_only_proposal_time_ms",
+        x_std_field="amortized_actor_only_proposal_time_std_ms",
+        x_label="Proposer latency (actor-only, critic excluded) per decision, amortized over num_robots (ms)",
+        filename_suffix="_amortized_proposer_actor_only",
+        title_suffix=" (amortized proposer only, actor-only)",
+        footer_note=" Actor-only proposer time (critic excluded) divided by num_robots (amortized); resolver time not included. Baseline points are unaffected.",
+    )
+
+
+def plot_time_cmp_amortized_actor_only(
+    joined_rows: list[dict[str, object]],
+    metrics: list[str],
+    output_dir: Path,
+    *,
+    pareto: bool,
+    annotate_time: bool,
+    time_linear: bool,
+) -> list[Path]:
+    """Actor-only proposer time (critic excluded) divided by num_robots (amortized), plus resolver
+    time (not divided)."""
+    return _plot_time_cmp_variant(
+        joined_rows,
+        metrics,
+        output_dir,
+        pareto=pareto,
+        annotate_time=annotate_time,
+        time_linear=time_linear,
+        x_field="amortized_actor_only_allocation_time_ms",
+        x_std_field="amortized_actor_only_allocation_time_std_ms",
+        x_label="Amortized actor-only proposer (\u00f7num_robots) + resolver latency per decision (ms)",
+        filename_suffix="_amortized_actor_only",
+        title_suffix=" (amortized, actor-only)",
+        footer_note=" Actor-only proposer time (critic excluded) divided by num_robots (amortized) then added to resolver time. Baseline points are unaffected.",
     )
 
 
@@ -3416,6 +3592,7 @@ def _plot_time_cmp_variant(
     x_std_field: str,
     x_label: str,
     filename_suffix: str,
+    title_suffix: str,
     footer_note: str,
 ) -> list[Path]:
     saved_paths: list[Path] = []
@@ -3520,9 +3697,9 @@ def _plot_time_cmp_variant(
         axis.set_xlabel(x_label)
         axis.set_ylabel(_metric_ylabel(metric))
         if str(metric).strip().lower() == "rew":
-            axis.set_title("Reward vs measured allocation latency" + (" (actor-only)" if filename_suffix else ""))
+            axis.set_title("Reward vs measured allocation latency" + title_suffix)
         else:
-            axis.set_title(f"{_metric_title(metric)} vs measured allocation latency" + (" (actor-only)" if filename_suffix else ""))
+            axis.set_title(f"{_metric_title(metric)} vs measured allocation latency" + title_suffix)
         axis.grid(axis="y", alpha=0.2, linestyle="-", linewidth=0.8)
         axis.set_axisbelow(True)
 
@@ -5099,6 +5276,48 @@ def main() -> int:
                     saved_paths.extend(
                         plot_time_cmp_actor_only(
                             joined_rows,
+                            metrics,
+                            time_output_dir,
+                            pareto=bool(args.pareto),
+                            annotate_time=bool(args.annotate_time),
+                            time_linear=bool(args.time_linear),
+                        )
+                    )
+                if args.time_amortized:
+                    amortized_joined_rows = _add_amortized_time_fields(joined_rows)
+                    saved_paths.extend(
+                        plot_time_cmp_amortized_proposer(
+                            amortized_joined_rows,
+                            metrics,
+                            time_output_dir,
+                            pareto=bool(args.pareto),
+                            annotate_time=bool(args.annotate_time),
+                            time_linear=bool(args.time_linear),
+                        )
+                    )
+                    saved_paths.extend(
+                        plot_time_cmp_amortized(
+                            amortized_joined_rows,
+                            metrics,
+                            time_output_dir,
+                            pareto=bool(args.pareto),
+                            annotate_time=bool(args.annotate_time),
+                            time_linear=bool(args.time_linear),
+                        )
+                    )
+                    saved_paths.extend(
+                        plot_time_cmp_amortized_proposer_actor_only(
+                            amortized_joined_rows,
+                            metrics,
+                            time_output_dir,
+                            pareto=bool(args.pareto),
+                            annotate_time=bool(args.annotate_time),
+                            time_linear=bool(args.time_linear),
+                        )
+                    )
+                    saved_paths.extend(
+                        plot_time_cmp_amortized_actor_only(
+                            amortized_joined_rows,
                             metrics,
                             time_output_dir,
                             pareto=bool(args.pareto),
