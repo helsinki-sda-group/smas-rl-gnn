@@ -2194,8 +2194,10 @@ def load_rl_time_overlay(args: argparse.Namespace) -> tuple[list[dict[str, objec
 
     --rl-eval-dirs may be repeated to overlay SEVERAL RL runs (e.g. the same proposer trained/evaluated
     against different resolvers) at once: each occurrence is its own group, reduced independently per
-    --rl-mode, and each group's resolver is auto-detected from its own timing data so groups never
-    collide even though they share the same --eval-proposer label.
+    --rl-mode. All groups share the plain "rl_<proposer>" label -- each group's resolver is auto-detected
+    from its own timing data, so distinct-resolver groups already land in different per-resolver plots
+    without needing a label suffix. A numeric "_g{N}" suffix is only added when two+ groups resolve to the
+    SAME resolver value (a real ambiguity), so they don't get merged/confused in per-resolver plots.
     """
     groups = [list(group) for group in (args.rl_eval_dirs or []) if group]
     if not groups:
@@ -2204,13 +2206,10 @@ def load_rl_time_overlay(args: argparse.Namespace) -> tuple[list[dict[str, objec
     scenario = str(args.eval_scenario)
     route_construction = str(args.eval_route_construction)
     protocol = str(args.eval_protocol)
-    multi_group = len(groups) > 1
+    base_label = f"{RL_POLICY_PREFIX}{args.eval_proposer}"
 
-    quality_rows: list[dict[str, object]] = []
-    timing_rows: list[dict[str, object]] = []
+    per_group: list[dict[str, object]] = []
     for group_index, eval_dirs in enumerate(groups):
-        label_suffix = f"_g{group_index + 1}" if multi_group else ""
-        base_label = f"{RL_POLICY_PREFIX}{args.eval_proposer}{label_suffix}"
         group_quality_rows, group_timing_rows = _load_rl_overlay_group(
             eval_dirs,
             args=args,
@@ -2221,8 +2220,31 @@ def load_rl_time_overlay(args: argparse.Namespace) -> tuple[list[dict[str, objec
             # Groups' episode numbering must never collide even under "best"/"mean" modes.
             group_episode_offset=group_index * 100_000_000,
         )
-        quality_rows.extend(group_quality_rows)
-        timing_rows.extend(group_timing_rows)
+        resolvers_used = {str(row.get("resolver") or "") for row in group_quality_rows}
+        per_group.append({
+            "quality_rows": group_quality_rows,
+            "timing_rows": group_timing_rows,
+            "resolvers": resolvers_used,
+        })
+
+    resolver_group_counts: dict[str, int] = {}
+    for group in per_group:
+        for resolver in group["resolvers"]:
+            resolver_group_counts[resolver] = resolver_group_counts.get(resolver, 0) + 1
+
+    quality_rows: list[dict[str, object]] = []
+    timing_rows: list[dict[str, object]] = []
+    for group_index, group in enumerate(per_group):
+        needs_suffix = any(resolver_group_counts.get(resolver, 0) > 1 for resolver in group["resolvers"])
+        suffix = f"_g{group_index + 1}" if needs_suffix else ""
+        for row in group["quality_rows"]:
+            if suffix and str(row.get("pol", "")).startswith(base_label):
+                row["pol"] = f"{row['pol']}{suffix}"
+            quality_rows.append(row)
+        for row in group["timing_rows"]:
+            if suffix and str(row.get("proposer", "")).startswith(base_label):
+                row["proposer"] = f"{row['proposer']}{suffix}"
+            timing_rows.append(row)
     return quality_rows, timing_rows
 
 
