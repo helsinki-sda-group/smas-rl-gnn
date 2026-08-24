@@ -2019,7 +2019,6 @@ def _build_rl_quality_row(
     protocol: str,
     scenario: str,
     source_name: str,
-    num_robots: float,
 ) -> dict[str, object]:
     row: dict[str, object] = {
         "source_file": source_name,
@@ -2030,9 +2029,6 @@ def _build_rl_quality_row(
         "route_construction": route_construction,
         "admission_aware": "true" if _protocol_alias_from_text(protocol) == "aa" else "false",
         "pol": label,
-        # Lets the amortized (proposer-time / num_robots) --time plots normalize RL the same way as
-        # baseline rows (which carry a real num_robots column from aggregate_metrics_logs.py).
-        "num_robots": float(num_robots),
     }
     row.update(quality_point)
     return row
@@ -2118,7 +2114,6 @@ def _load_rl_overlay_group(
                     protocol=protocol,
                     scenario=scenario,
                     source_name=run["name"],
-                    num_robots=float(args.eval_num_robots),
                 )
             )
             scoped_timing = _rl_timing_rows_for_scope(run, scope=str(args.rl_time_scope))
@@ -2146,7 +2141,6 @@ def _load_rl_overlay_group(
                 protocol=protocol,
                 scenario=scenario,
                 source_name=best_run["name"],
-                num_robots=float(args.eval_num_robots),
             )
         )
         scoped_timing = _rl_timing_rows_for_scope(best_run, scope=str(args.rl_time_scope))
@@ -2196,7 +2190,6 @@ def _load_rl_overlay_group(
             protocol=protocol,
             scenario=scenario,
             source_name="+".join(run["name"] for run in runs),
-            num_robots=float(args.eval_num_robots),
         )
     )
     for run_index, run in enumerate(runs):
@@ -3428,18 +3421,26 @@ def plot_time_cmp_actor_only(
     )
 
 
-def _add_amortized_time_fields(joined_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+def _add_amortized_time_fields(joined_rows: list[dict[str, object]], *, rl_num_robots: float) -> list[dict[str, object]]:
     """Return a COPY of joined_rows with extra 'amortized_*' fields = proposer time / num_robots
     [+ resolver time], for the dedicated amortized Pareto plots ONLY. Every other --time plot
     (plot_time_cmp, plot_time_cmp_actor_only, phase breakdowns, proposer/resolver diagnostics) keeps
     reading the original un-normalized 'timing_*' fields and is completely unaffected by this function.
-    Rows whose num_robots can't be resolved (baseline: missing/invalid; RL: shouldn't happen, see
-    _build_rl_quality_row) are returned unchanged and simply have no amortized_* fields, so they are
-    skipped by _plot_time_cmp_variant like any other row missing its x-field."""
+    Deliberately does NOT write a 'num_robots' field onto the row itself: RL quality rows have no real
+    num_robots column, and earlier writing one there leaked into unrelated diagnostics that key off
+    row.get('num_robots') (e.g. candidate/active-decision workload bar charts), producing garbage
+    (negative/huge-ratio) bars for RL. Baseline num_robots is still read via the row's real column
+    (through _resolved_num_robots_for_parallel); RL always uses --eval-num-robots directly.
+    Rows where num_robots can't be resolved just don't get amortized_* fields and are silently skipped
+    downstream (same as any row missing its x-field)."""
     out_rows: list[dict[str, object]] = []
     for row in joined_rows:
         merged = dict(row)
-        num_robots = _resolved_num_robots_for_parallel(row)
+        proposer_label = row.get("timing_proposer") if row.get("timing_proposer") is not None else row.get("pol")
+        if _is_rl_policy_label(proposer_label):
+            num_robots: float | None = float(rl_num_robots) if float(rl_num_robots) > 0.0 else None
+        else:
+            num_robots = _resolved_num_robots_for_parallel(row)
         if num_robots is not None and num_robots > 0.0:
             resolution = safe_number(row.get("timing_resolution_time_ms"))
             resolution_std = safe_number(row.get("timing_resolution_time_std_ms")) or 0.0
@@ -5284,7 +5285,9 @@ def main() -> int:
                         )
                     )
                 if args.time_amortized:
-                    amortized_joined_rows = _add_amortized_time_fields(joined_rows)
+                    amortized_joined_rows = _add_amortized_time_fields(
+                        joined_rows, rl_num_robots=float(args.eval_num_robots)
+                    )
                     saved_paths.extend(
                         plot_time_cmp_amortized_proposer(
                             amortized_joined_rows,
