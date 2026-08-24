@@ -11,7 +11,7 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-from matplotlib.ticker import LogLocator, NullFormatter
+from matplotlib.ticker import FuncFormatter, LogLocator
 
 from estimate_work_metrics import clip, insertion_pairs, normalize_name, resolver_work
 
@@ -878,6 +878,15 @@ def _work_output_suffix(work_measure: str) -> str:
     if work_measure == "parallel":
         return "_parallel"
     return ""
+
+
+def _apply_log_x_axis_ticks(axis: plt.Axes) -> None:
+    """Label log-scale x-axis minor ticks (2/3/5/7 per decade) with plain numbers, so scatter points
+    aren't misread from bare pixel position between the sparse power-of-10 major gridlines."""
+    axis.xaxis.set_major_locator(LogLocator(base=10.0))
+    axis.xaxis.set_minor_locator(LogLocator(base=10.0, subs=(2.0, 3.0, 5.0, 7.0)))
+    axis.xaxis.set_minor_formatter(FuncFormatter(lambda value, _pos: f"{value:g}"))
+    axis.tick_params(axis="x", which="minor", labelsize=7)
 
 
 def set_tight_log_x_limits(
@@ -2693,9 +2702,7 @@ def plot_work_cmp(
 
             plotted_x_values = [float(point["x_value"]) for point in valid_points]
             set_tight_log_x_limits(axis, plotted_x_values, padding_fraction=work_x_padding)
-            axis.xaxis.set_major_locator(LogLocator(base=10.0))
-            axis.xaxis.set_minor_locator(LogLocator(base=10.0, subs=tuple(range(2, 10))))
-            axis.xaxis.set_minor_formatter(NullFormatter())
+            _apply_log_x_axis_ticks(axis)
 
             axis.set_xlabel(_work_xlabel_for_measure(work_x, work_measure))
             axis.set_ylabel(_metric_ylabel(metric))
@@ -2988,9 +2995,7 @@ def plot_work_cmp_with_rl(
 
         plotted_x_values = [float(point["x_value"]) for point in valid_points] + [float(rl_x_value)]
         set_tight_log_x_limits(axis, plotted_x_values, padding_fraction=work_x_padding)
-        axis.xaxis.set_major_locator(LogLocator(base=10.0))
-        axis.xaxis.set_minor_locator(LogLocator(base=10.0, subs=tuple(range(2, 10))))
-        axis.xaxis.set_minor_formatter(NullFormatter())
+        _apply_log_x_axis_ticks(axis)
 
         axis.set_xlabel(_work_xlabel_for_measure(work_x, work_measure))
         axis.set_ylabel("Reward")
@@ -3510,9 +3515,7 @@ def _plot_time_cmp_variant(
 
         if not time_linear:
             set_tight_log_x_limits(axis, [float(p["x"]) for p in points], padding_fraction=0.06)
-            axis.xaxis.set_major_locator(LogLocator(base=10.0))
-            axis.xaxis.set_minor_locator(LogLocator(base=10.0, subs=tuple(range(2, 10))))
-            axis.xaxis.set_minor_formatter(NullFormatter())
+            _apply_log_x_axis_ticks(axis)
 
         axis.set_xlabel(x_label)
         axis.set_ylabel(_metric_ylabel(metric))
