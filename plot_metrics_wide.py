@@ -345,12 +345,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rl-eval-dirs",
         nargs="+",
+        action="append",
         type=Path,
         default=None,
         help=(
             "One or more evaluation_<date>_<time> directories (RL saved-model evaluation runs) to overlay "
             "on --time plots (resolver/proposer combination plots, decision-phase breakdowns, and rew_time_cmp). "
-            "Each directory is expected to contain --rl-quality-file and (optionally) --rl-timing-file."
+            "Each directory is expected to contain --rl-quality-file and (optionally) --rl-timing-file. "
+            "Repeat this flag to overlay several RL runs at once (e.g. the same proposer trained/evaluated "
+            "with different resolvers); each occurrence is reduced independently per --rl-mode and its resolver "
+            "is auto-detected from its own timing data, so multiple runs never collide even under one --eval-proposer label."
         ),
     )
     parser.add_argument(
@@ -2046,17 +2050,19 @@ def _resolver_from_rl_timing_rows(timing_rows: list[dict[str, object]], fallback
     return fallback
 
 
-def load_rl_time_overlay(args: argparse.Namespace) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Build synthetic quality rows + raw timing rows representing RL saved-model evaluation run(s).
-
-    Returned rows use the same column conventions as metrics_wide.csv rows / timing_summary.csv rows, so
-    callers can simply concatenate them onto the normal quality/timing row lists before the rest of the
-    --time pipeline runs; every per-combination plot then includes the RL point automatically.
-    """
-    eval_dirs = list(args.rl_eval_dirs or [])
-    if not eval_dirs:
-        return [], []
-
+def _load_rl_overlay_group(
+    eval_dirs: list[Path],
+    *,
+    args: argparse.Namespace,
+    base_label: str,
+    scenario: str,
+    route_construction: str,
+    protocol: str,
+    group_episode_offset: int,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Reduce ONE group of --rl-eval-dirs (one RL run, possibly swept over checkpoints) into
+    quality/timing rows per --rl-mode. A "group" always shares one resolver/label; multiple groups
+    (e.g. one per differently-trained resolver) are combined by load_rl_time_overlay."""
     quality_window = int(args.rl_quality_window)
     runs = [
         _load_rl_run(
@@ -2067,11 +2073,6 @@ def load_rl_time_overlay(args: argparse.Namespace) -> tuple[list[dict[str, objec
         )
         for eval_dir in eval_dirs
     ]
-
-    scenario = str(args.eval_scenario)
-    route_construction = str(args.eval_route_construction)
-    protocol = str(args.eval_protocol)
-    base_label = f"{RL_POLICY_PREFIX}{args.eval_proposer}"
 
     quality_rows: list[dict[str, object]] = []
     timing_rows: list[dict[str, object]] = []
@@ -2099,6 +2100,7 @@ def load_rl_time_overlay(args: argparse.Namespace) -> tuple[list[dict[str, objec
                     route_construction=route_construction,
                     protocol=protocol,
                     scenario=scenario,
+                    episode_offset=group_episode_offset,
                 )
             )
         return quality_rows, timing_rows
@@ -2125,6 +2127,7 @@ def load_rl_time_overlay(args: argparse.Namespace) -> tuple[list[dict[str, objec
                 route_construction=route_construction,
                 protocol=protocol,
                 scenario=scenario,
+                episode_offset=group_episode_offset,
             )
         )
         return quality_rows, timing_rows
@@ -2176,9 +2179,50 @@ def load_rl_time_overlay(args: argparse.Namespace) -> tuple[list[dict[str, objec
                 scenario=scenario,
                 # All pooled runs share the same label, so episodes must be offset per run to
                 # avoid colliding (seed, episode) keys across otherwise-identical run structures.
-                episode_offset=run_index * 1_000_000,
+                episode_offset=group_episode_offset + run_index * 1_000_000,
             )
         )
+    return quality_rows, timing_rows
+
+
+def load_rl_time_overlay(args: argparse.Namespace) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Build synthetic quality rows + raw timing rows representing RL saved-model evaluation run(s).
+
+    Returned rows use the same column conventions as metrics_wide.csv rows / timing_summary.csv rows, so
+    callers can simply concatenate them onto the normal quality/timing row lists before the rest of the
+    --time pipeline runs; every per-combination plot then includes the RL point automatically.
+
+    --rl-eval-dirs may be repeated to overlay SEVERAL RL runs (e.g. the same proposer trained/evaluated
+    against different resolvers) at once: each occurrence is its own group, reduced independently per
+    --rl-mode, and each group's resolver is auto-detected from its own timing data so groups never
+    collide even though they share the same --eval-proposer label.
+    """
+    groups = [list(group) for group in (args.rl_eval_dirs or []) if group]
+    if not groups:
+        return [], []
+
+    scenario = str(args.eval_scenario)
+    route_construction = str(args.eval_route_construction)
+    protocol = str(args.eval_protocol)
+    multi_group = len(groups) > 1
+
+    quality_rows: list[dict[str, object]] = []
+    timing_rows: list[dict[str, object]] = []
+    for group_index, eval_dirs in enumerate(groups):
+        label_suffix = f"_g{group_index + 1}" if multi_group else ""
+        base_label = f"{RL_POLICY_PREFIX}{args.eval_proposer}{label_suffix}"
+        group_quality_rows, group_timing_rows = _load_rl_overlay_group(
+            eval_dirs,
+            args=args,
+            base_label=base_label,
+            scenario=scenario,
+            route_construction=route_construction,
+            protocol=protocol,
+            # Groups' episode numbering must never collide even under "best"/"mean" modes.
+            group_episode_offset=group_index * 100_000_000,
+        )
+        quality_rows.extend(group_quality_rows)
+        timing_rows.extend(group_timing_rows)
     return quality_rows, timing_rows
 
 
